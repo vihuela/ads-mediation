@@ -4,14 +4,14 @@
 宿主可以选择直连 AdMob GMA Next-Gen、TopOn 海外版，或者同时初始化两者并按缓存广告的
 单次展示收益进行端内缓存竞价。
 
-当前稳定版本：`1.0.1`
+当前稳定版本：`1.0.2`
 
 [![打开 AI 接入提示词](https://img.shields.io/badge/AI-%E6%89%93%E5%BC%80%E5%B9%B6%E5%A4%8D%E5%88%B6%E6%8E%A5%E5%85%A5%E6%8F%90%E7%A4%BA%E8%AF%8D-2ea44f)](#10-复制给-ai完整接入提示词)
 
 依赖坐标：
 
 ```kotlin
-implementation("com.cashcraft:ads-mediation:1.0.1")
+implementation("com.cashcraft:ads-mediation:1.0.2")
 ```
 
 ## 1. 接入依赖
@@ -86,7 +86,7 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.cashcraft:ads-mediation:1.0.1")
+    implementation("com.cashcraft:ads-mediation:1.0.2")
 }
 ```
 
@@ -524,8 +524,11 @@ revenueListener = AdRevenueListener { payload ->
 5. 两边都没有缓存时，产生 `ad_bid_result(result=no_candidate)` 和
    `ad_show_fail(reason=no_preloaded_ad)`。
 
-TopOn 优先读取 `publisherRevenue`，缺失时使用 `ecpm / 1000`。AdMob 通过版本化反射路径读取
-GMA Next-Gen 预加载队列头部的 `AdValue.valueMicros`，只读取、不消费广告。
+TopOn 通过 `checkAdStatus().getTUTopAdInfo()` 读取当前最高优先级缓存广告，优先使用
+`getPublisherRevenue(USD)`；缺失时使用 `getEcpm(USD) / 1000`。这可以保证和 AdMob 使用同一种
+货币、同一种单次展示收益口径，并让询价对象与 TopOn 随后 `show()` 选择的广告保持一致。询价
+只读取缓存元数据，不会清理或消费 TopOn 广告。AdMob 通过版本化反射路径读取 GMA Next-Gen
+预加载队列头部的 `AdValue.valueMicros`，同样只读取、不消费广告。
 
 自动竞价开屏会在进入前台后最多等待 7 秒，直到 Activity window 可用且至少有一个缓存；超时或
 退到后台都会用 `ad_bid_result + ad_show_fail` 收口，不会留下只有 `ad_position` 的会话。
@@ -562,7 +565,7 @@ GMA Next-Gen 同时打包。
 
 ```shell
 ./gradlew clean testDebugUnitTest lintDebug :r8-smoke-app:assembleRelease publishToMavenLocal \
-  -PVERSION_NAME=1.0.1
+  -PVERSION_NAME=1.0.2
 ```
 
 R8 smoke app 会让 AdMob、TopOn 和竞价路径都保持可达，然后构建开启压缩和资源收缩的 Release
@@ -572,7 +575,7 @@ GitHub Actions 中的 `CI` 和 `Publish GitHub Package` 都只支持在 Actions 
 push、PR 或 tag 自动运行。
 
 本地或手动发布 CI 都会先读取 GitHub Packages 的 `maven-metadata.xml`，找到最高的稳定
-`major.minor.patch` 版本并自动递增 patch。当前为 `1.0.1` 时，下一次会发布 `1.0.2`。
+`major.minor.patch` 版本并自动递增 patch。当前为 `1.0.2` 时，下一次会发布 `1.0.3`。
 
 查看下一版本但不发布：
 
@@ -603,7 +606,7 @@ GitHub Package 版本不可覆盖；脚本默认自动递增可避免重复版�
 请在当前 Android 工程中完整接入 Ads Mediation SDK，并直接修改、编译和验证项目。
 
 固定信息：
-- Maven 坐标：com.cashcraft:ads-mediation:1.0.1
+- Maven 坐标：com.cashcraft:ads-mediation:1.0.2
 - GitHub Packages 仓库：https://maven.pkg.github.com/vihuela/ads-mediation
 - 公共包名：com.cashcraft.ads.mediation
 - 支持 APP_OPEN、INTERSTITIAL、REWARDED
@@ -615,7 +618,7 @@ GitHub Package 版本不可覆盖；脚本默认自动递增可避免重复版�
 1. 检查 settings.gradle.kts，在 dependencyResolutionManagement 中加入 GitHub Packages、
    Pangle、Mintegral 和 TopOn 仓库。GitHub 用户名/token 优先从 Gradle property 或环境变量读取，
    本地再从已被 Git 忽略的 local.properties 读取；绝对不能把 token 写进可提交文件。
-2. 在 App 模块加入 implementation("com.cashcraft:ads-mediation:1.0.1")。
+2. 在 App 模块加入 implementation("com.cashcraft:ads-mediation:1.0.2")。
 3. 为每个 product flavor 设置 manifestPlaceholders["admobApplicationId"]。不要使用生产 ID
    进行测试；开发环境可使用 AdMobIds.TEST 对应的官方测试 App ID。
 4. 检查现有配置来源，选择 AdMob、TopOn 或 Bidding。不要把 App ID、App Key、ad unit ID、

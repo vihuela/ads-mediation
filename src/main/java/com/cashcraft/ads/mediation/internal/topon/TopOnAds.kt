@@ -22,6 +22,7 @@ import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdLoadSession
 import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.thinkup.core.api.AdError
+import com.thinkup.core.api.TUAdConst
 import com.thinkup.core.api.TUAdInfo
 import com.thinkup.core.api.TUNetworkConfig
 import com.thinkup.core.api.TUSDK
@@ -214,14 +215,19 @@ internal object TopOnAds {
 
     fun bidPrice(format: AdFormat): Double? {
         if (!isReady(format)) return null
+        // Price the same highest-priority cache entry that TopOn is expected to consume on show().
+        // checkValidAdCaches().firstOrNull() is only the first item in the cache snapshot and is
+        // not documented as the next ad selected by TopOn when multiple ads are cached.
         val info = when (format) {
-            AdFormat.APP_OPEN -> appOpenAd.checkValidAdCaches().firstOrNull()
-            AdFormat.INTERSTITIAL -> interstitialAd.checkValidAdCaches().firstOrNull()
-            AdFormat.REWARDED -> rewardedAd.checkValidAdCaches().firstOrNull()
+            AdFormat.APP_OPEN -> appOpenAd.checkAdStatus().getTUTopAdInfo()
+            AdFormat.INTERSTITIAL -> interstitialAd.checkAdStatus().getTUTopAdInfo()
+            AdFormat.REWARDED -> rewardedAd.checkAdStatus().getTUTopAdInfo()
         } ?: return null
-        return info.publisherRevenue
+        return info.getPublisherRevenue(TUAdConst.CURRENCY.USD)
             ?.takeIf { it.isFinite() && it >= 0.0 }
-            ?: info.ecpm?.div(1_000.0)?.takeIf { it.isFinite() && it >= 0.0 }
+            ?: info.getEcpm(TUAdConst.CURRENCY.USD)
+                .div(1_000.0)
+                .takeIf { it.isFinite() && it >= 0.0 }
     }
 
     fun showAppOpen(
