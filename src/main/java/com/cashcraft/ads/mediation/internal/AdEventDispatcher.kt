@@ -202,9 +202,19 @@ internal class AdShowSession(
         }
     }
 
-    fun showFailure(reason: String, errorCode: String? = null) {
+    fun showFailure(reason: String, errorCode: String? = null, cause: Throwable? = null) {
         if (terminal.compareAndSet(false, true)) {
             emit(AdEventName.SHOW_FAIL, reason = reason, errorCode = errorCode)
+            cause?.let { error ->
+                logger?.showFailureException(
+                    format = format,
+                    position = position,
+                    sessionId = sessionId,
+                    reason = reason,
+                    errorCode = errorCode,
+                    error = error,
+                )
+            }
         }
     }
 

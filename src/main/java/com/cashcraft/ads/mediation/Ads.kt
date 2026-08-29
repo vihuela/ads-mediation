@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.ViewGroup
 import com.cashcraft.ads.mediation.admob.AdMobAds
 import com.cashcraft.ads.mediation.admob.AdMobConfig
 import com.cashcraft.ads.mediation.admob.AdMobState
@@ -269,6 +270,21 @@ object Ads {
         activity: Activity,
         position: String = "manual",
         onResult: (AdShowResult) -> Unit = {},
+    ) = showAppOpenInternal(activity, null, position, onResult)
+
+    /** Uses a host-owned container for providers, such as TopOn, that render splash ads into a view. */
+    fun showAppOpen(
+        activity: Activity,
+        hostContainer: ViewGroup,
+        position: String = "manual",
+        onResult: (AdShowResult) -> Unit = {},
+    ) = showAppOpenInternal(activity, hostContainer, position, onResult)
+
+    private fun showAppOpenInternal(
+        activity: Activity,
+        hostContainer: ViewGroup?,
+        position: String,
+        onResult: (AdShowResult) -> Unit,
     ) = onMain {
         val failure = commonShowFailure()
         if (failure != null) {
@@ -277,12 +293,18 @@ object Ads {
         }
         when (config.provider) {
             is AdMobProviderConfig -> AdMobAds.showAppOpen(activity, position, onResult)
-            is TopOnProviderConfig -> TopOnAds.showAppOpen(activity, position, onResult)
+            is TopOnProviderConfig -> TopOnAds.showAppOpen(
+                activity = activity,
+                position = position,
+                onResult = onResult,
+                hostContainer = hostContainer,
+            )
             is BiddingProviderConfig -> bidAndShow(
                 format = AdFormat.APP_OPEN,
                 activity = activity,
                 position = position,
                 onResult = onResult,
+                appOpenHostContainer = hostContainer,
             )
         }
     }
@@ -341,6 +363,7 @@ object Ads {
         activity: Activity,
         position: String,
         onResult: (AdShowResult) -> Unit,
+        appOpenHostContainer: ViewGroup? = null,
     ) {
         if (!biddingShowInProgress.compareAndSet(false, true)) {
             failShow(format, position, "another_full_screen_ad_showing", onResult)
@@ -382,6 +405,7 @@ object Ads {
                         position,
                         onSessionStarted,
                         callback,
+                        appOpenHostContainer,
                     )
                     AdFormat.INTERSTITIAL -> TopOnAds.showBiddingInterstitial(
                         activity,

@@ -228,11 +228,12 @@ internal object TopOnAds {
         activity: Activity,
         position: String,
         onResult: (AdShowResult) -> Unit,
+        hostContainer: ViewGroup? = null,
     ) = onMain {
         if (!::config.isInitialized) {
             onResult(AdShowResult.Failed("sdk_not_initialized"))
         } else {
-            showAppOpenOnMain(activity, position, onResult)
+            showAppOpenOnMain(activity, position, onResult, hostContainer = hostContainer)
         }
     }
 
@@ -270,10 +271,11 @@ internal object TopOnAds {
         position: String,
         onSessionStarted: (AdShowSession) -> Unit,
         onResult: (AdShowResult) -> Unit,
+        hostContainer: ViewGroup? = null,
     ) = onMain {
         val session = beginBiddingSession(AdFormat.APP_OPEN, position)
         onSessionStarted(session)
-        showAppOpenOnMain(activity, position, onResult, session)
+        showAppOpenOnMain(activity, position, onResult, session, hostContainer)
     }
 
     internal fun showBiddingInterstitial(
@@ -492,11 +494,54 @@ internal object TopOnAds {
             position,
             config.ids.appOpenPlacementId,
         ),
+        hostContainer: ViewGroup? = null,
     ) {
         if (!canShow(activity, session, onResult = onResult)) return
         if (!appOpenAd.isAdReady) {
             failBeforeShow(session, NO_AD_AVAILABLE, onResult)
             loadAppOpen()
+            return
+        }
+        val hostResult = runCatching {
+            hostContainer
+                ?: activity.findViewById<ViewGroup?>(android.R.id.content)
+                ?: (activity.window?.decorView as? ViewGroup)
+        }
+        val host = hostResult.getOrElse { error ->
+            failBeforeShow(
+                session = session,
+                reason = APP_OPEN_CONTAINER_RESOLUTION_FAILED,
+                onResult = onResult,
+                errorCode = error.javaClass.simpleName,
+                cause = error,
+            )
+            return
+        }
+        if (host == null) {
+            failBeforeShow(
+                session = session,
+                reason = APP_OPEN_CONTAINER_UNAVAILABLE,
+                onResult = onResult,
+                errorCode = "container_not_found",
+            )
+            return
+        }
+        if (!host.isAttachedToWindow) {
+            failBeforeShow(
+                session = session,
+                reason = APP_OPEN_CONTAINER_UNAVAILABLE,
+                onResult = onResult,
+                errorCode = "container_not_attached",
+            )
+            return
+        }
+        if (!host.isShown) {
+            failBeforeShow(
+                session = session,
+                reason = APP_OPEN_CONTAINER_UNAVAILABLE,
+                onResult = onResult,
+                errorCode = "container_not_visible",
+            )
             return
         }
         val container = FrameLayout(activity).apply {
@@ -505,12 +550,21 @@ internal object TopOnAds {
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
         }
-        val content = activity.findViewById<ViewGroup>(android.R.id.content)
-        content.addView(container)
+        val attachError = runCatching { host.addView(container) }.exceptionOrNull()
+        if (attachError != null) {
+            failBeforeShow(
+                session = session,
+                reason = APP_OPEN_CONTAINER_ATTACH_FAILED,
+                onResult = onResult,
+                errorCode = attachError.javaClass.simpleName,
+                cause = attachError,
+            )
+            return
+        }
         splashContainer = container
         activeAppOpen = ActiveShow(session, onResult)
         runCatching { appOpenAd.show(activity, container) }.onFailure { error ->
-            finishAppOpenFailed(error.message ?: "show_exception", "exception")
+            finishAppOpenFailed("show_exception", error.javaClass.simpleName, error)
         }
         mainHandler.postDelayed(
             {
@@ -592,9 +646,11 @@ internal object TopOnAds {
         session: AdShowSession,
         reason: String,
         onResult: (AdShowResult) -> Unit,
+        errorCode: String? = null,
+        cause: Throwable? = null,
     ) {
         fullScreenShowing.set(false)
-        session.showFailure(reason)
+        session.showFailure(reason, errorCode, cause)
         runCatching { onResult(AdShowResult.Failed(reason)) }
     }
 
@@ -655,11 +711,11 @@ internal object TopOnAds {
         loadAppOpen()
     }
 
-    private fun finishAppOpenFailed(reason: String, errorCode: String?) {
+    private fun finishAppOpenFailed(reason: String, errorCode: String?, cause: Throwable? = null) {
         val active = activeAppOpen ?: return
         activeAppOpen = null
         removeSplashContainer()
-        finishFailed(active, reason, errorCode)
+        finishFailed(active, reason, errorCode, cause)
         loadAppOpen()
     }
 
@@ -678,8 +734,13 @@ internal object TopOnAds {
             AdShowResult.Failed("dismissed_before_impression")
         }
 
-    private fun finishFailed(active: ActiveShow, reason: String, errorCode: String?) {
-        active.session.showFailure(reason, errorCode)
+    private fun finishFailed(
+        active: ActiveShow,
+        reason: String,
+        errorCode: String?,
+        cause: Throwable? = null,
+    ) {
+        active.session.showFailure(reason, errorCode, cause)
         fullScreenShowing.set(false)
         runCatching { active.onResult(AdShowResult.Failed(reason)) }
     }
@@ -856,6 +917,9 @@ internal object TopOnAds {
     private val MICROS_PER_UNIT = BigDecimal("1000000")
     private const val TOPON_BUFFER_SIZE = 1
     private const val NO_AD_AVAILABLE = "no_preloaded_ad"
+    private const val APP_OPEN_CONTAINER_UNAVAILABLE = "app_open_container_unavailable"
+    private const val APP_OPEN_CONTAINER_RESOLUTION_FAILED = "app_open_container_resolution_failed"
+    private const val APP_OPEN_CONTAINER_ATTACH_FAILED = "app_open_container_attach_failed"
     private const val APP_BACKGROUND_CHECK_DELAY_MILLIS = 100L
     private const val APP_OPEN_WINDOW_MILLIS = 7_000L
     private const val APP_OPEN_CHECK_INTERVAL_MILLIS = 100L

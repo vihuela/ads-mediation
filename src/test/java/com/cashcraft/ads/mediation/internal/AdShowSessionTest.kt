@@ -83,6 +83,29 @@ class AdShowSessionTest {
     }
 
     @Test
+    fun `app open container error reports one show failure with stable details`() {
+        val events = mutableListOf<AdEvent>()
+        val session = session(
+            events = events,
+            platform = AdPlatform.TOPON,
+            mediationMode = AdMediationMode.BIDDING,
+            format = AdFormat.APP_OPEN,
+            position = "launcher_minus_one",
+        )
+
+        session.showFailure("app_open_container_unavailable", "container_not_found")
+        session.showFailure("duplicate")
+
+        assertEquals(
+            listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL),
+            events.map(AdEvent::name),
+        )
+        assertEquals("launcher_minus_one_app_open", events.last().position)
+        assertEquals("app_open_container_unavailable", events.last().reason)
+        assertEquals("container_not_found", events.last().errorCode)
+    }
+
+    @Test
     fun `bid result follows position and shares its session`() {
         val events = mutableListOf<AdEvent>()
         val session = session(events, mediationMode = AdMediationMode.BIDDING)
@@ -239,12 +262,14 @@ class AdShowSessionTest {
         events: MutableList<AdEvent>,
         platform: AdPlatform = AdPlatform.ADMOB,
         mediationMode: AdMediationMode = AdMediationMode.ADMOB,
+        format: AdFormat = AdFormat.REWARDED,
+        position: String = "game_tool_refresh",
     ) = AdShowSession(
         listener = AdEventListener(events::add),
         platform = platform,
         mediationMode = mediationMode,
-        format = AdFormat.REWARDED,
-        position = "game_tool_refresh_rewarded",
+        format = format,
+        position = position.withAdType(format),
         adUnitId = "test-unit",
         sessionId = "session-1",
         number = 7L,

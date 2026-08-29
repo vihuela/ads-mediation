@@ -4,6 +4,7 @@ import android.util.Log
 import com.cashcraft.ads.mediation.AdConsentSnapshot
 import com.cashcraft.ads.mediation.AdEvent
 import com.cashcraft.ads.mediation.AdEventName
+import com.cashcraft.ads.mediation.AdFormat
 import java.math.BigDecimal
 import java.math.RoundingMode
 
@@ -44,6 +45,29 @@ internal class AdsModuleLogger(
             tag,
             "ad_event_dispatch_failed event=${event.name.analyticsName} " +
                 "session_id=${event.sessionId} reason=${error.message.orEmpty().oneLine()}",
+            error,
+        )
+    }
+
+    fun showFailureException(
+        format: AdFormat,
+        position: String,
+        sessionId: String,
+        reason: String,
+        errorCode: String?,
+        error: Throwable,
+    ) {
+        if (!enabled) return
+        Log.e(
+            tag,
+            buildString {
+                append("ad_show_exception")
+                append(" ad_type=").append(format.analyticsValue)
+                append(" position=").append(position.oneLine())
+                append(" session_id=").append(sessionId)
+                append(" reason=").append(reason.oneLine())
+                errorCode?.let { append(" error_code=").append(it.oneLine()) }
+            },
             error,
         )
     }
