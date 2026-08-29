@@ -1,0 +1,66 @@
+[versions]
+agp = "8.13.1"
+kotlin = "2.2.21"
+adsMobileSdk = "1.2.1"
+ump = "4.0.0"
+toponCore = "6.6.22.3"
+toponAdxAdapter = "6.5.77.1.1"
+toponAdxSdk = "6.5.77"
+toponGmaNextGenAdapter = "1.2.1.1.0"
+toponPangleAdapter = "8.1.0.3.1.0"
+pangleSdk = "8.1.0.3"
+toponFacebookAdapter = "6.22.0.1.0"
+facebookAudienceNetwork = "6.22.0"
+toponMintegralAdapter = "17.1.71.1.0"
+mintegralSdk = "17.1.71"
+toponTramini = "6.6.22.3"
+toponAndroidxBrowser = "1.4.0"
+toponAndroidxAnnotation = "1.0.0"
+toponMedia3 = "1.4.1"
+toponRetrofitKotlinxConverter = "1.0.0"
+toponOkhttpLogging = "4.11.0"
+toponRetrofit = "2.9.0"
+playServicesAdsIdentifier = "18.3.0"
+androidxAppcompat = "1.7.1"
+androidxCore = "1.17.0"
+androidxRecyclerview = "1.4.0"
+kotlinxCoroutines = "1.10.1"
+kotlinxSerialization = "1.9.0"
+okhttp = "4.12.0"
+junit = "4.13.2"
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+
+[libraries]
+ads-mobile-sdk = { group = "com.google.android.libraries.ads.mobile.sdk", name = "ads-mobile-sdk", version.ref = "adsMobileSdk" }
+user-messaging-platform = { group = "com.google.android.ump", name = "user-messaging-platform", version.ref = "ump" }
+topon-core = { group = "com.thinkup.sdk", name = "core-tpn", version.ref = "toponCore" }
+topon-adx-adapter = { group = "com.thinkup.sdk", name = "adapter-tpn-sdm", version.ref = "toponAdxAdapter" }
+topon-adx-sdk = { group = "com.smartdigimkttech.sdk", name = "smartdigimkttech-sdk", version.ref = "toponAdxSdk" }
+topon-gma-nextgen-adapter = { group = "com.thinkup.sdk", name = "adapter-tpn-gma-next-gen", version.ref = "toponGmaNextGenAdapter" }
+topon-pangle-adapter = { group = "com.thinkup.sdk", name = "adapter-tpn-pangle", version.ref = "toponPangleAdapter" }
+pangle-sdk = { group = "com.pangle.global", name = "pag-sdk", version.ref = "pangleSdk" }
+topon-facebook-adapter = { group = "com.thinkup.sdk", name = "adapter-tpn-facebook", version.ref = "toponFacebookAdapter" }
+facebook-audience-network = { group = "com.facebook.android", name = "audience-network-sdk", version.ref = "facebookAudienceNetwork" }
+topon-mintegral-adapter = { group = "com.thinkup.sdk", name = "adapter-tpn-mintegral", version.ref = "toponMintegralAdapter" }
+mintegral-sdk = { group = "com.mbridge.msdk.oversea", name = "mbridge_android_sdk", version.ref = "mintegralSdk" }
+topon-tramini = { group = "com.thinkup.sdk", name = "tramini-plugin-tpn", version.ref = "toponTramini" }
+topon-androidx-browser = { group = "androidx.browser", name = "browser", version.ref = "toponAndroidxBrowser" }
+topon-androidx-annotation = { group = "androidx.annotation", name = "annotation", version.ref = "toponAndroidxAnnotation" }
+topon-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "toponMedia3" }
+topon-media3-ui = { group = "androidx.media3", name = "media3-ui", version.ref = "toponMedia3" }
+topon-retrofit-kotlinx-converter = { group = "com.jakewharton.retrofit", name = "retrofit2-kotlinx-serialization-converter", version.ref = "toponRetrofitKotlinxConverter" }
+topon-okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "toponOkhttpLogging" }
+topon-retrofit-core = { group = "com.squareup.retrofit2", name = "retrofit", version.ref = "toponRetrofit" }
+topon-retrofit-scalars = { group = "com.squareup.retrofit2", name = "converter-scalars", version.ref = "toponRetrofit" }
+play-services-ads-identifier = { group = "com.google.android.gms", name = "play-services-ads-identifier", version.ref = "playServicesAdsIdentifier" }
+androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "androidxAppcompat" }
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "androidxCore" }
+androidx-recyclerview = { group = "androidx.recyclerview", name = "recyclerview", version.ref = "androidxRecyclerview" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }

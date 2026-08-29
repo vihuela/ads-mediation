@@ -1,0 +1,30 @@
+{
+  "versions": {
+    "1.2.1": {
+      "preloading": {
+        "enabledAdTypes": ["APP_OPEN", "INTERSTITIAL", "REWARDED"],
+        "sdkRoot": {
+          "className": "ads_mobile_sdk.gt0",
+          "method": "a",
+          "providerField": "P0",
+          "providerGetMethod": "get"
+        },
+        "formatMapFields": {
+          "APP_OPEN": "y",
+          "INTERSTITIAL": "A",
+          "REWARDED": "C"
+        },
+        "queuePath": {
+          "managerQueueField": "B",
+          "queueItemResultField": "a",
+          "preloadResultAdField": "a",
+          "internalAdConfigurationMethod": "b",
+          "configurationPriceField": "m"
+        },
+        "priceFields": {
+          "valueMicros": "b"
+        }
+      }
+    }
+  }
+}
