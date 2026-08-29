@@ -202,5 +202,14 @@ should use `com.cashcraft.ads.mediation.Ads`.
 
 `./gradlew testDebugUnitTest lintDebug :r8-smoke-app:assembleRelease publishToMavenLocal` runs unit
 tests and lint, builds a minified smoke app that exercises both provider paths, and verifies the
-published Maven artifacts locally. Tags matching `v*` publish the corresponding release version
-through `.github/workflows/publish.yml`.
+published Maven artifacts locally.
+
+To publish directly from a developer machine, put `github.packages.username` and
+`github.packages.token` in the ignored `local.properties`, then run:
+
+```shell
+./gradlew publishReleasePublicationToGitHubPackagesRepository -PVERSION_NAME=1.0.1
+```
+
+GitHub Package versions are immutable, so every publish must use a new version. Tags matching `v*`
+publish the corresponding release version through `.github/workflows/publish.yml`.
