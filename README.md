@@ -2,7 +2,7 @@
 
 这是一个 Android 全屏广告聚合 SDK，通过统一 API 支持开屏广告、插屏广告和激励广告。
 宿主可以选择直连 AdMob GMA Next-Gen、TopOn 海外版，或者同时初始化两者并按缓存广告的
-单次展示收益进行本地竞价。
+单次展示收益进行端内缓存竞价。
 
 当前稳定版本：`1.0.0`
 
@@ -199,7 +199,7 @@ SDK 崩溃；展示回调会返回 `Failed("sdk_initialization_failed")`。如�
 
 | 参数 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `provider` | `AdProviderConfig` | 必填 | 选择 AdMob、TopOn 或本地竞价模式 |
+| `provider` | `AdProviderConfig` | 必填 | 选择 AdMob、TopOn 或端内缓存竞价模式；竞价参数见下方 `BiddingProviderConfig` |
 | `umpConsent` | `UmpConsentConfig` | 根据 provider 推导 | 所有 provider 共用的 UMP 请求门禁，必须先允许请求广告才初始化平台 |
 | `eventListener` | `AdEventListener` | 空实现 | 接收加载、展示、竞价、点击、收益等稳定事件 |
 | `revenueListener` | `AdRevenueListener` | 空实现 | 接收 AdMob/TopOn 原生展示级收益对象，专门用于 Tenjin 等 ILRD 接口 |
@@ -245,14 +245,66 @@ val provider = TopOnProviderConfig(
 )
 ```
 
-本地竞价：
+端内缓存竞价：
 
 ```kotlin
 val provider = BiddingProviderConfig(
-    admob = AdMobProviderConfig(ids = admobIds),
-    topon = TopOnProviderConfig(ids = topOnIds),
+    admob = AdMobProviderConfig(
+        ids = AdMobIds(
+            applicationId = "AdMob App ID",
+            appOpenId = "AdMob App Open Ad Unit ID",
+            interstitialId = "AdMob Interstitial Ad Unit ID",
+            rewardedId = "AdMob Rewarded Ad Unit ID",
+        ),
+        preload = AdMobPreloadConfig(
+            appOpen = 2,
+            interstitial = 2,
+            rewarded = 2,
+        ),
+    ),
+    topon = TopOnProviderConfig(
+        ids = TopOnIds(
+            applicationId = "TopOn App ID",
+            applicationKey = "TopOn App Key",
+            appOpenPlacementId = "TopOn Splash Placement ID",
+            interstitialPlacementId = "TopOn Interstitial Placement ID",
+            rewardedPlacementId = "TopOn Rewarded Placement ID",
+        ),
+    ),
 )
 ```
+
+`BiddingProviderConfig` 入参：
+
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `admob` | `AdMobProviderConfig` | 必填 | AdMob App ID、三种 ad unit ID，以及三种格式各自的预加载缓存数量 |
+| `topon` | `TopOnProviderConfig` | 必填 | TopOn App ID、App Key，以及三种格式各自的 placement ID |
+
+竞价模式没有额外的价格系数、底价或手动超时参数。价格统一换算为 USD 单次展示收益，候选选择
+规则由 SDK 固定实现。UMP、事件回调、收益回调、日志、自动开屏开关和自动开屏 `position` 仍然
+配置在外层 `AdsConfig`：
+
+```kotlin
+AdsConfig(
+    provider = provider,
+    umpConsent = UmpConsentConfig(
+        enabled = true,
+        tagForUnderAgeOfConsent = false,
+    ),
+    eventListener = eventListener,
+    revenueListener = revenueListener,
+    loggingEnabled = BuildConfig.DEBUG,
+    logTag = "AdsMediation",
+    autoShowAppOpen = true,
+    appOpenPosition = "app_foreground",
+)
+```
+
+其中 `admob.preload` 只控制 AdMob GMA Next-Gen 的持续缓存数量。TopOn 的加载和缓存策略由
+TopOn SDK 管理，目前没有在 `BiddingProviderConfig` 暴露缓存数量。手动插屏和激励展示不会等待
+新广告加载，只比较调用瞬间已经缓存的候选；自动开屏最多等待 7 秒，这个时长当前也不是公开
+配置项。
 
 ## 3. 展示广告
 
@@ -448,7 +500,7 @@ revenueListener = AdRevenueListener { payload ->
 
 ## 7. 竞价逻辑和兼容范围
 
-竞价模式会同时预加载 AdMob 和 TopOn 的同种广告。每次手动展示只比较调用当下已缓存的候选，
+端内缓存竞价模式会同时预加载 AdMob 和 TopOn 的同种广告。每次手动展示只比较调用当下已缓存的候选，
 不会为了等待网络加载而阻塞业务：
 
 1. 只有一个平台有缓存时，直接选择该平台，即使价格为零。
