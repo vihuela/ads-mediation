@@ -2,10 +2,8 @@ package com.cashcraft.ads.mediation
 
 import android.app.Activity
 import android.app.Application
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.view.ViewGroup
 import com.cashcraft.ads.mediation.admob.AdMobAds
 import com.cashcraft.ads.mediation.admob.AdMobConfig
@@ -13,12 +11,13 @@ import com.cashcraft.ads.mediation.admob.AdMobState
 import com.cashcraft.ads.mediation.internal.AdBiddingCoordinator
 import com.cashcraft.ads.mediation.internal.AdBidEventData
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
+import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.AdShowSession
+import com.cashcraft.ads.mediation.internal.AutoAppOpenController
 import com.cashcraft.ads.mediation.internal.BidDecision
 import com.cashcraft.ads.mediation.internal.UmpConsentManager
 import com.cashcraft.ads.mediation.internal.topon.TopOnAds
 import com.cashcraft.ads.mediation.internal.topon.TopOnState
-import java.lang.ref.WeakReference
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -46,48 +45,14 @@ object Ads {
     private lateinit var config: AdsConfig
     private lateinit var facadeEvents: AdEventDispatcher
     private lateinit var umpConsentManager: UmpConsentManager
-    private var currentActivity = WeakReference<Activity>(null)
-    private var startedActivityCount = 0
-    private var appInForeground = false
-    private var foregroundStartedAtMillis = 0L
-    private var autoBiddingAppOpenAttempted = false
-    private var autoBiddingAppOpenCheckScheduled = false
+    private lateinit var autoBiddingAppOpenController: AutoAppOpenController<Unit>
     private var admobInitializationResult: Boolean? = null
     private var topOnInitializationResult: Boolean? = null
 
-    private val lifecycleObserver = object : Application.ActivityLifecycleCallbacks {
+    private val lifecycleListener = object : AdLifecycleMonitor.Listener {
         override fun onActivityResumed(activity: Activity) {
-            currentActivity = WeakReference(activity)
             gatherConsentIfNeeded(activity)
-            scheduleAutoBiddingAppOpenCheck()
         }
-
-        override fun onActivityPaused(activity: Activity) {
-            if (currentActivity.get() === activity) currentActivity.clear()
-        }
-
-        override fun onActivityDestroyed(activity: Activity) {
-            if (currentActivity.get() === activity) currentActivity.clear()
-        }
-
-        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
-        override fun onActivityStarted(activity: Activity) {
-            startedActivityCount++
-            if (startedActivityCount == 1) {
-                appInForeground = true
-                foregroundStartedAtMillis = SystemClock.elapsedRealtime()
-                autoBiddingAppOpenAttempted = false
-                scheduleAutoBiddingAppOpenCheck()
-            }
-        }
-        override fun onActivityStopped(activity: Activity) {
-            startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
-            if (startedActivityCount == 0) {
-                appInForeground = false
-                finishAutoBiddingAppOpenOpportunity("app_backgrounded_before_show")
-            }
-        }
-        override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
     }
 
     val platform: AdPlatform?
@@ -151,6 +116,24 @@ object Ads {
                 loggingEnabled = config.loggingEnabled,
                 logTag = config.logTag,
             )
+            autoBiddingAppOpenController = AutoAppOpenController(
+                isEnabled = {
+                    this.config.autoShowAppOpen && this.config.provider is BiddingProviderConfig
+                },
+                isProviderReady = { initializationStage == InitializationStage.COMPLETE },
+                providerFailureReason = { null },
+                isAdAvailable = { isReady(AdFormat.APP_OPEN) },
+                shouldIgnoreActivity = { activity ->
+                    activity.javaClass.name.startsWith("com.google.android.libraries.ads.mobile.sdk.") ||
+                        activity.javaClass.name.startsWith("com.thinkup.")
+                },
+                beginOpportunity = { Unit },
+                show = { activity, _ ->
+                    showAppOpen(activity, this.config.appOpenPosition)
+                },
+                fail = { _, reason -> failAutoBiddingAppOpenOpportunity(reason) },
+                noAdFailureReason = NO_BID_CANDIDATE,
+            )
             initializationListeners += onInitialized
             initializationStage = InitializationStage.WAITING_FOR_UMP
             isFirstInitialization = true
@@ -158,9 +141,10 @@ object Ads {
 
         if (!isFirstInitialization) return
         onMain {
-            application.registerActivityLifecycleCallbacks(lifecycleObserver)
+            AdLifecycleMonitor.addListener(lifecycleListener)
+            AdLifecycleMonitor.install(application)
             if (config.umpConsent.enabled) {
-                currentActivity.get()?.let(::gatherConsentIfNeeded)
+                AdLifecycleMonitor.currentActivity?.let(::gatherConsentIfNeeded)
             } else {
                 startProviderInitialization()
             }
@@ -183,7 +167,8 @@ object Ads {
         if (!umpConsentManager.snapshot.canRequestAds) return
         if (!providerInitializationStarted.compareAndSet(false, true)) return
         initializationStage = InitializationStage.PROVIDER_INITIALIZING
-        val initialActivity = currentActivity.get()?.takeUnless { it.isFinishing || it.isDestroyed }
+        val initialActivity = AdLifecycleMonitor.currentActivity
+            ?.takeUnless { it.isFinishing || it.isDestroyed }
         when (val provider = config.provider) {
             is AdMobProviderConfig -> AdMobAds.initialize(
                 application = application,
@@ -252,10 +237,8 @@ object Ads {
         initializationStage = if (success) InitializationStage.COMPLETE else InitializationStage.FAILED
         initializationListeners.forEach { listener -> runCatching { listener(success) } }
         initializationListeners.clear()
-        if (success && config.provider is BiddingProviderConfig && appInForeground) {
-            foregroundStartedAtMillis = SystemClock.elapsedRealtime()
-            autoBiddingAppOpenAttempted = false
-            scheduleAutoBiddingAppOpenCheck(delayMillis = 0L)
+        if (success && config.provider is BiddingProviderConfig) {
+            autoBiddingAppOpenController.onProviderInitialized()
         }
     }
 
@@ -563,50 +546,7 @@ object Ads {
         }
     }
 
-    private fun scheduleAutoBiddingAppOpenCheck(
-        delayMillis: Long = AUTO_APP_OPEN_CHECK_INTERVAL_MILLIS,
-    ) {
-        if (!::config.isInitialized || config.provider !is BiddingProviderConfig) return
-        if (!config.autoShowAppOpen || initializationStage != InitializationStage.COMPLETE) return
-        if (!appInForeground || autoBiddingAppOpenAttempted || autoBiddingAppOpenCheckScheduled) return
-        autoBiddingAppOpenCheckScheduled = true
-        mainHandler.postDelayed(
-            {
-                autoBiddingAppOpenCheckScheduled = false
-                if (!appInForeground || autoBiddingAppOpenAttempted) return@postDelayed
-                val elapsed = SystemClock.elapsedRealtime() - foregroundStartedAtMillis
-                val activity = currentActivity.get()
-                val activityAvailable = activity != null &&
-                    !activity.isFinishing &&
-                    !activity.isDestroyed
-                when (
-                    decideAutoBiddingAppOpenCheck(
-                        elapsedMillis = elapsed,
-                        activityAvailable = activityAvailable,
-                        hasWindowFocus = activityAvailable && activity.hasWindowFocus(),
-                        adAvailable = isReady(AdFormat.APP_OPEN),
-                    )
-                ) {
-                    AutoBiddingAppOpenCheck.SHOW -> {
-                        autoBiddingAppOpenAttempted = true
-                        showAppOpen(checkNotNull(activity), config.appOpenPosition)
-                    }
-                    AutoBiddingAppOpenCheck.WAIT -> scheduleAutoBiddingAppOpenCheck()
-                    AutoBiddingAppOpenCheck.FAIL_ACTIVITY_UNAVAILABLE ->
-                        finishAutoBiddingAppOpenOpportunity("activity_not_available")
-                    AutoBiddingAppOpenCheck.FAIL_WINDOW_EXPIRED ->
-                        finishAutoBiddingAppOpenOpportunity("app_open_window_expired")
-                }
-            },
-            delayMillis,
-        )
-    }
-
-    private fun finishAutoBiddingAppOpenOpportunity(reason: String) {
-        if (!::config.isInitialized || config.provider !is BiddingProviderConfig) return
-        if (!config.autoShowAppOpen || initializationStage != InitializationStage.COMPLETE) return
-        if (autoBiddingAppOpenAttempted) return
-        autoBiddingAppOpenAttempted = true
+    private fun failAutoBiddingAppOpenOpportunity(reason: String) {
         AdBiddingCoordinator.select(AdFormat.APP_OPEN) { decision ->
             val session = decision.selection?.let { selection ->
                 when (selection.winner) {
@@ -637,29 +577,6 @@ object Ads {
 
     private const val CONSENT_NOT_OBTAINED = "consent_not_obtained"
     private const val NO_BID_CANDIDATE = "no_preloaded_ad"
-    private const val AUTO_APP_OPEN_WINDOW_MILLIS = 7_000L
-    private const val AUTO_APP_OPEN_CHECK_INTERVAL_MILLIS = 100L
-}
-
-internal enum class AutoBiddingAppOpenCheck {
-    WAIT,
-    SHOW,
-    FAIL_ACTIVITY_UNAVAILABLE,
-    FAIL_WINDOW_EXPIRED,
-}
-
-internal fun decideAutoBiddingAppOpenCheck(
-    elapsedMillis: Long,
-    activityAvailable: Boolean,
-    hasWindowFocus: Boolean,
-    adAvailable: Boolean,
-    windowMillis: Long = 7_000L,
-): AutoBiddingAppOpenCheck = when {
-    elapsedMillis > windowMillis && !activityAvailable ->
-        AutoBiddingAppOpenCheck.FAIL_ACTIVITY_UNAVAILABLE
-    elapsedMillis > windowMillis -> AutoBiddingAppOpenCheck.FAIL_WINDOW_EXPIRED
-    activityAvailable && hasWindowFocus && adAvailable -> AutoBiddingAppOpenCheck.SHOW
-    else -> AutoBiddingAppOpenCheck.WAIT
 }
 
 private enum class InitializationStage {

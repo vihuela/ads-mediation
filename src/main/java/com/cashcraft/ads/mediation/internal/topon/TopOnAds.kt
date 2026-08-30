@@ -3,10 +3,8 @@ package com.cashcraft.ads.mediation.internal.topon
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.Application
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import com.cashcraft.ads.mediation.AdEventName
@@ -18,9 +16,13 @@ import com.cashcraft.ads.mediation.AdShowResult
 import com.cashcraft.ads.mediation.AdsConfig
 import com.cashcraft.ads.mediation.TopOnProviderConfig
 import com.cashcraft.ads.mediation.TopOnRevenuePayload
+import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdLoadSession
 import com.cashcraft.ads.mediation.internal.AdShowSession
+import com.cashcraft.ads.mediation.internal.AutoAppOpenController
+import com.cashcraft.ads.mediation.internal.FullScreenShowGate
+import com.cashcraft.ads.mediation.internal.dismissedResult
 import com.thinkup.core.api.AdError
 import com.thinkup.core.api.TUAdConst
 import com.thinkup.core.api.TUAdInfo
@@ -34,11 +36,9 @@ import com.thinkup.rewardvideo.api.TURewardVideoListener
 import com.thinkup.splashad.api.TUSplashAd
 import com.thinkup.splashad.api.TUSplashAdEZListener
 import com.thinkup.splashad.api.TUSplashAdExtraInfo
-import java.lang.ref.WeakReference
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicBoolean
 
 internal enum class TopOnState {
     NOT_INITIALIZED,
@@ -50,7 +50,7 @@ internal enum class TopOnState {
 /** TopOn overseas provider. TopOn owns mediation; this layer owns lifecycle and analytics. */
 internal object TopOnAds {
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val fullScreenShowing = AtomicBoolean(false)
+    private val fullScreenShowGate = FullScreenShowGate()
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
 
     @Volatile
@@ -84,41 +84,10 @@ internal object TopOnAds {
     private var activeRewarded: ActiveRewardedShow? = null
     @SuppressLint("StaticFieldLeak")
     private var splashContainer: FrameLayout? = null
+    private lateinit var autoAppOpenController: AutoAppOpenController<AdShowSession>
 
-    private var currentActivity = WeakReference<Activity>(null)
-    private var startedActivityCount = 0
-    private var appInForeground = false
-    private var foregroundStartedAtMillis = 0L
-    private var autoAppOpenAttempted = false
-    private var autoAppOpenCheckScheduled = false
-    private var pendingAutoAppOpenSession: AdShowSession? = null
-
-    private val lifecycleObserver = object : Application.ActivityLifecycleCallbacks {
-        override fun onActivityResumed(activity: Activity) {
-            currentActivity = WeakReference(activity)
-            if (!appInForeground) onAppEnteredForeground(activity)
-            scheduleAutoShowAppOpenCheck()
-        }
-
-        override fun onActivityPaused(activity: Activity) {
-            if (currentActivity.get() === activity) currentActivity.clear()
-            schedulePausedActivityBackgroundCheck()
-        }
-
-        override fun onActivityStarted(activity: Activity) {
-            startedActivityCount++
-            if (startedActivityCount == 1 && !appInForeground) onAppEnteredForeground(activity)
-        }
-
-        override fun onActivityStopped(activity: Activity) {
-            startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
-            if (startedActivityCount == 0 && appInForeground) onAppEnteredBackground()
-        }
-
-        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
-        override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+    private val lifecycleListener = object : AdLifecycleMonitor.Listener {
         override fun onActivityDestroyed(activity: Activity) {
-            if (currentActivity.get() === activity) currentActivity.clear()
             if (splashContainer?.context === activity) {
                 if (activeAppOpen != null) {
                     finishAppOpenFailed("activity_destroyed", "activity_destroyed")
@@ -172,11 +141,37 @@ internal object TopOnAds {
                 loggingEnabled = commonConfig.loggingEnabled,
                 logTag = commonConfig.logTag,
             )
+            autoAppOpenController = AutoAppOpenController(
+                isEnabled = { this.commonConfig.autoShowAppOpen },
+                isProviderReady = { state == TopOnState.READY },
+                providerFailureReason = {
+                    state.takeUnless { it == TopOnState.READY }?.showFailureReason()
+                },
+                isAdAvailable = { ::appOpenAd.isInitialized && appOpenAd.isAdReady },
+                shouldIgnoreActivity = { it.isTopOnActivity() },
+                beginOpportunity = {
+                    events.begin(
+                        AdFormat.APP_OPEN,
+                        this.commonConfig.appOpenPosition,
+                        this.config.ids.appOpenPlacementId,
+                    )
+                },
+                show = { activity, session ->
+                    showAppOpenOnMain(
+                        activity,
+                        this.commonConfig.appOpenPosition,
+                        {},
+                        session,
+                    )
+                },
+                fail = { session, reason -> session.showFailure(reason) },
+                noAdFailureReason = NO_AD_AVAILABLE,
+            )
+            AdLifecycleMonitor.addListener(lifecycleListener)
         }
 
         onMain {
-            application.registerActivityLifecycleCallbacks(lifecycleObserver)
-            seedLifecycle(initialActivity)
+            AdLifecycleMonitor.install(application, initialActivity)
             TUSDK.setNetworkLogDebug(commonConfig.loggingEnabled)
             runCatching {
                 val networkConfig = TUNetworkConfig.Builder()
@@ -318,12 +313,7 @@ internal object TopOnAds {
         }
         initializationListeners.forEach { listener -> runCatching { listener(success) } }
         initializationListeners.clear()
-        if (success && appInForeground) {
-            foregroundStartedAtMillis = SystemClock.elapsedRealtime()
-            autoAppOpenAttempted = false
-            beginAutoAppOpenOpportunity()
-            scheduleAutoShowAppOpenCheck(delayMillis = 0L)
-        }
+        if (success) autoAppOpenController.onProviderInitialized()
     }
 
     private fun createAds() {
@@ -470,7 +460,7 @@ internal object TopOnAds {
         override fun onAdLoaded() = onMain {
             appOpenLoading = false
             appOpenLoadSession?.loadedFrom(appOpenAd.checkValidAdCaches())
-            scheduleAutoShowAppOpenCheck(delayMillis = 0L)
+            autoAppOpenController.onAdAvailable()
         }
 
         override fun onNoAdError(error: AdError) = onMain {
@@ -634,12 +624,10 @@ internal object TopOnAds {
         session: AdShowSession,
         onResult: (AdShowResult) -> Unit,
     ): Boolean {
-        val reason = when {
-            state != TopOnState.READY -> state.showFailureReason()
-            activity.isFinishing || activity.isDestroyed -> "activity_not_available"
-            !fullScreenShowing.compareAndSet(false, true) -> "another_full_screen_ad_showing"
-            else -> null
-        }
+        val reason = fullScreenShowGate.tryAcquire(
+            activity = activity,
+            providerFailureReason = state.takeUnless { it == TopOnState.READY }?.showFailureReason(),
+        )
         if (reason != null) {
             session.showFailure(reason)
             runCatching { onResult(AdShowResult.Failed(reason)) }
@@ -655,7 +643,7 @@ internal object TopOnAds {
         errorCode: String? = null,
         cause: Throwable? = null,
     ) {
-        fullScreenShowing.set(false)
+        fullScreenShowGate.release()
         session.showFailure(reason, errorCode, cause)
         runCatching { onResult(AdShowResult.Failed(reason)) }
     }
@@ -680,9 +668,9 @@ internal object TopOnAds {
     private fun finishRewardedDismissed() {
         val active = activeRewarded ?: return
         activeRewarded = null
-        val result = dismissedResult(active.session)
+        val result = active.session.dismissedResult()
         active.session.emit(AdEventName.DISMISS)
-        fullScreenShowing.set(false)
+        fullScreenShowGate.release()
         runCatching {
             active.onResult(AdRewardResult(active.rewardEarned, result, active.session.sessionId))
         }
@@ -696,7 +684,7 @@ internal object TopOnAds {
         val active = activeRewarded ?: return
         activeRewarded = null
         active.session.showFailure(reason, errorCode)
-        fullScreenShowing.set(false)
+        fullScreenShowGate.release()
         runCatching {
             active.onResult(
                 AdRewardResult(
@@ -726,19 +714,11 @@ internal object TopOnAds {
     }
 
     private fun finishDismissed(active: ActiveShow) {
-        val result = dismissedResult(active.session)
+        val result = active.session.dismissedResult()
         active.session.emit(AdEventName.DISMISS)
-        fullScreenShowing.set(false)
+        fullScreenShowGate.release()
         runCatching { active.onResult(result) }
     }
-
-    private fun dismissedResult(session: AdShowSession): AdShowResult =
-        if (session.hasTerminalEvent) {
-            AdShowResult.Dismissed
-        } else {
-            session.showFailure("dismissed_before_impression")
-            AdShowResult.Failed("dismissed_before_impression")
-        }
 
     private fun finishFailed(
         active: ActiveShow,
@@ -747,7 +727,7 @@ internal object TopOnAds {
         cause: Throwable? = null,
     ) {
         active.session.showFailure(reason, errorCode, cause)
-        fullScreenShowing.set(false)
+        fullScreenShowGate.release()
         runCatching { active.onResult(AdShowResult.Failed(reason)) }
     }
 
@@ -811,99 +791,8 @@ internal object TopOnAds {
         else -> "error"
     }
 
-    private fun tryAutoShowAppOpen() {
-        if (!commonConfig.autoShowAppOpen) return
-        if (state != TopOnState.READY || !appInForeground || autoAppOpenAttempted) return
-        if (SystemClock.elapsedRealtime() - foregroundStartedAtMillis > APP_OPEN_WINDOW_MILLIS) return
-        val session = pendingAutoAppOpenSession ?: return
-        val activity = currentActivity.get() ?: return
-        if (!activity.hasWindowFocus() || !appOpenAd.isAdReady) return
-        autoAppOpenAttempted = true
-        pendingAutoAppOpenSession = null
-        showAppOpenOnMain(activity, commonConfig.appOpenPosition, {}, session)
-    }
-
-    private fun onAppEnteredForeground(activity: Activity) {
-        appInForeground = true
-        foregroundStartedAtMillis = SystemClock.elapsedRealtime()
-        autoAppOpenAttempted = false
-        if (state == TopOnState.READY && !activity.isTopOnActivity()) {
-            beginAutoAppOpenOpportunity()
-            scheduleAutoShowAppOpenCheck()
-        }
-    }
-
-    private fun onAppEnteredBackground() {
-        appInForeground = false
-        pendingAutoAppOpenSession?.showFailure("app_backgrounded_before_show")
-        pendingAutoAppOpenSession = null
-    }
-
-    private fun schedulePausedActivityBackgroundCheck() {
-        mainHandler.postDelayed(
-            {
-                if (appInForeground && currentActivity.get() == null && !fullScreenShowing.get()) {
-                    onAppEnteredBackground()
-                }
-            },
-            APP_BACKGROUND_CHECK_DELAY_MILLIS,
-        )
-    }
-
-    private fun beginAutoAppOpenOpportunity() {
-        if (!commonConfig.autoShowAppOpen || state != TopOnState.READY) return
-        if (autoAppOpenAttempted || pendingAutoAppOpenSession != null) return
-        pendingAutoAppOpenSession = events.begin(
-            AdFormat.APP_OPEN,
-            commonConfig.appOpenPosition,
-            config.ids.appOpenPlacementId,
-        )
-    }
-
-    private fun scheduleAutoShowAppOpenCheck(delayMillis: Long = APP_OPEN_CHECK_INTERVAL_MILLIS) {
-        if (state != TopOnState.READY || autoAppOpenCheckScheduled) return
-        autoAppOpenCheckScheduled = true
-        mainHandler.postDelayed(
-            {
-                autoAppOpenCheckScheduled = false
-                if (!appInForeground || autoAppOpenAttempted) return@postDelayed
-                val elapsed = SystemClock.elapsedRealtime() - foregroundStartedAtMillis
-                if (elapsed > APP_OPEN_WINDOW_MILLIS) {
-                    finishPendingAutoAppOpenAtTimeout()
-                    return@postDelayed
-                }
-                tryAutoShowAppOpen()
-                if (!autoAppOpenAttempted) scheduleAutoShowAppOpenCheck()
-            },
-            delayMillis,
-        )
-    }
-
-    private fun finishPendingAutoAppOpenAtTimeout() {
-        val session = pendingAutoAppOpenSession ?: return
-        pendingAutoAppOpenSession = null
-        autoAppOpenAttempted = true
-        val reason = when {
-            state != TopOnState.READY -> state.showFailureReason()
-            currentActivity.get() == null -> "activity_not_available"
-            !appOpenAd.isAdReady -> NO_AD_AVAILABLE
-            else -> "app_open_window_expired"
-        }
-        session.showFailure(reason)
-    }
-
     private fun Activity.isTopOnActivity(): Boolean =
         javaClass.name.startsWith("com.thinkup.")
-
-    /** Seeds lifecycle state when UMP completed after the first Activity was already resumed. */
-    private fun seedLifecycle(activity: Activity?) {
-        if (activity == null || activity.isFinishing || activity.isDestroyed) return
-        currentActivity = WeakReference(activity)
-        startedActivityCount = startedActivityCount.coerceAtLeast(1)
-        appInForeground = true
-        foregroundStartedAtMillis = SystemClock.elapsedRealtime()
-        autoAppOpenAttempted = false
-    }
 
     private fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else mainHandler.post(block)
@@ -926,9 +815,6 @@ internal object TopOnAds {
     private const val APP_OPEN_CONTAINER_UNAVAILABLE = "app_open_container_unavailable"
     private const val APP_OPEN_CONTAINER_RESOLUTION_FAILED = "app_open_container_resolution_failed"
     private const val APP_OPEN_CONTAINER_ATTACH_FAILED = "app_open_container_attach_failed"
-    private const val APP_BACKGROUND_CHECK_DELAY_MILLIS = 100L
-    private const val APP_OPEN_WINDOW_MILLIS = 7_000L
-    private const val APP_OPEN_CHECK_INTERVAL_MILLIS = 100L
     private const val INTERSTITIAL_PRELOAD_DELAY_MILLIS = 250L
     private const val REWARDED_PRELOAD_DELAY_MILLIS = 500L
     private const val SPLASH_LOAD_TIMEOUT_MILLIS = 7_000

@@ -6,6 +6,7 @@ import com.cashcraft.ads.mediation.AdEventName
 import com.cashcraft.ads.mediation.AdFormat
 import com.cashcraft.ads.mediation.AdMediationMode
 import com.cashcraft.ads.mediation.AdPlatform
+import com.cashcraft.ads.mediation.AdShowResult
 import com.cashcraft.ads.mediation.admob.AdMobState
 import com.cashcraft.ads.mediation.admob.showFailureReason
 import org.junit.Assert.assertEquals
@@ -80,6 +81,36 @@ class AdShowSessionTest {
         )
         assertEquals("no_preloaded_ad", events.last().reason)
         assertEquals("NO_FILL", events.last().errorCode)
+    }
+
+    @Test
+    fun `dismiss before impression is normalized to one show failure`() {
+        val events = mutableListOf<AdEvent>()
+        val session = session(events)
+
+        val result = session.dismissedResult()
+
+        assertEquals(AdShowResult.Failed("dismissed_before_impression"), result)
+        assertEquals(
+            listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL),
+            events.map(AdEvent::name),
+        )
+        assertEquals("dismissed_before_impression", events.last().reason)
+    }
+
+    @Test
+    fun `dismiss after impression keeps successful result without another terminal event`() {
+        val events = mutableListOf<AdEvent>()
+        val session = session(events)
+        session.impression("Google", "response")
+
+        val result = session.dismissedResult()
+
+        assertEquals(AdShowResult.Dismissed, result)
+        assertEquals(
+            listOf(AdEventName.POSITION, AdEventName.IMPRESSION),
+            events.map(AdEvent::name),
+        )
     }
 
     @Test

@@ -4,15 +4,23 @@
 宿主可以选择直连 AdMob GMA Next-Gen、TopOn 海外版，或者同时初始化两者并按缓存广告的
 单次展示收益进行端内缓存竞价。
 
-当前稳定版本：`1.0.2`
+当前稳定版本：`1.0.3`
 
 [![打开 AI 接入提示词](https://img.shields.io/badge/AI-%E6%89%93%E5%BC%80%E5%B9%B6%E5%A4%8D%E5%88%B6%E6%8E%A5%E5%85%A5%E6%8F%90%E7%A4%BA%E8%AF%8D-2ea44f)](#10-复制给-ai完整接入提示词)
 
 依赖坐标：
 
 ```kotlin
-implementation("com.cashcraft:ads-mediation:1.0.2")
+implementation("com.cashcraft:ads-mediation:1.0.3")
 ```
+
+### 1.0.3 更新
+
+- AdMob、TopOn 和竞价模式共用宿主生命周期监控及自动开屏前台窗口。
+- 手动展示统一校验前台、Resumed、Window 附着和焦点状态，不满足时通过
+  `AdShowResult.Failed` 与 `ad_show_fail` 返回稳定失败原因，且不会消费预加载广告。
+- 统一全屏广告展示互斥和 `dismissed_before_impression` 结果处理；各平台原有初始化、
+  加载、缓存补充、收益和 SDK 回调策略保持独立。
 
 ## 1. 接入依赖
 
@@ -86,7 +94,7 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.cashcraft:ads-mediation:1.0.2")
+    implementation("com.cashcraft:ads-mediation:1.0.3")
 }
 ```
 
@@ -354,6 +362,15 @@ Ads.showAppOpen(
 `AdShowResult.Dismissed` 表示广告产生展示并最终关闭；`AdShowResult.Failed.reason` 是适合日志和
 埋点的稳定失败原因。`AdRewardResult` 包含：
 
+手动展示只接受当前位于前台、处于 Resumed 状态且 Window 已附着并获得焦点的 Activity。
+不满足条件时不会消费预加载广告，而是通过 `AdShowResult.Failed` 和 `ad_show_fail` 收口；稳定
+失败原因包括 `app_not_in_foreground`、`activity_not_resumed`、
+`activity_window_not_attached` 和 `activity_window_not_focused`。
+
+AdMob、TopOn 与竞价模式共用同一套宿主生命周期状态和自动开屏前台窗口：每次进入前台后
+最多等待 7 秒，Activity 可交互且广告可用时展示；进入后台或等待超时则以 `ad_show_fail`
+结束本次机会。各平台的初始化、加载、缓存补充、收益和 SDK 回调仍分别由各自实现负责。
+
 TopOn 开屏会优先使用调用方传入的 `hostContainer`，否则依次尝试 Activity 的
 `android.R.id.content` 和 Window DecorView。容器不存在、未附着、不可见、挂载失败或
 `show()` 抛异常时不会导致宿主崩溃，而是发送 `ad_show_fail`；开启 `loggingEnabled` 时同一失败
@@ -565,7 +582,7 @@ GMA Next-Gen 同时打包。
 
 ```shell
 ./gradlew clean testDebugUnitTest lintDebug :r8-smoke-app:assembleRelease publishToMavenLocal \
-  -PVERSION_NAME=1.0.2
+  -PVERSION_NAME=1.0.3
 ```
 
 R8 smoke app 会让 AdMob、TopOn 和竞价路径都保持可达，然后构建开启压缩和资源收缩的 Release
@@ -575,7 +592,7 @@ GitHub Actions 中的 `CI` 和 `Publish GitHub Package` 都只支持在 Actions 
 push、PR 或 tag 自动运行。
 
 本地或手动发布 CI 都会先读取 GitHub Packages 的 `maven-metadata.xml`，找到最高的稳定
-`major.minor.patch` 版本并自动递增 patch。当前为 `1.0.2` 时，下一次会发布 `1.0.3`。
+`major.minor.patch` 版本并自动递增 patch。当前为 `1.0.3` 时，下一次会发布 `1.0.4`。
 
 查看下一版本但不发布：
 
@@ -606,7 +623,7 @@ GitHub Package 版本不可覆盖；脚本默认自动递增可避免重复版�
 请在当前 Android 工程中完整接入 Ads Mediation SDK，并直接修改、编译和验证项目。
 
 固定信息：
-- Maven 坐标：com.cashcraft:ads-mediation:1.0.2
+- Maven 坐标：com.cashcraft:ads-mediation:1.0.3
 - GitHub Packages 仓库：https://maven.pkg.github.com/vihuela/ads-mediation
 - 公共包名：com.cashcraft.ads.mediation
 - 支持 APP_OPEN、INTERSTITIAL、REWARDED
@@ -618,7 +635,7 @@ GitHub Package 版本不可覆盖；脚本默认自动递增可避免重复版�
 1. 检查 settings.gradle.kts，在 dependencyResolutionManagement 中加入 GitHub Packages、
    Pangle、Mintegral 和 TopOn 仓库。GitHub 用户名/token 优先从 Gradle property 或环境变量读取，
    本地再从已被 Git 忽略的 local.properties 读取；绝对不能把 token 写进可提交文件。
-2. 在 App 模块加入 implementation("com.cashcraft:ads-mediation:1.0.2")。
+2. 在 App 模块加入 implementation("com.cashcraft:ads-mediation:1.0.3")。
 3. 为每个 product flavor 设置 manifestPlaceholders["admobApplicationId"]。不要使用生产 ID
    进行测试；开发环境可使用 AdMobIds.TEST 对应的官方测试 App ID。
 4. 检查现有配置来源，选择 AdMob、TopOn 或 Bidding。不要把 App ID、App Key、ad unit ID、

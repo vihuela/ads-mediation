@@ -9,6 +9,7 @@ import com.cashcraft.ads.mediation.AdEventName
 import com.cashcraft.ads.mediation.AdFormat
 import com.cashcraft.ads.mediation.AdMediationMode
 import com.cashcraft.ads.mediation.AdPlatform
+import com.cashcraft.ads.mediation.AdShowResult
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -284,6 +285,14 @@ internal class AdShowSession(
         runCatching { listener.onEvent(event) }
             .onFailure { error -> logger?.eventDispatchFailed(event, error) }
     }
+}
+
+/** A close callback is successful only after the SDK has reported an impression. */
+internal fun AdShowSession.dismissedResult(): AdShowResult = if (hasTerminalEvent) {
+    AdShowResult.Dismissed
+} else {
+    showFailure("dismissed_before_impression")
+    AdShowResult.Failed("dismissed_before_impression")
 }
 
 internal data class AdBidEventData(

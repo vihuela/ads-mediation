@@ -2,10 +2,8 @@ package com.cashcraft.ads.mediation.admob
 
 import android.app.Activity
 import android.app.Application
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import com.google.android.libraries.ads.mobile.sdk.MobileAds
 import com.google.android.libraries.ads.mobile.sdk.appopen.AppOpenAdEventCallback
 import com.google.android.libraries.ads.mobile.sdk.appopen.AppOpenAdPreloader
@@ -24,10 +22,13 @@ import com.google.android.libraries.ads.mobile.sdk.rewarded.RewardedAdPreloader
 import com.cashcraft.ads.mediation.AdPlatform
 import com.cashcraft.ads.mediation.AdMobRevenuePayload
 import com.cashcraft.ads.mediation.AdShowResult
+import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdLoadSession
 import com.cashcraft.ads.mediation.internal.AdShowSession
-import java.lang.ref.WeakReference
+import com.cashcraft.ads.mediation.internal.AutoAppOpenController
+import com.cashcraft.ads.mediation.internal.FullScreenShowGate
+import com.cashcraft.ads.mediation.internal.dismissedResult
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
@@ -51,7 +52,7 @@ enum class AdMobState {
 object AdMobAds {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val fullScreenShowing = AtomicBoolean(false)
+    private val fullScreenShowGate = FullScreenShowGate()
     private val mobileAdsInitializationStarted = AtomicBoolean(false)
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
 
@@ -62,42 +63,9 @@ object AdMobAds {
     private lateinit var config: AdMobConfig
     private lateinit var application: Application
     private lateinit var events: AdEventDispatcher
-    private var currentActivity = WeakReference<Activity>(null)
-    private var startedActivityCount = 0
-    private var appInForeground = false
-    private var foregroundStartedAtMillis = 0L
-    private var autoAppOpenAttempted = false
-    private var autoAppOpenCheckScheduled = false
-    private var pendingAutoAppOpenSession: AdShowSession? = null
+    private lateinit var autoAppOpenController: AutoAppOpenController<AdShowSession>
     private val preloadDescriptors = mutableMapOf<String, PreloadDescriptor>()
     private val preloadLoadSessions = mutableMapOf<String, AdLoadSession>()
-    private val lifecycleObserver = object : Application.ActivityLifecycleCallbacks {
-
-        override fun onActivityResumed(activity: Activity) {
-            currentActivity = WeakReference(activity)
-            if (!appInForeground) onAppEnteredForeground(activity)
-            scheduleAutoShowAppOpenCheck()
-        }
-
-        override fun onActivityPaused(activity: Activity) {
-            if (currentActivity.get() === activity) currentActivity.clear()
-            schedulePausedActivityBackgroundCheck()
-        }
-
-        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
-        override fun onActivityStarted(activity: Activity) {
-            startedActivityCount++
-            if (startedActivityCount == 1 && !appInForeground) onAppEnteredForeground(activity)
-        }
-        override fun onActivityStopped(activity: Activity) {
-            startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
-            if (startedActivityCount == 0 && appInForeground) onAppEnteredBackground()
-        }
-        override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
-        override fun onActivityDestroyed(activity: Activity) {
-            if (currentActivity.get() === activity) currentActivity.clear()
-        }
-    }
 
     /** Call once from `Application.onCreate`. Initialization itself runs off the main thread. */
     fun initialize(
@@ -135,13 +103,38 @@ object AdMobAds {
                 loggingEnabled = config.loggingEnabled,
                 logTag = config.logTag,
             )
+            autoAppOpenController = AutoAppOpenController(
+                isEnabled = { this.config.autoShowAppOpen },
+                isProviderReady = { state == AdMobState.READY },
+                providerFailureReason = {
+                    state.takeUnless { it == AdMobState.READY }?.showFailureReason()
+                },
+                isAdAvailable = { AppOpenAdPreloader.isAdAvailable(PRELOAD_APP_OPEN) },
+                shouldIgnoreActivity = { it.isGoogleMobileAdsActivity() },
+                beginOpportunity = {
+                    events.begin(
+                        AdMobFormat.APP_OPEN,
+                        this.config.appOpenPosition,
+                        this.config.ids.appOpenId,
+                    )
+                },
+                show = { activity, session ->
+                    showAppOpenOnMain(
+                        activity = activity,
+                        position = this.config.appOpenPosition,
+                        onResult = {},
+                        session = session,
+                    )
+                },
+                fail = { session, reason -> session.showFailure(reason) },
+                noAdFailureReason = NO_AD_AVAILABLE,
+            )
         }
 
         // Application.onCreate normally runs on the main thread. Register synchronously there so
         // a fast cold start cannot resume its first Activity before this callback is installed.
         onMain {
-            application.registerActivityLifecycleCallbacks(lifecycleObserver)
-            seedLifecycle(initialActivity)
+            AdLifecycleMonitor.install(application, initialActivity)
             beginMobileAdsInitialization()
         }
     }
@@ -252,12 +245,7 @@ object AdMobAds {
         if (success) startPreloading()
         initializationListeners.forEach { listener -> runCatching { listener(success) } }
         initializationListeners.clear()
-        if (success && appInForeground) {
-            foregroundStartedAtMillis = SystemClock.elapsedRealtime()
-            autoAppOpenAttempted = false
-            beginAutoAppOpenOpportunity()
-            scheduleAutoShowAppOpenCheck(delayMillis = 0L)
-        }
+        if (success) autoAppOpenController.onProviderInitialized()
     }
 
     private fun startPreloading() {
@@ -269,7 +257,7 @@ object AdMobAds {
                         responseId = responseInfo.responseId,
                     )
                     if (preloadId == PRELOAD_APP_OPEN) {
-                        scheduleAutoShowAppOpenCheck(delayMillis = 0L)
+                        autoAppOpenController.onAdAvailable()
                     }
                 }
             }
@@ -476,12 +464,10 @@ object AdMobAds {
         session: AdShowSession,
         onResult: (AdMobShowResult) -> Unit,
     ): Boolean {
-        val reason = when {
-            state != AdMobState.READY -> state.showFailureReason()
-            activity.isFinishing || activity.isDestroyed -> "activity_not_available"
-            !fullScreenShowing.compareAndSet(false, true) -> "another_full_screen_ad_showing"
-            else -> null
-        }
+        val reason = fullScreenShowGate.tryAcquire(
+            activity = activity,
+            providerFailureReason = state.takeUnless { it == AdMobState.READY }?.showFailureReason(),
+        )
         if (reason != null) {
             session.showFailure(reason)
             runCatching { onResult(AdShowResult.Failed(reason)) }
@@ -495,7 +481,7 @@ object AdMobAds {
         reason: String,
         onResult: (AdMobShowResult) -> Unit,
     ) {
-        fullScreenShowing.set(false)
+        fullScreenShowGate.release()
         session.showFailure(reason)
         runCatching { onResult(AdShowResult.Failed(reason)) }
     }
@@ -518,15 +504,10 @@ object AdMobAds {
         session: AdShowSession,
         onResult: (AdMobShowResult) -> Unit,
     ) {
-        val result = if (session.hasTerminalEvent) {
-            AdShowResult.Dismissed
-        } else {
-            session.showFailure("dismissed_before_impression")
-            AdShowResult.Failed("dismissed_before_impression")
-        }
+        val result = session.dismissedResult()
         session.emit(AdMobEventName.DISMISS)
         ad.destroy()
-        fullScreenShowing.set(false)
+        fullScreenShowGate.release()
         runCatching { onResult(result) }
     }
 
@@ -539,7 +520,7 @@ object AdMobAds {
         val reason = error.message.ifBlank { "show_failed" }
         session.showFailure(reason, error.code.toString())
         ad.destroy()
-        fullScreenShowing.set(false)
+        fullScreenShowGate.release()
         runCatching { onResult(AdShowResult.Failed(reason)) }
     }
 
@@ -573,122 +554,8 @@ object AdMobAds {
     private fun com.google.android.libraries.ads.mobile.sdk.common.Ad.adSource(): String? =
         getResponseInfo().loadedAdSourceResponseInfo?.name
 
-    private fun tryAutoShowAppOpen() {
-        if (!::config.isInitialized || !config.autoShowAppOpen) return
-        if (state != AdMobState.READY || !appInForeground || autoAppOpenAttempted) return
-        if (SystemClock.elapsedRealtime() - foregroundStartedAtMillis > APP_OPEN_WINDOW_MILLIS) return
-        val session = pendingAutoAppOpenSession ?: return
-        val activity = currentActivity.get() ?: return
-        if (!activity.hasWindowFocus()) return
-        if (!AppOpenAdPreloader.isAdAvailable(PRELOAD_APP_OPEN)) return
-        autoAppOpenAttempted = true
-        pendingAutoAppOpenSession = null
-        showAppOpenOnMain(
-            activity = activity,
-            position = config.appOpenPosition,
-            onResult = {},
-            session = session,
-        )
-    }
-
-    private fun onAppEnteredForeground(activity: Activity) {
-        appInForeground = true
-        foregroundStartedAtMillis = SystemClock.elapsedRealtime()
-        autoAppOpenAttempted = false
-        if (state == AdMobState.READY && !activity.isGoogleMobileAdsActivity()) {
-            beginAutoAppOpenOpportunity()
-            scheduleAutoShowAppOpenCheck()
-        }
-    }
-
-    private fun onAppEnteredBackground() {
-        appInForeground = false
-        pendingAutoAppOpenSession?.showFailure("app_backgrounded_before_show")
-        pendingAutoAppOpenSession = null
-    }
-
-    /**
-     * Android may omit `onStop` when Home is opened and the app is restored very quickly. In that
-     * case the normal started-activity counter never reaches zero. A short paused-state check keeps
-     * that foreground opportunity observable while excluding pauses caused by our own full-screen
-     * ads and normal same-process activity hand-offs that resume promptly.
-     */
-    private fun schedulePausedActivityBackgroundCheck() {
-        mainHandler.postDelayed(
-            {
-                if (
-                    appInForeground &&
-                    currentActivity.get() == null &&
-                    !fullScreenShowing.get()
-                ) {
-                    onAppEnteredBackground()
-                }
-            },
-            APP_BACKGROUND_CHECK_DELAY_MILLIS,
-        )
-    }
-
-    private fun beginAutoAppOpenOpportunity() {
-        if (!::config.isInitialized || !config.autoShowAppOpen) return
-        if (state != AdMobState.READY) return
-        if (autoAppOpenAttempted || pendingAutoAppOpenSession != null) return
-        pendingAutoAppOpenSession = events.begin(
-            AdMobFormat.APP_OPEN,
-            config.appOpenPosition,
-            config.ids.appOpenId,
-        )
-    }
-
-    /**
-     * `onActivityResumed` runs before the window is guaranteed to be foreground according to GMA.
-     * Poll briefly inside the app-open eligibility window so show is attempted only after focus and
-     * preload availability are both true.
-     */
-    private fun scheduleAutoShowAppOpenCheck(delayMillis: Long = APP_OPEN_CHECK_INTERVAL_MILLIS) {
-        if (state != AdMobState.READY) return
-        if (autoAppOpenCheckScheduled) return
-        autoAppOpenCheckScheduled = true
-        mainHandler.postDelayed(
-            {
-                autoAppOpenCheckScheduled = false
-                if (!appInForeground || autoAppOpenAttempted) return@postDelayed
-                val elapsed = SystemClock.elapsedRealtime() - foregroundStartedAtMillis
-                if (elapsed > APP_OPEN_WINDOW_MILLIS) {
-                    finishPendingAutoAppOpenAtTimeout()
-                    return@postDelayed
-                }
-                tryAutoShowAppOpen()
-                if (!autoAppOpenAttempted) scheduleAutoShowAppOpenCheck()
-            },
-            delayMillis,
-        )
-    }
-
-    private fun finishPendingAutoAppOpenAtTimeout() {
-        val session = pendingAutoAppOpenSession ?: return
-        pendingAutoAppOpenSession = null
-        autoAppOpenAttempted = true
-        val reason = when {
-            state != AdMobState.READY -> state.showFailureReason()
-            currentActivity.get() == null -> "activity_not_available"
-            !AppOpenAdPreloader.isAdAvailable(PRELOAD_APP_OPEN) -> NO_AD_AVAILABLE
-            else -> "app_open_window_expired"
-        }
-        session.showFailure(reason)
-    }
-
     private fun Activity.isGoogleMobileAdsActivity(): Boolean =
         javaClass.name.startsWith("com.google.android.libraries.ads.mobile.sdk.")
-
-    /** Seeds lifecycle state when UMP completed after the first Activity was already resumed. */
-    private fun seedLifecycle(activity: Activity?) {
-        if (activity == null || activity.isFinishing || activity.isDestroyed) return
-        currentActivity = WeakReference(activity)
-        startedActivityCount = startedActivityCount.coerceAtLeast(1)
-        appInForeground = true
-        foregroundStartedAtMillis = SystemClock.elapsedRealtime()
-        autoAppOpenAttempted = false
-    }
 
     private fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else mainHandler.post(block)
@@ -698,9 +565,6 @@ object AdMobAds {
     private const val PRELOAD_INTERSTITIAL = "lcb_admob_interstitial"
     private const val PRELOAD_REWARDED = "lcb_admob_rewarded"
     private const val NO_AD_AVAILABLE = "no_preloaded_ad"
-    private const val APP_BACKGROUND_CHECK_DELAY_MILLIS = 100L
-    private const val APP_OPEN_WINDOW_MILLIS = 7_000L
-    private const val APP_OPEN_CHECK_INTERVAL_MILLIS = 100L
     private const val MICROS_PER_UNIT = 1_000_000.0
 
     private data class PreloadDescriptor(
