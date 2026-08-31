@@ -51,24 +51,59 @@ class AdEventTest {
     }
 
     @Test
-    fun `provider revenue payloads retain separate platform identities`() {
+    fun `provider revenue payloads share normalized fields and retain native details`() {
         val adMob = AdMobRevenuePayload(
+            eventId = "admob:response",
+            occurredAtMillis = 1_700_000_000_000L,
+            mediationMode = AdMediationMode.BIDDING,
+            format = AdFormat.REWARDED,
+            sessionId = "session-1",
+            position = "game_tool_refresh_rewarded",
+            placementId = "admob-unit",
             valueMicros = 1_250L,
             currencyCode = "USD",
-            adUnitId = "admob-unit",
-            responseId = "response",
+            adNetwork = "Google",
+            impressionId = "response",
             mediationAdapterClassName = "adapter",
             precisionType = "PRECISE",
         )
         val topOnInfo = Any()
         val topOn = TopOnRevenuePayload(
-            adInfo = topOnInfo,
+            eventId = "topon:show",
+            occurredAtMillis = 1_700_000_000_001L,
+            mediationMode = AdMediationMode.BIDDING,
+            format = AdFormat.INTERSTITIAL,
+            sessionId = "session-2",
+            position = "game_level_complete_interstitial",
+            placementId = "topon-placement",
             valueMicros = 2_500L,
             currencyCode = "USD",
+            adNetwork = "Facebook",
+            impressionId = "show",
+            precisionType = "publisher_defined",
+            adInfo = topOnInfo,
         )
 
         assertEquals(AdPlatform.ADMOB, adMob.platform)
+        assertEquals(AdFormat.REWARDED, adMob.format)
+        assertEquals("Google", adMob.adNetwork)
+        assertEquals("admob-unit", adMob.placementId)
         assertEquals(AdPlatform.TOPON, topOn.platform)
+        assertEquals(AdFormat.INTERSTITIAL, topOn.format)
+        assertEquals("Facebook", topOn.adNetwork)
+        assertEquals("topon-placement", topOn.placementId)
         assertEquals(topOnInfo, topOn.adInfo)
+    }
+
+    @Test
+    fun `revenue event id prefers provider impression id and falls back to session`() {
+        assertEquals(
+            "admob:response-1",
+            revenueEventId(AdPlatform.ADMOB, "response-1", "session-1"),
+        )
+        assertEquals(
+            "topon:session-2",
+            revenueEventId(AdPlatform.TOPON, null, "session-2"),
+        )
     }
 }

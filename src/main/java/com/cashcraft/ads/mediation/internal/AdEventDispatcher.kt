@@ -180,9 +180,9 @@ internal class AdLoadSession(
 internal class AdShowSession(
     private val listener: AdEventListener,
     private val platform: AdPlatform,
-    private val mediationMode: AdMediationMode,
-    private val format: AdFormat,
-    private val position: String,
+    val mediationMode: AdMediationMode,
+    val format: AdFormat,
+    val position: String,
     val adUnitId: String,
     val sessionId: String,
     private val number: Long,

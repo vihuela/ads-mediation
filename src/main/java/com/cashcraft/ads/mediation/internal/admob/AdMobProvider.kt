@@ -22,6 +22,7 @@ import com.google.android.libraries.ads.mobile.sdk.rewarded.RewardedAdPreloader
 import com.cashcraft.ads.mediation.AdPlatform
 import com.cashcraft.ads.mediation.AdMobRevenuePayload
 import com.cashcraft.ads.mediation.AdShowResult
+import com.cashcraft.ads.mediation.revenueEventId
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdLoadSession
@@ -29,6 +30,7 @@ import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.cashcraft.ads.mediation.internal.AutoAppOpenController
 import com.cashcraft.ads.mediation.internal.FullScreenShowGate
 import com.cashcraft.ads.mediation.internal.dismissedResult
+import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
@@ -527,25 +529,41 @@ object AdMobAds {
     private fun AdShowSession.paid(value: AdValue, responseInfo: ResponseInfo) {
         val adSourceInfo = responseInfo.loadedAdSourceResponseInfo
         val adapterClassName = adSourceInfo?.adapterClassName ?: responseInfo.adapterClassName
+        val valueMicros = value.valueMicros.takeIf { it >= 0L } ?: return
+        val currencyCode = value.currencyCode
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?.uppercase(Locale.ROOT)
+            ?: return
+        val adNetwork = adSourceInfo?.name?.trim()?.takeIf(String::isNotEmpty)
+        val impressionId = responseInfo.responseId?.trim()?.takeIf(String::isNotEmpty)
+        val precisionType = value.precisionType.name.takeIf(String::isNotEmpty)
         emit(
             AdMobEventName.PAID,
-            adSource = adSourceInfo?.name,
-            responseId = responseInfo.responseId,
-            value = value.valueMicros / MICROS_PER_UNIT,
-            valueMicros = value.valueMicros,
-            currency = value.currencyCode,
+            adSource = adNetwork,
+            responseId = impressionId,
+            value = valueMicros / MICROS_PER_UNIT,
+            valueMicros = valueMicros,
+            currency = currencyCode,
             mediationAdapterClassName = adapterClassName,
-            precisionType = value.precisionType.name,
+            precisionType = precisionType,
         )
         runCatching {
             config.revenueListener.onRevenuePaid(
                 AdMobRevenuePayload(
-                    valueMicros = value.valueMicros,
-                    currencyCode = value.currencyCode,
-                    adUnitId = adUnitId,
-                    responseId = responseInfo.responseId,
+                    eventId = revenueEventId(AdPlatform.ADMOB, impressionId, sessionId),
+                    occurredAtMillis = System.currentTimeMillis(),
+                    mediationMode = mediationMode,
+                    format = format,
+                    sessionId = sessionId,
+                    position = position,
+                    placementId = adUnitId,
+                    valueMicros = valueMicros,
+                    currencyCode = currencyCode,
+                    adNetwork = adNetwork,
+                    impressionId = impressionId,
                     mediationAdapterClassName = adapterClassName,
-                    precisionType = value.precisionType.name,
+                    precisionType = precisionType,
                 ),
             )
         }

@@ -482,52 +482,65 @@ ad_position = ad_impression + ad_show_fail
 
 ## 6. 收益回调
 
-`ad_paid` 用于通用可观测性；向 Tenjin 等平台传递展示级收益时应使用独立的
-`revenueListener`，避免从通用事件中反推或丢失原生对象。
+`ad_paid` 用于通用可观测性；展示级收益应使用独立的 `revenueListener`。AdMob 和 TopOn
+保留各自的 payload 类型，但所有后端上报所需字段都位于公共 `AdRevenuePayload` 接口上，宿主
+无需按平台分支。只有 Tenjin 等依赖 Provider 原生字段的集成才需要判断具体子类型。
 
 ```kotlin
 revenueListener = AdRevenueListener { payload ->
+    reportRevenueToBackend(
+        eventId = payload.eventId,
+        occurredAtMillis = payload.occurredAtMillis,
+        platform = payload.platform,
+        format = payload.format,
+        sessionId = payload.sessionId,
+        position = payload.position,
+        placementId = payload.placementId,
+        valueMicros = payload.valueMicros,
+        currencyCode = payload.currencyCode,
+        adNetwork = payload.adNetwork,
+        impressionId = payload.impressionId,
+        precisionType = payload.precisionType,
+    )
+
+    // Only native ILRD integrations need provider-specific fields.
     when (payload) {
         is AdMobRevenuePayload -> {
-            reportAdMobRevenue(
-                valueMicros = payload.valueMicros,
-                currencyCode = payload.currencyCode,
-                adUnitId = payload.adUnitId,
-                responseId = payload.responseId,
-                mediationAdapterClassName = payload.mediationAdapterClassName,
-                precisionType = payload.precisionType,
-            )
+            reportAdMobNativeRevenue(payload.mediationAdapterClassName)
         }
 
         is TopOnRevenuePayload -> {
-            reportTopOnRevenue(
-                adInfo = payload.adInfo,
-                valueMicros = payload.valueMicros,
-                currencyCode = payload.currencyCode,
-            )
+            reportTopOnNativeRevenue(payload.adInfo)
         }
     }
 }
 ```
 
-`AdMobRevenuePayload` 属性：
+公共 `AdRevenuePayload` 属性：
 
 | 属性 | 说明 |
 | --- | --- |
-| `valueMicros` | 收益微单位原值，Tenjin AdMob ILRD 必需 |
-| `currencyCode` | ISO 货币代码，平台未提供时可能为 null |
-| `adUnitId` | 产生收益的 AdMob ad unit ID |
-| `responseId` | GMA response ID |
-| `mediationAdapterClassName` | 实际填充 adapter 类名 |
-| `precisionType` | GMA 收益精度 |
+| `eventId` | 幂等收益事件 ID；优先由 Provider impression ID 生成，否则使用展示 session ID |
+| `occurredAtMillis` | 收益回调到达的 Unix 毫秒时间 |
+| `platform` / `mediationMode` | 实际收益平台和宿主选择的聚合模式 |
+| `format` | `APP_OPEN` / `INTERSTITIAL` / `REWARDED` |
+| `sessionId` / `position` | 展示会话及稳定业务场景 |
+| `placementId` | AdMob ad unit ID 或 TopOn placement ID |
+| `valueMicros` | `currencyCode` 对应货币的微单位，非负且非空 |
+| `currencyCode` | 非空 ISO 货币代码；TopOn 显式归一为 USD |
+| `adNetwork` | 实际填充广告网络；Provider 未提供时为 null |
+| `impressionId` | AdMob response ID 或 TopOn show ID；Provider 未提供时为 null |
+| `precisionType` | Provider 收益精度；未提供时为 null |
 
-`TopOnRevenuePayload` 属性：
+Provider 特有属性：
 
 | 属性 | 说明 |
 | --- | --- |
-| `adInfo` | 原始 `TUAdInfo`，对外声明为 `Any` 以避免公共 API 强绑定 TopOn 类型 |
-| `valueMicros` | TopOn publisher revenue 精确换算后的微单位，缺失时为 null |
-| `currencyCode` | TopOn 收益货币代码，缺失时为 null |
+| `AdMobRevenuePayload.mediationAdapterClassName` | 实际填充 adapter 类名 |
+| `TopOnRevenuePayload.adInfo` | 原始 `TUAdInfo`；只供即时原生集成使用，不得持久化 |
+
+TopOn 收益使用 `getPublisherRevenue(USD)`，没有合法 USD publisher revenue 时不发出收益 payload。
+AdMob 保留官方回调的币种；只接受美元的宿主接口必须检查 `currencyCode == "USD"` 后再上报。
 
 ## 7. 竞价逻辑和兼容范围
 
@@ -645,10 +658,9 @@ GitHub Package 版本不可覆盖；脚本默认自动递增可避免重复版�
 6. AdsConfig 必须接入 eventListener：使用 event.name.analyticsName 作为事件名，使用
    event.analyticsParameters() 作为完整参数。保持同一 session_id，并确保初始化后的每个展示
    会话满足 ad_position = ad_impression + ad_show_fail。
-7. AdsConfig 必须接入 revenueListener。AdMobRevenuePayload 原样传递 valueMicros、
-   currencyCode、adUnitId、responseId、mediationAdapterClassName、precisionType 给宿主 ILRD；
-   TopOnRevenuePayload 必须保留原始 adInfo 并交给 TopOn/Tenjin 收益接口，不能从 ad_paid
-   通用事件反推原生收益对象。
+7. AdsConfig 必须接入 revenueListener。通用后端直接消费 AdRevenuePayload 的 eventId、时间、
+   平台、格式、展示上下文、微单位金额、币种、广告网络和 impressionId；AdMob 子类型保留
+   mediationAdapterClassName，TopOn 子类型保留原始 adInfo。不要从 ad_paid 反推原生收益对象。
 8. 把插屏、激励和手动开屏调用改为 Ads.showInterstitial、Ads.showRewarded、
    Ads.showAppOpen。position 使用稳定业务场景名。激励业务只能在 rewardEarned=true 时发奖，
    并把 sessionId 带到业务发奖埋点。

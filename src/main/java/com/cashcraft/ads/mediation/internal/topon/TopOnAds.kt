@@ -16,6 +16,7 @@ import com.cashcraft.ads.mediation.AdShowResult
 import com.cashcraft.ads.mediation.AdsConfig
 import com.cashcraft.ads.mediation.TopOnProviderConfig
 import com.cashcraft.ads.mediation.TopOnRevenuePayload
+import com.cashcraft.ads.mediation.revenueEventId
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdLoadSession
@@ -38,6 +39,7 @@ import com.thinkup.splashad.api.TUSplashAdEZListener
 import com.thinkup.splashad.api.TUSplashAdExtraInfo
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.util.LinkedHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
 internal enum class TopOnState {
@@ -82,6 +84,7 @@ internal object TopOnAds {
     private var activeAppOpen: ActiveShow? = null
     private var activeInterstitial: ActiveShow? = null
     private var activeRewarded: ActiveRewardedShow? = null
+    private val revenueSessionsByImpressionId = LinkedHashMap<String, AdShowSession>()
     @SuppressLint("StaticFieldLeak")
     private var splashContainer: FrameLayout? = null
     private lateinit var autoAppOpenController: AutoAppOpenController<AdShowSession>
@@ -397,7 +400,10 @@ internal object TopOnAds {
         }
 
         override fun onInterstitialAdShow(info: TUAdInfo) = onMain {
-            activeInterstitial?.session?.impression(info.networkName, info.showId)
+            activeInterstitial?.session?.let { session ->
+                rememberRevenueSession(info.showId, session)
+                session.impression(info.networkName, info.showId)
+            }
         }
 
         override fun onInterstitialAdClicked(info: TUAdInfo) = onMain {
@@ -428,7 +434,10 @@ internal object TopOnAds {
         }
 
         override fun onRewardedVideoAdPlayStart(info: TUAdInfo) = onMain {
-            activeRewarded?.session?.impression(info.networkName, info.showId)
+            activeRewarded?.session?.let { session ->
+                rememberRevenueSession(info.showId, session)
+                session.impression(info.networkName, info.showId)
+            }
         }
 
         override fun onRewardedVideoAdPlayClicked(info: TUAdInfo) = onMain {
@@ -469,7 +478,10 @@ internal object TopOnAds {
         }
 
         override fun onAdShow(info: TUAdInfo) = onMain {
-            activeAppOpen?.session?.impression(info.networkName, info.showId)
+            activeAppOpen?.session?.let { session ->
+                rememberRevenueSession(info.showId, session)
+                session.impression(info.networkName, info.showId)
+            }
         }
 
         override fun onAdClick(info: TUAdInfo) = onMain {
@@ -739,37 +751,77 @@ internal object TopOnAds {
     }
 
     private fun revenuePaid(session: AdShowSession?, info: TUAdInfo) {
-        val revenue = info.publisherRevenue
-        val valueMicros = revenue?.toMicros()
+        val impressionId = info.showId?.trim()?.takeIf(String::isNotEmpty)
+        val revenue = info.getPublisherRevenue(TUAdConst.CURRENCY.USD)
+            ?.takeIf { it.isFinite() && it >= 0.0 }
+            ?: return
+        val valueMicros = revenue.toMicrosOrNull() ?: return
+        val revenueSession = impressionId
+            ?.let(revenueSessionsByImpressionId::remove)
+            ?: session
+            ?: return
+        val adNetwork = info.networkName?.trim()?.takeIf(String::isNotEmpty)
+        val precisionType = info.ecpmPrecision?.trim()?.takeIf(String::isNotEmpty)
+        revenueSession.paid(
+            info = info,
+            revenue = revenue,
+            valueMicros = valueMicros,
+            currencyCode = USD_CURRENCY_CODE,
+        )
         // Preserve the complete TUAdInfo object because Tenjin's TopOn endpoint reflects over it.
         runCatching {
             commonConfig.revenueListener.onRevenuePaid(
                 TopOnRevenuePayload(
-                    adInfo = info,
+                    eventId = revenueEventId(AdPlatform.TOPON, impressionId, revenueSession.sessionId),
+                    occurredAtMillis = System.currentTimeMillis(),
+                    mediationMode = revenueSession.mediationMode,
+                    format = revenueSession.format,
+                    sessionId = revenueSession.sessionId,
+                    position = revenueSession.position,
+                    placementId = revenueSession.adUnitId,
                     valueMicros = valueMicros,
-                    currencyCode = info.currency,
+                    currencyCode = USD_CURRENCY_CODE,
+                    adNetwork = adNetwork,
+                    impressionId = impressionId,
+                    precisionType = precisionType,
+                    adInfo = info,
                 ),
             )
         }
-        if (revenue != null && valueMicros != null) session?.paid(info, revenue, valueMicros)
     }
 
-    private fun AdShowSession.paid(info: TUAdInfo, revenue: Double, valueMicros: Long) {
+    private fun AdShowSession.paid(
+        info: TUAdInfo,
+        revenue: Double,
+        valueMicros: Long,
+        currencyCode: String,
+    ) {
         emit(
             AdEventName.PAID,
             adSource = info.networkName,
             responseId = info.showId,
             value = revenue,
             valueMicros = valueMicros,
-            currency = info.currency,
+            currency = currencyCode,
             precisionType = info.ecpmPrecision,
         )
     }
 
-    private fun Double.toMicros(): Long = BigDecimal.valueOf(this)
-        .multiply(MICROS_PER_UNIT)
-        .setScale(0, RoundingMode.HALF_UP)
-        .longValueExact()
+    private fun rememberRevenueSession(impressionId: String?, session: AdShowSession) {
+        val normalizedId = impressionId?.trim()?.takeIf(String::isNotEmpty) ?: return
+        revenueSessionsByImpressionId[normalizedId] = session
+        while (revenueSessionsByImpressionId.size > MAX_PENDING_REVENUE_SESSIONS) {
+            val oldestId = revenueSessionsByImpressionId.entries.firstOrNull()?.key ?: break
+            revenueSessionsByImpressionId.remove(oldestId)
+        }
+    }
+
+    private fun Double.toMicrosOrNull(): Long? = runCatching {
+        BigDecimal.valueOf(this)
+            .multiply(MICROS_PER_UNIT)
+            .setScale(0, RoundingMode.HALF_UP)
+            .longValueExact()
+    }.getOrNull()
 
     private fun AdLoadSession.loadedFrom(caches: List<TUAdInfo>?) {
         val info = caches?.firstOrNull()
@@ -810,6 +862,8 @@ internal object TopOnAds {
     )
 
     private val MICROS_PER_UNIT = BigDecimal("1000000")
+    private const val USD_CURRENCY_CODE = "USD"
+    private const val MAX_PENDING_REVENUE_SESSIONS = 32
     private const val TOPON_BUFFER_SIZE = 1
     private const val NO_AD_AVAILABLE = "no_preloaded_ad"
     private const val APP_OPEN_CONTAINER_UNAVAILABLE = "app_open_container_unavailable"
