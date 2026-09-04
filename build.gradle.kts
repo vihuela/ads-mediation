@@ -63,6 +63,10 @@ configurations.configureEach {
 dependencies {
     // Direct AdMob provider + TopOn's GMA Next-Gen network adapter.
     implementation(libs.ads.mobile.sdk)
+    // GMA Next-Gen 1.2.1 still declares WorkManager 2.7.0/Room 2.2.5. With
+    // current R8 those old Room rules can lose WorkDatabase_Impl's reflective
+    // constructor and crash the host before Application.onCreate().
+    implementation(libs.androidx.work.runtime)
     implementation(libs.user.messaging.platform)
     implementation(libs.topon.gma.nextgen.adapter)
 

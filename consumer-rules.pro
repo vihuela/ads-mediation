@@ -1,5 +1,13 @@
 # GMA Next-Gen 1.2.1 preload price reflection. SDK rules keep the obfuscated class names; these
 # rules keep the exact members traversed by google_next_gen_preload_reflection_paths.json.
+
+# WorkManager creates its generated Room database implementation through
+# reflection. Keep the constructor as a compatibility guard for hosts using
+# full-mode R8 or another dependency that downgrades Room's consumer rules.
+-keepclassmembers class * extends androidx.room.RoomDatabase {
+    <init>();
+}
+
 -keepclassmembers class ads_mobile_sdk.gt0 {
     static ads_mobile_sdk.ht0 a();
 }
