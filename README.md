@@ -323,6 +323,8 @@ TopOn SDK 管理，目前没有在 `BiddingProviderConfig` 暴露缓存数量。
 
 ## 3. 展示广告
 
+需要等待广告就绪、并让展示资格绑定到页面或业务场景时，请使用[全屏展示机会接入说明](docs/fullscreen-display-opportunities.md)。其中包含开屏、插屏、激励的新 API、取消和超时结果、Activity/Navigation/Compose 生命周期接入，以及关闭旧自动开屏的迁移方式。
+
 `position` 是业务场景，例如关卡结束、刷新道具或手动开屏。SDK 会自动拼接广告类型后缀，
 形成 `<业务场景>_<广告类型>`；已存在相同后缀时不会重复添加。
 
