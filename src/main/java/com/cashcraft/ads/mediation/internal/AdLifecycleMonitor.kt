@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import java.lang.ref.WeakReference
+import java.util.WeakHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
 /** Single source of truth for host activity and foreground state. */
@@ -23,6 +24,7 @@ internal object AdLifecycleMonitor {
     private var installedApplication: Application? = null
     private var resumedActivity = WeakReference<Activity>(null)
     private var startedActivityCount = 0
+    private val awaitingFirstResume = WeakHashMap<Activity, Boolean>()
 
     @Volatile
     var isAppInForeground: Boolean = false
@@ -33,12 +35,14 @@ internal object AdLifecycleMonitor {
 
     private val callbacks = object : Application.ActivityLifecycleCallbacks {
         override fun onActivityResumed(activity: Activity) {
+            awaitingFirstResume[activity] = false
             resumedActivity = WeakReference(activity)
             if (!isAppInForeground) enterForeground(activity)
             listeners.forEach { it.onActivityResumed(activity) }
         }
 
         override fun onActivityPaused(activity: Activity) {
+            awaitingFirstResume[activity] = false
             if (resumedActivity.get() === activity) resumedActivity.clear()
             listeners.forEach { it.onActivityPaused(activity) }
             mainHandler.postDelayed(::markBackgroundIfActivityRemainsPaused, PAUSE_GRACE_MILLIS)
@@ -50,16 +54,20 @@ internal object AdLifecycleMonitor {
         }
 
         override fun onActivityStopped(activity: Activity) {
+            awaitingFirstResume[activity] = false
             startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
             if (startedActivityCount == 0) enterBackground()
         }
 
         override fun onActivityDestroyed(activity: Activity) {
+            awaitingFirstResume.remove(activity)
             if (resumedActivity.get() === activity) resumedActivity.clear()
             listeners.forEach { it.onActivityDestroyed(activity) }
         }
 
-        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+            awaitingFirstResume[activity] = true
+        }
         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
     }
 
@@ -92,6 +100,14 @@ internal object AdLifecycleMonitor {
         else -> null
     }
 
+    /** A request from onCreate can wait for its first resume without being moved to another host. */
+    fun activityWaitFailureReason(activity: Activity): String? = when {
+        activity.isFinishing || activity.isDestroyed -> "activity_not_available"
+        currentActivity !== activity && awaitingFirstResume[activity] == true -> "activity_awaiting_first_resume"
+        else -> activityShowFailureReason(activity)
+    }
+
+
     private fun seed(activity: Activity) {
         resumedActivity = WeakReference(activity)
         startedActivityCount = startedActivityCount.coerceAtLeast(1)
@@ -116,7 +132,7 @@ internal object AdLifecycleMonitor {
             currentActivity == null &&
             !FullScreenShowGate.isAnyAdShowing
         ) {
-            startedActivityCount = 0
+            // A paused Activity is still started until onStop; keep lifecycle accounting intact.
             enterBackground()
         }
     }

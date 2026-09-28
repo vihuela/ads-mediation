@@ -27,7 +27,13 @@ internal class AdEventDispatcher(
     )
     private val logger = AdsModuleLogger(loggingEnabled, logTag)
 
-    fun begin(format: AdFormat, position: String, adUnitId: String): AdShowSession {
+    fun begin(
+        format: AdFormat,
+        position: String,
+        adUnitId: String,
+        attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
+        onCreated: (AdShowSession) -> Unit = {},
+    ): AdShowSession {
         val typedPosition = position.withAdType(format)
         val number = synchronized(preferences) {
             val key = "${format.analyticsValue}_position_count"
@@ -45,6 +51,8 @@ internal class AdEventDispatcher(
             sessionId = UUID.randomUUID().toString(),
             number = number,
             logger = logger,
+            attempt = attempt,
+            onCreated = onCreated,
         )
     }
 
@@ -187,10 +195,13 @@ internal class AdShowSession(
     val sessionId: String,
     private val number: Long,
     private val logger: AdsModuleLogger? = null,
+    val attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
+    onCreated: (AdShowSession) -> Unit = {},
 ) {
     private val terminal = AtomicBoolean(false)
 
     init {
+        onCreated(this)
         emit(AdEventName.POSITION)
     }
 

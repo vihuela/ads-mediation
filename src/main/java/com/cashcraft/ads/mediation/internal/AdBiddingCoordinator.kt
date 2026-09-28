@@ -56,10 +56,15 @@ internal object BidCandidateSelector {
 
 /** Immediately compares the same-format ads already cached by both providers. */
 internal object AdBiddingCoordinator {
-    fun select(format: AdFormat, onSelected: (BidDecision) -> Unit) {
+    fun select(format: AdFormat): BidDecision {
         // Match each standalone provider's show semantics: this opportunity never waits for a
         // network load. TopOn still starts a background fill for the next opportunity.
         TopOnAds.ensureLoaded(format)
+        return selectAvailable(format)
+    }
+
+    /** Reads the same-format cache without triggering a new load on every waiting tick. */
+    fun selectAvailable(format: AdFormat): BidDecision {
         val admobAvailable = AdMobAds.isReady(format)
         val topOnAvailable = TopOnAds.isReady(format)
         val selection = BidCandidateSelector.select(
@@ -68,14 +73,12 @@ internal object AdBiddingCoordinator {
             toponAvailable = topOnAvailable,
             toponPriceUsd = TopOnAds.bidPrice(format),
         )
-        onSelected(
-            BidDecision(
-                selection = selection,
-                admobAvailable = admobAvailable,
-                topOnAvailable = topOnAvailable,
-                admobPriceUsd = selection?.admobPriceUsd,
-                topOnPriceUsd = selection?.toponPriceUsd,
-            ),
+        return BidDecision(
+            selection = selection,
+            admobAvailable = admobAvailable,
+            topOnAvailable = topOnAvailable,
+            admobPriceUsd = selection?.admobPriceUsd,
+            topOnPriceUsd = selection?.toponPriceUsd,
         )
     }
 }

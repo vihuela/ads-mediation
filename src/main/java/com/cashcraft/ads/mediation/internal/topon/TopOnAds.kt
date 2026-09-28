@@ -23,6 +23,7 @@ import com.cashcraft.ads.mediation.internal.AdLoadSession
 import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.cashcraft.ads.mediation.internal.AutoAppOpenController
 import com.cashcraft.ads.mediation.internal.FullScreenShowGate
+import com.cashcraft.ads.mediation.internal.FullScreenShowAttempt
 import com.cashcraft.ads.mediation.internal.dismissedResult
 import com.thinkup.core.api.AdError
 import com.thinkup.core.api.TUAdConst
@@ -52,7 +53,6 @@ internal enum class TopOnState {
 /** TopOn overseas provider. TopOn owns mediation; this layer owns lifecycle and analytics. */
 internal object TopOnAds {
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val fullScreenShowGate = FullScreenShowGate()
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
 
     @Volatile
@@ -81,10 +81,14 @@ internal object TopOnAds {
     private var interstitialLoadSession: AdLoadSession? = null
     private var rewardedLoadSession: AdLoadSession? = null
 
+    @Volatile
     private var activeAppOpen: ActiveShow? = null
+    @Volatile
     private var activeInterstitial: ActiveShow? = null
+    @Volatile
     private var activeRewarded: ActiveRewardedShow? = null
     private val revenueSessionsByImpressionId = LinkedHashMap<String, AdShowSession>()
+    private val showSessionsByImpressionId = LinkedHashMap<String, String>()
     @SuppressLint("StaticFieldLeak")
     private var splashContainer: FrameLayout? = null
     private lateinit var autoAppOpenController: AutoAppOpenController<AdShowSession>
@@ -276,8 +280,10 @@ internal object TopOnAds {
         onSessionStarted: (AdShowSession) -> Unit,
         onResult: (AdShowResult) -> Unit,
         hostContainer: ViewGroup? = null,
+        attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
+        onSessionCreated: (AdShowSession) -> Unit = {},
     ) = onMain {
-        val session = beginBiddingSession(AdFormat.APP_OPEN, position)
+        val session = beginBiddingSession(AdFormat.APP_OPEN, position, attempt, onSessionCreated)
         onSessionStarted(session)
         showAppOpenOnMain(activity, position, onResult, session, hostContainer)
     }
@@ -287,8 +293,10 @@ internal object TopOnAds {
         position: String,
         onSessionStarted: (AdShowSession) -> Unit,
         onResult: (AdShowResult) -> Unit,
+        attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
+        onSessionCreated: (AdShowSession) -> Unit = {},
     ) = onMain {
-        val session = beginBiddingSession(AdFormat.INTERSTITIAL, position)
+        val session = beginBiddingSession(AdFormat.INTERSTITIAL, position, attempt, onSessionCreated)
         onSessionStarted(session)
         showInterstitialOnMain(activity, position, onResult, session)
     }
@@ -298,14 +306,26 @@ internal object TopOnAds {
         position: String,
         onSessionStarted: (AdShowSession) -> Unit,
         onResult: (AdRewardResult) -> Unit,
+        attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
+        onSessionCreated: (AdShowSession) -> Unit = {},
     ) = onMain {
-        val session = beginBiddingSession(AdFormat.REWARDED, position)
+        val session = beginBiddingSession(AdFormat.REWARDED, position, attempt, onSessionCreated)
         onSessionStarted(session)
         showRewardedOnMain(activity, position, onResult, session)
     }
 
-    internal fun beginBiddingSession(format: AdFormat, position: String): AdShowSession =
-        events.begin(format, position, config.adUnitId(format))
+    internal fun beginBiddingSession(
+        format: AdFormat,
+        position: String,
+        attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
+        onSessionCreated: (AdShowSession) -> Unit = {},
+    ): AdShowSession = events.begin(
+        format = format,
+        position = position,
+        adUnitId = config.adUnitId(format),
+        attempt = attempt,
+        onCreated = onSessionCreated,
+    )
 
     private fun finishInitialization(success: Boolean) {
         if (state != TopOnState.INITIALIZING) return
@@ -399,23 +419,57 @@ internal object TopOnAds {
             interstitialLoadSession?.failedFrom(error)
         }
 
-        override fun onInterstitialAdShow(info: TUAdInfo) = onMain {
-            activeInterstitial?.session?.let { session ->
-                rememberRevenueSession(info.showId, session)
-                session.impression(info.networkName, info.showId)
+        override fun onInterstitialAdShow(info: TUAdInfo) {
+            val captured = activeInterstitial
+            onMain {
+                if (!canAcceptShowCallback(
+                        captured?.session,
+                        activeInterstitial?.session,
+                        info.showId,
+                    )
+                ) return@onMain
+                captured?.session?.let { session ->
+                    rememberShowSession(info.showId, session)
+                    rememberRevenueSession(info.showId, session)
+                    session.impression(info.networkName, info.showId)
+                }
             }
         }
 
-        override fun onInterstitialAdClicked(info: TUAdInfo) = onMain {
-            activeInterstitial?.session?.emit(AdEventName.CLICK)
+        override fun onInterstitialAdClicked(info: TUAdInfo) {
+            val captured = activeInterstitial
+            onMain {
+                if (!canAcceptShowCallback(
+                        captured?.session,
+                        activeInterstitial?.session,
+                        info.showId,
+                    )
+                ) return@onMain
+                captured?.session?.emit(AdEventName.CLICK)
+            }
         }
 
-        override fun onInterstitialAdClose(info: TUAdInfo) = onMain {
-            finishInterstitialDismissed()
+        override fun onInterstitialAdClose(info: TUAdInfo) {
+            val captured = activeInterstitial
+            onMain {
+                if (!canAcceptShowCallback(
+                        captured?.session,
+                        activeInterstitial?.session,
+                        info.showId,
+                    )
+                ) return@onMain
+                finishInterstitialDismissed()
+            }
         }
 
-        override fun onInterstitialAdVideoError(error: AdError) = onMain {
-            finishInterstitialFailed(error)
+        override fun onInterstitialAdVideoError(error: AdError) {
+            val captured = activeInterstitial
+            onMain {
+                if (captured == null || activeInterstitial?.session !== captured.session) {
+                    return@onMain
+                }
+                finishInterstitialFailed(error)
+            }
         }
 
         override fun onInterstitialAdVideoStart(info: TUAdInfo) = Unit
@@ -433,33 +487,76 @@ internal object TopOnAds {
             rewardedLoadSession?.failedFrom(error)
         }
 
-        override fun onRewardedVideoAdPlayStart(info: TUAdInfo) = onMain {
-            activeRewarded?.session?.let { session ->
-                rememberRevenueSession(info.showId, session)
-                session.impression(info.networkName, info.showId)
+        override fun onRewardedVideoAdPlayStart(info: TUAdInfo) {
+            val captured = activeRewarded
+            onMain {
+                if (!canAcceptShowCallback(
+                        captured?.session,
+                        activeRewarded?.session,
+                        info.showId,
+                    )
+                ) return@onMain
+                captured?.session?.let { session ->
+                    rememberShowSession(info.showId, session)
+                    rememberRevenueSession(info.showId, session)
+                    session.impression(info.networkName, info.showId)
+                }
             }
         }
 
-        override fun onRewardedVideoAdPlayClicked(info: TUAdInfo) = onMain {
-            activeRewarded?.session?.emit(AdEventName.CLICK)
-        }
-
-        override fun onReward(info: TUAdInfo) = onMain {
-            activeRewarded?.let { active ->
-                active.rewardEarned = true
-                active.session.emit(
-                    AdEventName.REWARD_EARNED,
-                    reason = "${info.scenarioRewardName}:${info.scenarioRewardNumber}",
-                )
+        override fun onRewardedVideoAdPlayClicked(info: TUAdInfo) {
+            val captured = activeRewarded
+            onMain {
+                if (!canAcceptShowCallback(
+                        captured?.session,
+                        activeRewarded?.session,
+                        info.showId,
+                    )
+                ) return@onMain
+                captured?.session?.emit(AdEventName.CLICK)
             }
         }
 
-        override fun onRewardedVideoAdClosed(info: TUAdInfo) = onMain {
-            finishRewardedDismissed()
+        override fun onReward(info: TUAdInfo) {
+            val captured = activeRewarded
+            onMain {
+                if (!canAcceptShowCallback(
+                        captured?.session,
+                        activeRewarded?.session,
+                        info.showId,
+                    )
+                ) return@onMain
+                captured?.let { active ->
+                    active.rewardEarned = true
+                    active.session.emit(
+                        AdEventName.REWARD_EARNED,
+                        reason = "${info.scenarioRewardName}:${info.scenarioRewardNumber}",
+                    )
+                }
+            }
         }
 
-        override fun onRewardedVideoAdPlayFailed(error: AdError, info: TUAdInfo?) = onMain {
-            finishRewardedFailed(error)
+        override fun onRewardedVideoAdClosed(info: TUAdInfo) {
+            val captured = activeRewarded
+            onMain {
+                if (!canAcceptShowCallback(
+                        captured?.session,
+                        activeRewarded?.session,
+                        info.showId,
+                    )
+                ) return@onMain
+                finishRewardedDismissed()
+            }
+        }
+
+        override fun onRewardedVideoAdPlayFailed(error: AdError, info: TUAdInfo?) {
+            val captured = activeRewarded
+            onMain {
+                if (!canAcceptShowCallback(captured?.session, activeRewarded?.session, info?.showId)) {
+                    return@onMain
+                }
+                finishRewardedFailed(error)
+            }
         }
 
         override fun onRewardedVideoAdPlayEnd(info: TUAdInfo) = Unit
@@ -477,19 +574,44 @@ internal object TopOnAds {
             appOpenLoadSession?.failedFrom(error)
         }
 
-        override fun onAdShow(info: TUAdInfo) = onMain {
-            activeAppOpen?.session?.let { session ->
-                rememberRevenueSession(info.showId, session)
-                session.impression(info.networkName, info.showId)
+        override fun onAdShow(info: TUAdInfo) {
+            val captured = activeAppOpen
+            onMain {
+                if (!canAcceptShowCallback(
+                        captured?.session,
+                        activeAppOpen?.session,
+                        info.showId,
+                    )
+                ) return@onMain
+                captured?.session?.let { session ->
+                    rememberShowSession(info.showId, session)
+                    rememberRevenueSession(info.showId, session)
+                    session.impression(info.networkName, info.showId)
+                }
             }
         }
 
-        override fun onAdClick(info: TUAdInfo) = onMain {
-            activeAppOpen?.session?.emit(AdEventName.CLICK)
+        override fun onAdClick(info: TUAdInfo) {
+            val captured = activeAppOpen
+            onMain {
+                if (!canAcceptShowCallback(
+                        captured?.session,
+                        activeAppOpen?.session,
+                        info.showId,
+                    )
+                ) return@onMain
+                captured?.session?.emit(AdEventName.CLICK)
+            }
         }
 
-        override fun onAdDismiss(info: TUAdInfo, extra: TUSplashAdExtraInfo) = onMain {
-            finishAppOpenDismissed()
+        override fun onAdDismiss(info: TUAdInfo, extra: TUSplashAdExtraInfo) {
+            val captured = activeAppOpen
+            onMain {
+                if (!canAcceptShowCallback(captured?.session, activeAppOpen?.session, info.showId)) {
+                    return@onMain
+                }
+                finishAppOpenDismissed()
+            }
         }
     }
 
@@ -507,7 +629,7 @@ internal object TopOnAds {
         if (!canShow(activity, session, onResult = onResult)) return
         if (!appOpenAd.isAdReady) {
             failBeforeShow(session, NO_AD_AVAILABLE, onResult)
-            loadAppOpen()
+            if (!session.attempt.isWaitingOpportunity) loadAppOpen()
             return
         }
         val hostResult = runCatching {
@@ -534,7 +656,7 @@ internal object TopOnAds {
             )
             return
         }
-        if (!host.isAttachedToWindow) {
+        if (!host.isAttachedToWindow || host.rootView !== activity.window.decorView) {
             failBeforeShow(
                 session = session,
                 reason = APP_OPEN_CONTAINER_UNAVAILABLE,
@@ -558,8 +680,13 @@ internal object TopOnAds {
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
         }
+        // Register cleanup before addView: host attachment listeners may cancel/reenter.
+        splashContainer = container
+        activeAppOpen = ActiveShow(session, onResult)
+        session.attempt.onAborted = { clearPreparedAppOpen(session, container) }
         val attachError = runCatching { host.addView(container) }.exceptionOrNull()
         if (attachError != null) {
+            clearPreparedAppOpen(session, container)
             failBeforeShow(
                 session = session,
                 reason = APP_OPEN_CONTAINER_ATTACH_FAILED,
@@ -569,10 +696,28 @@ internal object TopOnAds {
             )
             return
         }
-        splashContainer = container
-        activeAppOpen = ActiveShow(session, onResult)
+        if (!commitForShow(
+                activity = activity,
+                session = session,
+                onResult = onResult,
+                finalCheck = {
+                    when {
+                        !appOpenAd.isAdReady -> NO_AD_AVAILABLE
+                        !host.isAttachedToWindow || !host.isShown || !container.isAttachedToWindow ||
+                            host.rootView !== activity.window.decorView ->
+                            APP_OPEN_CONTAINER_UNAVAILABLE
+                        else -> null
+                    }
+                },
+            )
+        ) {
+            clearPreparedAppOpen(session, container)
+            return
+        }
         runCatching { appOpenAd.show(activity, container) }.onFailure { error ->
-            finishAppOpenFailed("show_exception", error.javaClass.simpleName, error)
+            if (activeAppOpen?.session === session) {
+                finishAppOpenFailed("show_exception", error.javaClass.simpleName, error)
+            }
         }
         mainHandler.postDelayed(
             {
@@ -597,12 +742,24 @@ internal object TopOnAds {
         if (!canShow(activity, session, onResult)) return
         if (!interstitialAd.isAdReady) {
             failBeforeShow(session, NO_AD_AVAILABLE, onResult)
-            loadInterstitial()
+            if (!session.attempt.isWaitingOpportunity) loadInterstitial()
+            return
+        }
+        if (!commitForShow(
+                activity = activity,
+                session = session,
+                onResult = onResult,
+                finalCheck = { if (!interstitialAd.isAdReady) NO_AD_AVAILABLE else null },
+            )
+        ) {
+            if (!session.attempt.isWaitingOpportunity && !interstitialAd.isAdReady) loadInterstitial()
             return
         }
         activeInterstitial = ActiveShow(session, onResult)
         runCatching { interstitialAd.show(activity) }.onFailure { error ->
-            finishInterstitialFailed(error.message ?: "show_exception", "exception")
+            if (activeInterstitial?.session === session) {
+                finishInterstitialFailed(error.message ?: "show_exception", "exception")
+            }
         }
     }
 
@@ -622,12 +779,24 @@ internal object TopOnAds {
         if (!canShow(activity, session, showResultCallback)) return
         if (!rewardedAd.isAdReady) {
             failBeforeShow(session, NO_AD_AVAILABLE, showResultCallback)
-            loadRewarded()
+            if (!session.attempt.isWaitingOpportunity) loadRewarded()
+            return
+        }
+        if (!commitForShow(
+                activity = activity,
+                session = session,
+                onResult = showResultCallback,
+                finalCheck = { if (!rewardedAd.isAdReady) NO_AD_AVAILABLE else null },
+            )
+        ) {
+            if (!session.attempt.isWaitingOpportunity && !rewardedAd.isAdReady) loadRewarded()
             return
         }
         activeRewarded = ActiveRewardedShow(session, onResult)
         runCatching { rewardedAd.show(activity) }.onFailure { error ->
-            finishRewardedFailed(error.message ?: "show_exception", "exception")
+            if (activeRewarded?.session === session) {
+                finishRewardedFailed(error.message ?: "show_exception", "exception")
+            }
         }
     }
 
@@ -636,13 +805,13 @@ internal object TopOnAds {
         session: AdShowSession,
         onResult: (AdShowResult) -> Unit,
     ): Boolean {
-        val reason = fullScreenShowGate.tryAcquire(
+        val reason = FullScreenShowGate.tryAcquire(
             activity = activity,
             providerFailureReason = state.takeUnless { it == TopOnState.READY }?.showFailureReason(),
+            attempt = session.attempt,
         )
         if (reason != null) {
-            session.showFailure(reason)
-            runCatching { onResult(AdShowResult.Failed(reason)) }
+            failBeforeShow(session, reason, onResult)
             return false
         }
         return true
@@ -655,13 +824,33 @@ internal object TopOnAds {
         errorCode: String? = null,
         cause: Throwable? = null,
     ) {
-        fullScreenShowGate.release()
+        if (!session.attempt.complete()) return
         session.showFailure(reason, errorCode, cause)
         runCatching { onResult(AdShowResult.Failed(reason)) }
     }
 
+    private fun commitForShow(
+        activity: Activity,
+        session: AdShowSession,
+        onResult: (AdShowResult) -> Unit,
+        finalCheck: () -> String? = { null },
+    ): Boolean {
+        val reason = FullScreenShowGate.commit(
+            activity = activity,
+            providerFailureReason = state.takeUnless { it == TopOnState.READY }?.showFailureReason(),
+            attempt = session.attempt,
+            finalCheck = finalCheck,
+        )
+        if (reason != null) {
+            failBeforeShow(session, reason, onResult)
+            return false
+        }
+        return true
+    }
+
     private fun finishInterstitialDismissed() {
         val active = activeInterstitial ?: return
+        if (!active.session.attempt.complete()) return
         activeInterstitial = null
         finishDismissed(active)
         loadInterstitial()
@@ -672,6 +861,7 @@ internal object TopOnAds {
 
     private fun finishInterstitialFailed(reason: String, errorCode: String?) {
         val active = activeInterstitial ?: return
+        if (!active.session.attempt.complete()) return
         activeInterstitial = null
         finishFailed(active, reason, errorCode)
         loadInterstitial()
@@ -679,10 +869,10 @@ internal object TopOnAds {
 
     private fun finishRewardedDismissed() {
         val active = activeRewarded ?: return
+        if (!active.session.attempt.complete()) return
         activeRewarded = null
         val result = active.session.dismissedResult()
         active.session.emit(AdEventName.DISMISS)
-        fullScreenShowGate.release()
         runCatching {
             active.onResult(AdRewardResult(active.rewardEarned, result, active.session.sessionId))
         }
@@ -694,9 +884,9 @@ internal object TopOnAds {
 
     private fun finishRewardedFailed(reason: String, errorCode: String?) {
         val active = activeRewarded ?: return
+        if (!active.session.attempt.complete()) return
         activeRewarded = null
         active.session.showFailure(reason, errorCode)
-        fullScreenShowGate.release()
         runCatching {
             active.onResult(
                 AdRewardResult(
@@ -711,6 +901,7 @@ internal object TopOnAds {
 
     private fun finishAppOpenDismissed() {
         val active = activeAppOpen ?: return
+        if (!active.session.attempt.complete()) return
         activeAppOpen = null
         removeSplashContainer()
         finishDismissed(active)
@@ -719,6 +910,7 @@ internal object TopOnAds {
 
     private fun finishAppOpenFailed(reason: String, errorCode: String?, cause: Throwable? = null) {
         val active = activeAppOpen ?: return
+        if (!active.session.attempt.complete()) return
         activeAppOpen = null
         removeSplashContainer()
         finishFailed(active, reason, errorCode, cause)
@@ -728,7 +920,6 @@ internal object TopOnAds {
     private fun finishDismissed(active: ActiveShow) {
         val result = active.session.dismissedResult()
         active.session.emit(AdEventName.DISMISS)
-        fullScreenShowGate.release()
         runCatching { active.onResult(result) }
     }
 
@@ -739,15 +930,44 @@ internal object TopOnAds {
         cause: Throwable? = null,
     ) {
         active.session.showFailure(reason, errorCode, cause)
-        fullScreenShowGate.release()
         runCatching { active.onResult(AdShowResult.Failed(reason)) }
     }
 
     private fun removeSplashContainer() {
-        splashContainer?.let { container ->
-            (container.parent as? ViewGroup)?.removeView(container)
+        removeSplashContainer(splashContainer)
+    }
+
+    private fun removeSplashContainer(container: FrameLayout?) {
+        container ?: return
+        (container.parent as? ViewGroup)?.removeView(container)
+        if (splashContainer === container) splashContainer = null
+    }
+
+    private fun clearPreparedAppOpen(session: AdShowSession, container: FrameLayout) {
+        if (activeAppOpen?.session === session) activeAppOpen = null
+        removeSplashContainer(container)
+    }
+
+    private fun canAcceptShowCallback(
+        capturedSession: AdShowSession?,
+        currentSession: AdShowSession?,
+        showId: String?,
+    ): Boolean = acceptsTopOnCallback(
+        capturedSessionId = capturedSession?.sessionId,
+        currentSessionId = currentSession?.sessionId,
+        recordedSessionId = showId?.trim()?.let(showSessionsByImpressionId::get),
+        committed = capturedSession?.attempt?.isCommitted == true,
+    )
+
+    private fun rememberShowSession(impressionId: String?, session: AdShowSession) {
+        val normalizedId = impressionId?.trim()?.takeIf(String::isNotEmpty) ?: return
+        // ponytail: remember the last 32 IDs without retaining page callbacks. Reject known stale
+        // IDs; callbacks with no SDK identity still rely on the SDK's per-show ordering contract.
+        showSessionsByImpressionId[normalizedId] = session.sessionId
+        while (showSessionsByImpressionId.size > MAX_PENDING_REVENUE_SESSIONS) {
+            val oldestId = showSessionsByImpressionId.entries.firstOrNull()?.key ?: break
+            showSessionsByImpressionId.remove(oldestId)
         }
-        splashContainer = null
     }
 
     private fun revenuePaid(session: AdShowSession?, info: TUAdInfo) {
@@ -881,3 +1101,12 @@ internal fun TopOnState.showFailureReason(): String = when (this) {
     TopOnState.FAILED -> "sdk_initialization_failed"
     TopOnState.READY -> "sdk_not_ready"
 }
+
+/** Unknown IDs preserve legacy callbacks; a known old ID must never finish a newer owner. */
+internal fun acceptsTopOnCallback(
+    capturedSessionId: String?,
+    currentSessionId: String?,
+    recordedSessionId: String?,
+    committed: Boolean,
+): Boolean = committed && capturedSessionId != null && capturedSessionId == currentSessionId &&
+    (recordedSessionId == null || recordedSessionId == capturedSessionId)

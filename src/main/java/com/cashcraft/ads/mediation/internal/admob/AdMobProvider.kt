@@ -4,7 +4,12 @@ import android.app.Activity
 import android.app.Application
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import com.google.android.libraries.ads.mobile.sdk.MobileAds
+import com.google.android.libraries.ads.mobile.sdk.appopen.AppOpenAd
+import com.google.android.libraries.ads.mobile.sdk.common.Ad
+import com.google.android.libraries.ads.mobile.sdk.interstitial.InterstitialAd
+import com.google.android.libraries.ads.mobile.sdk.rewarded.RewardedAd
 import com.google.android.libraries.ads.mobile.sdk.appopen.AppOpenAdEventCallback
 import com.google.android.libraries.ads.mobile.sdk.appopen.AppOpenAdPreloader
 import com.google.android.libraries.ads.mobile.sdk.common.AdRequest
@@ -29,6 +34,7 @@ import com.cashcraft.ads.mediation.internal.AdLoadSession
 import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.cashcraft.ads.mediation.internal.AutoAppOpenController
 import com.cashcraft.ads.mediation.internal.FullScreenShowGate
+import com.cashcraft.ads.mediation.internal.FullScreenShowAttempt
 import com.cashcraft.ads.mediation.internal.dismissedResult
 import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
@@ -54,7 +60,6 @@ enum class AdMobState {
 object AdMobAds {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val fullScreenShowGate = FullScreenShowGate()
     private val mobileAdsInitializationStarted = AtomicBoolean(false)
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
 
@@ -68,6 +73,10 @@ object AdMobAds {
     private lateinit var autoAppOpenController: AutoAppOpenController<AdShowSession>
     private val preloadDescriptors = mutableMapOf<String, PreloadDescriptor>()
     private val preloadLoadSessions = mutableMapOf<String, AdLoadSession>()
+    private val preloadStartedAt = mutableMapOf<String, Long>()
+    private val responseLoadBounds = mutableMapOf<String, Long>()
+    private val pendingAds = mutableMapOf<AdMobFormat, RetainedAd<Ad>>()
+    private val takenAds = mutableMapOf<Ad, RetainedAd<Ad>>()
 
     /** Call once from `Application.onCreate`. Initialization itself runs off the main thread. */
     fun initialize(
@@ -111,7 +120,7 @@ object AdMobAds {
                 providerFailureReason = {
                     state.takeUnless { it == AdMobState.READY }?.showFailureReason()
                 },
-                isAdAvailable = { AppOpenAdPreloader.isAdAvailable(PRELOAD_APP_OPEN) },
+                isAdAvailable = { isReady(AdMobFormat.APP_OPEN) },
                 shouldIgnoreActivity = { it.isGoogleMobileAdsActivity() },
                 beginOpportunity = {
                     events.begin(
@@ -157,6 +166,7 @@ object AdMobAds {
 
     fun isReady(format: AdMobFormat): Boolean {
         if (state != AdMobState.READY) return false
+        if (pendingAd(format) != null) return true
         return when (format) {
             AdMobFormat.APP_OPEN -> AppOpenAdPreloader.isAdAvailable(PRELOAD_APP_OPEN)
             AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.isAdAvailable(PRELOAD_INTERSTITIAL)
@@ -211,8 +221,10 @@ object AdMobAds {
         position: String,
         onSessionStarted: (AdShowSession) -> Unit,
         onResult: (AdMobShowResult) -> Unit,
+        attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
+        onSessionCreated: (AdShowSession) -> Unit = {},
     ) = onMain {
-        val session = beginBiddingSession(AdMobFormat.APP_OPEN, position)
+        val session = beginBiddingSession(AdMobFormat.APP_OPEN, position, attempt, onSessionCreated)
         onSessionStarted(session)
         showAppOpenOnMain(activity, position, onResult, session)
     }
@@ -222,8 +234,10 @@ object AdMobAds {
         position: String,
         onSessionStarted: (AdShowSession) -> Unit,
         onResult: (AdMobShowResult) -> Unit,
+        attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
+        onSessionCreated: (AdShowSession) -> Unit = {},
     ) = onMain {
-        val session = beginBiddingSession(AdMobFormat.INTERSTITIAL, position)
+        val session = beginBiddingSession(AdMobFormat.INTERSTITIAL, position, attempt, onSessionCreated)
         onSessionStarted(session)
         showInterstitialOnMain(activity, position, onResult, session)
     }
@@ -233,14 +247,20 @@ object AdMobAds {
         position: String,
         onSessionStarted: (AdShowSession) -> Unit,
         onResult: (AdMobRewardResult) -> Unit,
+        attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
+        onSessionCreated: (AdShowSession) -> Unit = {},
     ) = onMain {
-        val session = beginBiddingSession(AdMobFormat.REWARDED, position)
+        val session = beginBiddingSession(AdMobFormat.REWARDED, position, attempt, onSessionCreated)
         onSessionStarted(session)
         showRewardedOnMain(activity, position, onResult, session)
     }
 
-    internal fun beginBiddingSession(format: AdMobFormat, position: String): AdShowSession =
-        events.begin(format, position, config.ids.adUnitId(format))
+    internal fun beginBiddingSession(
+        format: AdMobFormat,
+        position: String,
+        attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
+        onSessionCreated: (AdShowSession) -> Unit = {},
+    ): AdShowSession = events.begin(format, position, config.ids.adUnitId(format), attempt, onSessionCreated)
 
     private fun finishInitialization(success: Boolean) {
         state = if (success) AdMobState.READY else AdMobState.FAILED
@@ -253,7 +273,18 @@ object AdMobAds {
     private fun startPreloading() {
         val preloadCallback = object : PreloadCallback {
             override fun onAdPreloaded(preloadId: String, responseInfo: ResponseInfo) {
-                onMain {
+                mainHandler.post {
+                    // Matching is by response ID, never by callback/poll order.
+                    // ponytail: preload-start age discards later fills early; use a public
+                    // per-ad load timestamp if the SDK eventually exposes one.
+                    responseLoadBounds.entries.removeAll {
+                        SystemClock.elapsedRealtime() - it.value >= APP_OPEN_MAX_AGE_MILLIS
+                    }
+                    val responseId = responseInfo.responseId
+                    val loadBound = preloadStartedAt[preloadId]
+                    if (!responseId.isNullOrBlank() && loadBound != null) {
+                        responseLoadBounds[responseId] = loadBound
+                    }
                     preloadLoadSessions[preloadId]?.loaded(
                         adSource = responseInfo.loadedAdSourceResponseInfo?.name,
                         responseId = responseInfo.responseId,
@@ -265,7 +296,7 @@ object AdMobAds {
             }
 
             override fun onAdFailedToPreload(preloadId: String, adError: LoadAdError) {
-                onMain {
+                mainHandler.post {
                     preloadLoadSessions[preloadId]?.failed(
                         result = adError.analyticsLoadResult(),
                         errorCode = adError.code.name,
@@ -276,7 +307,7 @@ object AdMobAds {
             }
 
             override fun onAdsExhausted(preloadId: String) {
-                onMain { beginPreloadCycle(preloadId) }
+                mainHandler.post { beginPreloadCycle(preloadId) }
             }
         }
         preloadDescriptors.clear()
@@ -296,16 +327,19 @@ object AdMobAds {
             bufferSize = config.preload.rewarded,
         )
         preloadDescriptors.keys.forEach(::beginPreloadCycle)
+        preloadStartedAt[PRELOAD_APP_OPEN] = SystemClock.elapsedRealtime()
         AppOpenAdPreloader.start(
             PRELOAD_APP_OPEN,
             preloadConfiguration(config.ids.appOpenId, config.preload.appOpen),
             preloadCallback,
         )
+        preloadStartedAt[PRELOAD_INTERSTITIAL] = SystemClock.elapsedRealtime()
         InterstitialAdPreloader.start(
             PRELOAD_INTERSTITIAL,
             preloadConfiguration(config.ids.interstitialId, config.preload.interstitial),
             preloadCallback,
         )
+        preloadStartedAt[PRELOAD_REWARDED] = SystemClock.elapsedRealtime()
         RewardedAdPreloader.start(
             PRELOAD_REWARDED,
             preloadConfiguration(config.ids.rewardedId, config.preload.rewarded),
@@ -335,8 +369,58 @@ object AdMobAds {
     )
 
     internal fun bidPrice(format: AdMobFormat): Double? {
+        pendingAd(format)?.let { return it.priceUsd }
         if (!isReady(format)) return null
         return AdMobNextGenBidPrice.peek(format, format.preloadId())
+    }
+
+    private fun pendingAd(format: AdMobFormat): RetainedAd<Ad>? = synchronized(pendingAds) {
+        val pending = pendingAds[format] ?: return@synchronized null
+        if (pending.isUsable(SystemClock.elapsedRealtime())) return@synchronized pending
+        pendingAds.remove(format)
+        onMain { pending.ad.destroy() }
+        null
+    }
+
+    private fun takeAd(format: AdMobFormat): Ad? {
+        // Remove atomically before use: an off-main isReady() may expire a retained entry.
+        val pending = synchronized(pendingAds) { pendingAds.remove(format) }
+        if (pending != null) {
+            if (pending.isUsable(SystemClock.elapsedRealtime())) {
+                takenAds[pending.ad] = pending
+                return pending.ad
+            }
+            pending.ad.destroy()
+        }
+        val ad: Ad = when (format) {
+            AdMobFormat.APP_OPEN -> AppOpenAdPreloader.pollAd(PRELOAD_APP_OPEN)
+            AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.pollAd(PRELOAD_INTERSTITIAL)
+            AdMobFormat.REWARDED -> RewardedAdPreloader.pollAd(PRELOAD_REWARDED)
+        } ?: return null
+        val bound = responseLoadBounds.remove(ad.getResponseInfo().responseId)
+        takenAds[ad] = RetainedAd(
+            ad, bound,
+            // Next-Gen documents four hours for app-open. It exposes no retained-object TTL
+            // for interstitial/rewarded: unknown validity must never become a reusable ad.
+            if (format == AdMobFormat.APP_OPEN) APP_OPEN_MAX_AGE_MILLIS else null,
+            // The existing queue price cannot be proved to belong to this polled response.
+            priceUsd = null,
+        )
+        return ad
+    }
+
+    private fun retainUnshownAd(format: AdMobFormat, ad: Ad) {
+        when (ad) {
+            is AppOpenAd -> ad.adEventCallback = null
+            is InterstitialAd -> ad.adEventCallback = null
+            is RewardedAd -> ad.adEventCallback = null
+        }
+        val retained = takenAds.remove(ad)?.copy(wasRetained = true)
+        if (retained?.isUsable(SystemClock.elapsedRealtime()) == true) {
+            synchronized(pendingAds) { pendingAds.put(format, retained) }?.ad?.destroy()
+        } else {
+            ad.destroy()
+        }
     }
 
     private fun AdMobFormat.preloadId(): String = when (this) {
@@ -358,19 +442,22 @@ object AdMobAds {
         session: AdShowSession = events.begin(AdMobFormat.APP_OPEN, position, config.ids.appOpenId),
     ) {
         if (!canShow(activity, session, onResult = onResult)) return
-        val ad = AppOpenAdPreloader.pollAd(PRELOAD_APP_OPEN)
+        val ad = takeAd(AdMobFormat.APP_OPEN) as? AppOpenAd
         if (ad == null) {
             failBeforeShow(session, NO_AD_AVAILABLE, onResult)
             return
         }
+        val responseInfo = ad.getResponseInfo()
         ad.adEventCallback = object : AppOpenAdEventCallback {
-            override fun onAdImpression() = session.impression(ad.adSource(), ad.getResponseInfo().responseId)
-            override fun onAdClicked() = session.emit(AdMobEventName.CLICK)
-            override fun onAdPaid(value: AdValue) = session.paid(value, ad.getResponseInfo())
-            override fun onAdDismissedFullScreenContent() {
+            override fun onAdImpression() = onMain {
+                session.impression(responseInfo.loadedAdSourceResponseInfo?.name, responseInfo.responseId)
+            }
+            override fun onAdClicked() = onMain { session.emit(AdMobEventName.CLICK) }
+            override fun onAdPaid(value: AdValue) = onMain { session.paid(value, responseInfo) }
+            override fun onAdDismissedFullScreenContent() = onMain {
                 finishDismissed(ad, session, onResult)
             }
-            override fun onAdFailedToShowFullScreenContent(fullScreenContentError: FullScreenContentError) {
+            override fun onAdFailedToShowFullScreenContent(fullScreenContentError: FullScreenContentError) = onMain {
                 finishFailed(ad, session, fullScreenContentError, onResult)
             }
         }
@@ -388,19 +475,22 @@ object AdMobAds {
         ),
     ) {
         if (!canShow(activity, session, onResult)) return
-        val ad = InterstitialAdPreloader.pollAd(PRELOAD_INTERSTITIAL)
+        val ad = takeAd(AdMobFormat.INTERSTITIAL) as? InterstitialAd
         if (ad == null) {
             failBeforeShow(session, NO_AD_AVAILABLE, onResult)
             return
         }
+        val responseInfo = ad.getResponseInfo()
         ad.adEventCallback = object : InterstitialAdEventCallback {
-            override fun onAdImpression() = session.impression(ad.adSource(), ad.getResponseInfo().responseId)
-            override fun onAdClicked() = session.emit(AdMobEventName.CLICK)
-            override fun onAdPaid(value: AdValue) = session.paid(value, ad.getResponseInfo())
-            override fun onAdDismissedFullScreenContent() {
+            override fun onAdImpression() = onMain {
+                session.impression(responseInfo.loadedAdSourceResponseInfo?.name, responseInfo.responseId)
+            }
+            override fun onAdClicked() = onMain { session.emit(AdMobEventName.CLICK) }
+            override fun onAdPaid(value: AdValue) = onMain { session.paid(value, responseInfo) }
+            override fun onAdDismissedFullScreenContent() = onMain {
                 finishDismissed(ad, session, onResult)
             }
-            override fun onAdFailedToShowFullScreenContent(fullScreenContentError: FullScreenContentError) {
+            override fun onAdFailedToShowFullScreenContent(fullScreenContentError: FullScreenContentError) = onMain {
                 finishFailed(ad, session, fullScreenContentError, onResult)
             }
         }
@@ -423,22 +513,25 @@ object AdMobAds {
             )
         }
         if (!canShow(activity, session, showResultCallback)) return
-        val ad = RewardedAdPreloader.pollAd(PRELOAD_REWARDED)
+        val ad = takeAd(AdMobFormat.REWARDED) as? RewardedAd
         if (ad == null) {
             failBeforeShow(session, NO_AD_AVAILABLE, showResultCallback)
             return
         }
         var rewardEarned = false
+        val responseInfo = ad.getResponseInfo()
         ad.adEventCallback = object : RewardedAdEventCallback {
-            override fun onAdImpression() = session.impression(ad.adSource(), ad.getResponseInfo().responseId)
-            override fun onAdClicked() = session.emit(AdMobEventName.CLICK)
-            override fun onAdPaid(value: AdValue) = session.paid(value, ad.getResponseInfo())
-            override fun onAdDismissedFullScreenContent() {
+            override fun onAdImpression() = onMain {
+                session.impression(responseInfo.loadedAdSourceResponseInfo?.name, responseInfo.responseId)
+            }
+            override fun onAdClicked() = onMain { session.emit(AdMobEventName.CLICK) }
+            override fun onAdPaid(value: AdValue) = onMain { session.paid(value, responseInfo) }
+            override fun onAdDismissedFullScreenContent() = onMain {
                 finishDismissed(ad, session) { result ->
                     onResult(AdMobRewardResult(rewardEarned, result, session.sessionId))
                 }
             }
-            override fun onAdFailedToShowFullScreenContent(fullScreenContentError: FullScreenContentError) {
+            override fun onAdFailedToShowFullScreenContent(fullScreenContentError: FullScreenContentError) = onMain {
                 finishFailed(ad, session, fullScreenContentError) { result ->
                     onResult(
                         AdMobRewardResult(
@@ -452,11 +545,13 @@ object AdMobAds {
         }
         showSafely(ad, activity, session, showResultCallback) {
             ad.show(activity) { rewardItem ->
-                rewardEarned = true
-                session.emit(
-                    AdMobEventName.REWARD_EARNED,
-                    reason = "${rewardItem.type}:${rewardItem.amount}",
-                )
+                onMain {
+                    rewardEarned = true
+                    session.emit(
+                        AdMobEventName.REWARD_EARNED,
+                        reason = "${rewardItem.type}:${rewardItem.amount}",
+                    )
+                }
             }
         }
     }
@@ -466,13 +561,13 @@ object AdMobAds {
         session: AdShowSession,
         onResult: (AdMobShowResult) -> Unit,
     ): Boolean {
-        val reason = fullScreenShowGate.tryAcquire(
+        val reason = FullScreenShowGate.tryAcquire(
             activity = activity,
             providerFailureReason = state.takeUnless { it == AdMobState.READY }?.showFailureReason(),
+            attempt = session.attempt,
         )
         if (reason != null) {
-            session.showFailure(reason)
-            runCatching { onResult(AdShowResult.Failed(reason)) }
+            failBeforeShow(session, reason, onResult)
             return false
         }
         return true
@@ -483,7 +578,7 @@ object AdMobAds {
         reason: String,
         onResult: (AdMobShowResult) -> Unit,
     ) {
-        fullScreenShowGate.release()
+        if (!session.attempt.complete()) return
         session.showFailure(reason)
         runCatching { onResult(AdShowResult.Failed(reason)) }
     }
@@ -495,9 +590,30 @@ object AdMobAds {
         onResult: (AdMobShowResult) -> Unit,
         show: () -> Unit,
     ) {
+        session.attempt.onAborted = { retainUnshownAd(session.format, ad) }
+        val reason = FullScreenShowGate.commit(
+            activity,
+            state.takeUnless { it == AdMobState.READY }?.showFailureReason(),
+            session.attempt,
+            finalCheck = {
+                val taken = takenAds[ad]
+                if (taken?.wasRetained == true && !taken.isUsable(SystemClock.elapsedRealtime())) {
+                    NO_AD_AVAILABLE
+                } else null
+            },
+        )
+        if (reason != null) {
+            session.attempt.invalidate(reason)
+            failBeforeShow(session, reason, onResult)
+            return
+        }
+        takenAds.remove(ad)
         runCatching(show).onFailure { error ->
+            if (!session.attempt.complete()) return@onFailure
             ad.destroy()
-            failBeforeShow(session, error.message ?: "show_exception", onResult)
+            val failure = error.message ?: "show_exception"
+            session.showFailure(failure, cause = error)
+            runCatching { onResult(AdShowResult.Failed(failure)) }
         }
     }
 
@@ -506,10 +622,10 @@ object AdMobAds {
         session: AdShowSession,
         onResult: (AdMobShowResult) -> Unit,
     ) {
+        if (!session.attempt.complete()) return
         val result = session.dismissedResult()
         session.emit(AdMobEventName.DISMISS)
         ad.destroy()
-        fullScreenShowGate.release()
         runCatching { onResult(result) }
     }
 
@@ -519,10 +635,10 @@ object AdMobAds {
         error: FullScreenContentError,
         onResult: (AdMobShowResult) -> Unit,
     ) {
+        if (!session.attempt.complete()) return
         val reason = error.message.ifBlank { "show_failed" }
         session.showFailure(reason, error.code.toString())
         ad.destroy()
-        fullScreenShowGate.release()
         runCatching { onResult(AdShowResult.Failed(reason)) }
     }
 
@@ -569,9 +685,6 @@ object AdMobAds {
         }
     }
 
-    private fun com.google.android.libraries.ads.mobile.sdk.common.Ad.adSource(): String? =
-        getResponseInfo().loadedAdSourceResponseInfo?.name
-
     private fun Activity.isGoogleMobileAdsActivity(): Boolean =
         javaClass.name.startsWith("com.google.android.libraries.ads.mobile.sdk.")
 
@@ -584,6 +697,7 @@ object AdMobAds {
     private const val PRELOAD_REWARDED = "lcb_admob_rewarded"
     private const val NO_AD_AVAILABLE = "no_preloaded_ad"
     private const val MICROS_PER_UNIT = 1_000_000.0
+    private const val APP_OPEN_MAX_AGE_MILLIS = 4 * 60 * 60 * 1_000L
 
     private data class PreloadDescriptor(
         val format: AdMobFormat,

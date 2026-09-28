@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.Application
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.ViewGroup
 import com.cashcraft.ads.mediation.admob.AdMobAds
 import com.cashcraft.ads.mediation.admob.AdMobConfig
@@ -15,6 +16,9 @@ import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.cashcraft.ads.mediation.internal.AutoAppOpenController
 import com.cashcraft.ads.mediation.internal.BidDecision
+import com.cashcraft.ads.mediation.internal.DisplayOpportunityController
+import com.cashcraft.ads.mediation.internal.FullScreenShowAttempt
+import com.cashcraft.ads.mediation.internal.FullScreenShowGate
 import com.cashcraft.ads.mediation.internal.UmpConsentManager
 import com.cashcraft.ads.mediation.internal.topon.TopOnAds
 import com.cashcraft.ads.mediation.internal.topon.TopOnState
@@ -33,7 +37,6 @@ object Ads {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
     private val providerInitializationStarted = AtomicBoolean(false)
-    private val biddingShowInProgress = AtomicBoolean(false)
 
     @Volatile
     private var activePlatform: AdPlatform? = null
@@ -286,7 +289,7 @@ object Ads {
                 format = AdFormat.APP_OPEN,
                 activity = activity,
                 position = position,
-                onResult = onResult,
+                onResult = { onResult(it.showResult) },
                 appOpenHostContainer = hostContainer,
             )
         }
@@ -309,7 +312,7 @@ object Ads {
                 format = AdFormat.INTERSTITIAL,
                 activity = activity,
                 position = position,
-                onResult = onResult,
+                onResult = { onResult(it.showResult) },
             )
         }
     }
@@ -327,7 +330,180 @@ object Ads {
         when (config.provider) {
             is AdMobProviderConfig -> AdMobAds.showRewarded(activity, position, onResult)
             is TopOnProviderConfig -> TopOnAds.showRewarded(activity, position, onResult)
-            is BiddingProviderConfig -> bidAndShowRewarded(activity, position, onResult)
+            is BiddingProviderConfig -> bidAndShow(AdFormat.REWARDED, activity, position, onResult)
+        }
+    }
+
+    /** Waits within this scene's fixed deadline; cancellation leaves SDK loading intact. */
+    fun showAppOpenWhenReady(
+        activity: Activity,
+        position: String = "manual",
+        timeoutMillis: Long,
+        isSceneValid: () -> Boolean = { true },
+        onResult: (AdShowResult) -> Unit = {},
+    ): AdDisplayOpportunity = createOpportunity(
+        AdFormat.APP_OPEN, activity, position, timeoutMillis, isSceneValid,
+        onResult = { onResult(it.showResult) },
+    )
+
+    fun showAppOpenWhenReady(
+        activity: Activity,
+        hostContainer: ViewGroup,
+        position: String = "manual",
+        timeoutMillis: Long,
+        isSceneValid: () -> Boolean = { true },
+        onResult: (AdShowResult) -> Unit = {},
+    ): AdDisplayOpportunity = createOpportunity(
+        AdFormat.APP_OPEN, activity, position, timeoutMillis, isSceneValid, hostContainer,
+        onResult = { onResult(it.showResult) },
+    )
+
+    fun showInterstitialWhenReady(
+        activity: Activity,
+        position: String = "manual",
+        timeoutMillis: Long,
+        isSceneValid: () -> Boolean = { true },
+        onResult: (AdShowResult) -> Unit = {},
+    ): AdDisplayOpportunity = createOpportunity(
+        AdFormat.INTERSTITIAL, activity, position, timeoutMillis, isSceneValid,
+        onResult = { onResult(it.showResult) },
+    )
+
+    fun showRewardedWhenReady(
+        activity: Activity,
+        position: String = "manual",
+        timeoutMillis: Long,
+        isSceneValid: () -> Boolean = { true },
+        onResult: (AdRewardResult) -> Unit = {},
+    ): AdDisplayOpportunity = createOpportunity(
+        AdFormat.REWARDED, activity, position, timeoutMillis, isSceneValid, onResult = onResult,
+    )
+
+    private fun createOpportunity(
+        format: AdFormat,
+        activity: Activity,
+        position: String,
+        timeoutMillis: Long,
+        isSceneValid: () -> Boolean,
+        hostContainer: ViewGroup? = null,
+        onResult: (AdRewardResult) -> Unit,
+    ): AdDisplayOpportunity {
+        // Capture before posting: a congested main queue must not extend the caller's deadline.
+        val startedAt = SystemClock.elapsedRealtime()
+        lateinit var controller: DisplayOpportunityController
+        val handle = AdDisplayOpportunity { onMain { controller.cancel() } }
+        val boundActivity = activity
+        val listener = object : AdLifecycleMonitor.Listener {
+            override fun onActivityPaused(activity: Activity) {
+                if (activity === boundActivity) controller.cancel("activity_not_resumed")
+            }
+            override fun onActivityDestroyed(activity: Activity) {
+                if (activity === boundActivity) controller.cancel("activity_not_available")
+            }
+            override fun onActivityResumed(activity: Activity) {
+                if (activity !== boundActivity) controller.cancel("activity_not_resumed")
+            }
+            override fun onAppEnteredBackground() {
+                controller.cancel("app_not_in_foreground")
+            }
+        }
+        controller = DisplayOpportunityController(
+            startedAtMillis = startedAt,
+            timeoutMillis = timeoutMillis,
+            nowMillis = SystemClock::elapsedRealtime,
+            schedule = { check, delay -> mainHandler.postDelayed(check, delay) },
+            unschedule = mainHandler::removeCallbacks,
+            precondition = ::opportunityPrecondition,
+            sceneValid = isSceneValid,
+            hostFailure = { AdLifecycleMonitor.activityWaitFailureReason(activity) },
+            isReady = { isReady(format) },
+            ensureLoaded = {
+                if (config.provider !is AdMobProviderConfig) TopOnAds.ensureLoaded(format)
+            },
+            show = { attempt, callback ->
+                val decision = if (config.provider is BiddingProviderConfig) {
+                    AdBiddingCoordinator.selectAvailable(format)
+                } else null
+                val winner = decision?.selection?.winner ?: when (config.provider) {
+                    is AdMobProviderConfig -> AdPlatform.ADMOB
+                    is TopOnProviderConfig -> AdPlatform.TOPON
+                    is BiddingProviderConfig -> null
+                }
+                if (winner == null) {
+                    controller.cancel(NO_BID_CANDIDATE)
+                } else {
+                    showSelected(
+                        winner, format, activity, position, hostContainer, attempt,
+                        onSessionCreated = controller::sessionStarted,
+                        onSessionStarted = { session ->
+                            decision?.let { session.bidResult(it.toEventData(format)) }
+                        },
+                        onResult = callback,
+                    )
+                }
+            },
+            onCleanup = {
+                AdLifecycleMonitor.removeListener(listener)
+                handle.detach()
+            },
+            onResult = onResult,
+        )
+        onMain {
+            AdLifecycleMonitor.addListener(listener)
+            controller.start()
+        }
+        return handle
+    }
+
+    private fun opportunityPrecondition(): String? = displayOpportunityFailureReason(
+        commonFailure = commonShowFailure(),
+        state = state,
+        hasReadyBiddingProvider = providerInitializationStarted.get() &&
+            ::config.isInitialized && config.provider is BiddingProviderConfig &&
+            (AdMobAds.state == AdMobState.READY || TopOnAds.state == TopOnState.READY),
+    )
+
+    /** Both waiting and immediate bidding pass the same owner all the way to SDK show(). */
+    private fun showSelected(
+        winner: AdPlatform,
+        format: AdFormat,
+        activity: Activity,
+        position: String,
+        hostContainer: ViewGroup?,
+        attempt: FullScreenShowAttempt,
+        onSessionCreated: (AdShowSession) -> Unit = {},
+        onSessionStarted: (AdShowSession) -> Unit,
+        onResult: (AdRewardResult) -> Unit,
+    ) {
+        var sessionId: String? = null
+        val created: (AdShowSession) -> Unit = {
+            sessionId = it.sessionId
+            onSessionCreated(it)
+        }
+        val callback: (AdShowResult) -> Unit = { onResult(AdRewardResult(false, it, sessionId)) }
+        when (winner) {
+            AdPlatform.ADMOB -> when (format) {
+                AdFormat.APP_OPEN -> AdMobAds.showBiddingAppOpen(
+                    activity, position, onSessionStarted, callback, attempt, created,
+                )
+                AdFormat.INTERSTITIAL -> AdMobAds.showBiddingInterstitial(
+                    activity, position, onSessionStarted, callback, attempt, created,
+                )
+                AdFormat.REWARDED -> AdMobAds.showBiddingRewarded(
+                    activity, position, onSessionStarted, onResult, attempt, created,
+                )
+            }
+            AdPlatform.TOPON -> when (format) {
+                AdFormat.APP_OPEN -> TopOnAds.showBiddingAppOpen(
+                    activity, position, onSessionStarted, callback, hostContainer, attempt, created,
+                )
+                AdFormat.INTERSTITIAL -> TopOnAds.showBiddingInterstitial(
+                    activity, position, onSessionStarted, callback, attempt, created,
+                )
+                AdFormat.REWARDED -> TopOnAds.showBiddingRewarded(
+                    activity, position, onSessionStarted, onResult, attempt, created,
+                )
+            }
         }
     }
 
@@ -345,133 +521,29 @@ object Ads {
         format: AdFormat,
         activity: Activity,
         position: String,
-        onResult: (AdShowResult) -> Unit,
+        onResult: (AdRewardResult) -> Unit,
         appOpenHostContainer: ViewGroup? = null,
     ) {
-        if (!biddingShowInProgress.compareAndSet(false, true)) {
-            failShow(format, position, "another_full_screen_ad_showing", onResult)
+        val attempt = FullScreenShowAttempt().apply { guard = ::commonShowFailure }
+        FullScreenShowGate.reserve(attempt)?.let { reason ->
+            val sessionId = emitFacadeShowFailure(format, position, reason)
+            onResult(AdRewardResult(false, AdShowResult.Failed(reason), sessionId))
             return
         }
-        AdBiddingCoordinator.select(format) { decision ->
-            val selection = decision.selection
-            if (selection == null) {
-                biddingShowInProgress.set(false)
-                failBiddingShow(format, position, decision, onResult)
-                return@select
-            }
-            val callback: (AdShowResult) -> Unit = { result ->
-                biddingShowInProgress.set(false)
-                onResult(result)
-            }
-            val onSessionStarted: (AdShowSession) -> Unit = { session ->
-                session.bidResult(decision.toEventData(format))
-            }
-            when (selection.winner) {
-                AdPlatform.ADMOB -> when (format) {
-                    AdFormat.APP_OPEN -> AdMobAds.showBiddingAppOpen(
-                        activity,
-                        position,
-                        onSessionStarted,
-                        callback,
-                    )
-                    AdFormat.INTERSTITIAL -> AdMobAds.showBiddingInterstitial(
-                        activity,
-                        position,
-                        onSessionStarted,
-                        callback,
-                    )
-                    AdFormat.REWARDED -> error("Rewarded uses bidAndShowRewarded")
-                }
-                AdPlatform.TOPON -> when (format) {
-                    AdFormat.APP_OPEN -> TopOnAds.showBiddingAppOpen(
-                        activity,
-                        position,
-                        onSessionStarted,
-                        callback,
-                        appOpenHostContainer,
-                    )
-                    AdFormat.INTERSTITIAL -> TopOnAds.showBiddingInterstitial(
-                        activity,
-                        position,
-                        onSessionStarted,
-                        callback,
-                    )
-                    AdFormat.REWARDED -> error("Rewarded uses bidAndShowRewarded")
-                }
-            }
-        }
-    }
-
-    private fun bidAndShowRewarded(
-        activity: Activity,
-        position: String,
-        onResult: (AdRewardResult) -> Unit,
-    ) {
-        if (!biddingShowInProgress.compareAndSet(false, true)) {
-            failRewardedShow(position, "another_full_screen_ad_showing", onResult)
+        val decision = AdBiddingCoordinator.select(format)
+        val selection = decision.selection
+        if (selection == null) {
+            attempt.complete()
+            val session = facadeEvents.begin(format, position, config.provider.adUnitId(format))
+            session.bidResult(decision.toEventData(format))
+            session.showFailure(NO_BID_CANDIDATE)
+            onResult(AdRewardResult(false, AdShowResult.Failed(NO_BID_CANDIDATE), session.sessionId))
             return
         }
-        AdBiddingCoordinator.select(AdFormat.REWARDED) { decision ->
-            val selection = decision.selection
-            if (selection == null) {
-                biddingShowInProgress.set(false)
-                failBiddingRewardedShow(position, decision, onResult)
-                return@select
-            }
-            val callback: (AdRewardResult) -> Unit = { result ->
-                biddingShowInProgress.set(false)
-                onResult(result)
-            }
-            val onSessionStarted: (AdShowSession) -> Unit = { session ->
-                session.bidResult(decision.toEventData(AdFormat.REWARDED))
-            }
-            when (selection.winner) {
-                AdPlatform.ADMOB -> AdMobAds.showBiddingRewarded(
-                    activity,
-                    position,
-                    onSessionStarted,
-                    callback,
-                )
-                AdPlatform.TOPON -> TopOnAds.showBiddingRewarded(
-                    activity,
-                    position,
-                    onSessionStarted,
-                    callback,
-                )
-            }
-        }
-    }
-
-    private fun failBiddingShow(
-        format: AdFormat,
-        position: String,
-        decision: BidDecision,
-        onResult: (AdShowResult) -> Unit,
-    ) {
-        val session = facadeEvents.begin(format, position, config.provider.adUnitId(format))
-        session.bidResult(decision.toEventData(format))
-        session.showFailure(NO_BID_CANDIDATE)
-        onResult(AdShowResult.Failed(NO_BID_CANDIDATE))
-    }
-
-    private fun failBiddingRewardedShow(
-        position: String,
-        decision: BidDecision,
-        onResult: (AdRewardResult) -> Unit,
-    ) {
-        val session = facadeEvents.begin(
-            AdFormat.REWARDED,
-            position,
-            config.provider.adUnitId(AdFormat.REWARDED),
-        )
-        session.bidResult(decision.toEventData(AdFormat.REWARDED))
-        session.showFailure(NO_BID_CANDIDATE)
-        onResult(
-            AdRewardResult(
-                rewardEarned = false,
-                showResult = AdShowResult.Failed(NO_BID_CANDIDATE),
-                sessionId = session.sessionId,
-            ),
+        showSelected(
+            selection.winner, format, activity, position, appOpenHostContainer, attempt,
+            onSessionStarted = { it.bidResult(decision.toEventData(format)) },
+            onResult = onResult,
         )
     }
 
@@ -547,28 +619,27 @@ object Ads {
     }
 
     private fun failAutoBiddingAppOpenOpportunity(reason: String) {
-        AdBiddingCoordinator.select(AdFormat.APP_OPEN) { decision ->
-            val session = decision.selection?.let { selection ->
-                when (selection.winner) {
-                    AdPlatform.ADMOB -> AdMobAds.beginBiddingSession(
-                        AdFormat.APP_OPEN,
-                        config.appOpenPosition,
-                    )
-                    AdPlatform.TOPON -> TopOnAds.beginBiddingSession(
-                        AdFormat.APP_OPEN,
-                        config.appOpenPosition,
-                    )
-                }
-            } ?: facadeEvents.begin(
-                AdFormat.APP_OPEN,
-                config.appOpenPosition,
-                config.provider.adUnitId(AdFormat.APP_OPEN),
-            )
-            session.bidResult(decision.toEventData(AdFormat.APP_OPEN))
-            session.showFailure(
-                if (decision.selection == null) NO_BID_CANDIDATE else reason,
-            )
-        }
+        val decision = AdBiddingCoordinator.select(AdFormat.APP_OPEN)
+        val session = decision.selection?.let { selection ->
+            when (selection.winner) {
+                AdPlatform.ADMOB -> AdMobAds.beginBiddingSession(
+                    AdFormat.APP_OPEN,
+                    config.appOpenPosition,
+                )
+                AdPlatform.TOPON -> TopOnAds.beginBiddingSession(
+                    AdFormat.APP_OPEN,
+                    config.appOpenPosition,
+                )
+            }
+        } ?: facadeEvents.begin(
+            AdFormat.APP_OPEN,
+            config.appOpenPosition,
+            config.provider.adUnitId(AdFormat.APP_OPEN),
+        )
+        session.bidResult(decision.toEventData(AdFormat.APP_OPEN))
+        session.showFailure(
+            if (decision.selection == null) NO_BID_CANDIDATE else reason,
+        )
     }
 
     private fun onMain(block: () -> Unit) {
@@ -577,6 +648,23 @@ object Ads {
 
     private const val CONSENT_NOT_OBTAINED = "consent_not_obtained"
     private const val NO_BID_CANDIDATE = "no_preloaded_ad"
+}
+
+/** A waiting opportunity can use one ready bidder before aggregate initialization completes. */
+internal fun displayOpportunityFailureReason(
+    commonFailure: String?,
+    state: AdsState,
+    hasReadyBiddingProvider: Boolean,
+): String? {
+    if (state == AdsState.INITIALIZING && hasReadyBiddingProvider &&
+        (commonFailure == null || commonFailure == "sdk_initializing")
+    ) return null
+    return commonFailure ?: when (state) {
+        AdsState.NOT_INITIALIZED -> "sdk_not_initialized"
+        AdsState.INITIALIZING -> "sdk_initializing"
+        AdsState.FAILED -> "sdk_initialization_failed"
+        AdsState.READY -> null
+    }
 }
 
 private enum class InitializationStage {

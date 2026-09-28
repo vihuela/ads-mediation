@@ -1,37 +1,105 @@
 package com.cashcraft.ads.mediation.internal
 
 import android.app.Activity
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicBoolean
 
-/** Shared full-screen show admission while keeping one independent gate per provider. */
-internal class FullScreenShowGate {
-    private val showing = AtomicBoolean(false)
+/** All entry points share one owner, including the time spent waiting for an ad. */
+internal object FullScreenShowGate {
+    private var owner: FullScreenShowAttempt? = null
+    private var showing = false
 
-    init {
-        gates += showing
+    val isAnyAdShowing: Boolean
+        @Synchronized get() = showing
+
+    fun tryAcquire(
+        activity: Activity,
+        providerFailureReason: String?,
+        attempt: FullScreenShowAttempt,
+    ): String? = attempt.failureReason()
+        ?: providerFailureReason
+        ?: AdLifecycleMonitor.activityShowFailureReason(activity)
+        ?: reserve(attempt)
+
+    fun commit(
+        activity: Activity,
+        providerFailureReason: String?,
+        attempt: FullScreenShowAttempt,
+        finalCheck: () -> String? = { null },
+    ): String? = tryAcquire(activity, providerFailureReason, attempt)
+        ?: finalCheck()
+        ?: commit(attempt)
+
+    @Synchronized
+    fun reserve(attempt: FullScreenShowAttempt): String? = when {
+        owner === attempt -> null
+        owner != null -> if (showing) "another_full_screen_ad_showing" else "request_in_progress"
+        else -> { owner = attempt; null }
     }
 
-    val isShowing: Boolean
-        get() = showing.get()
-
-    fun tryAcquire(activity: Activity, providerFailureReason: String?): String? =
-        providerFailureReason
-            ?: AdLifecycleMonitor.activityShowFailureReason(activity)
-            ?: if (!showing.compareAndSet(false, true)) {
-                "another_full_screen_ad_showing"
-            } else {
-                null
-            }
-
-    fun release() {
-        showing.set(false)
+    @Synchronized
+    fun commit(attempt: FullScreenShowAttempt): String? {
+        attempt.handoffFailure()?.let { return it }
+        if (owner !== attempt) return "opportunity_cancelled"
+        showing = true
+        attempt.committed()
+        return null
     }
 
-    internal companion object {
-        private val gates = CopyOnWriteArrayList<AtomicBoolean>()
+    @Synchronized
+    fun release(attempt: FullScreenShowAttempt) {
+        if (owner !== attempt) return
+        owner = null
+        showing = false
+    }
+}
 
-        val isAnyAdShowing: Boolean
-            get() = gates.any(AtomicBoolean::get)
+/** Carries a waiting owner's final guard into the provider's actual SDK call. Main thread only. */
+internal class FullScreenShowAttempt(val isWaitingOpportunity: Boolean = false) {
+    var guard: (() -> String?)? = null
+    var handoffGuard: (() -> String?)? = null
+    var onCommitted: (() -> Unit)? = null
+    var onAborted: (() -> Unit)? = null
+    var isCommitted = false
+        private set
+    private var invalidReason: String? = null
+    private var completed = false
+
+    fun failureReason(): String? {
+        invalidReason?.let { return it }
+        val reason = guard?.invoke()
+        // A host predicate may synchronously cancel this attempt.
+        return invalidReason ?: reason
+    }
+
+    fun handoffFailure(): String? = invalidReason ?: handoffGuard?.invoke()
+
+    fun invalidate(reason: String) {
+        if (isCommitted || invalidReason != null) return
+        invalidReason = reason
+        val cleanup = onAborted
+        onAborted = null
+        cleanup?.invoke()
+    }
+
+    fun committed() {
+        isCommitted = true
+        guard = null
+        handoffGuard = null
+        onAborted = null
+        val callback = onCommitted
+        onCommitted = null
+        callback?.invoke()
+    }
+
+    fun complete(): Boolean {
+        if (completed) return false
+        completed = true
+        guard = null
+        handoffGuard = null
+        onCommitted = null
+        val cleanup = onAborted
+        onAborted = null
+        if (!isCommitted) cleanup?.invoke()
+        FullScreenShowGate.release(this)
+        return true
     }
 }
