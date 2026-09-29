@@ -73,7 +73,9 @@ AdsBanner(
 
 ## 尺寸、刷新与失败
 
-`Standard320x50` 明确为 320×50 dp，内容宽度不足 320 dp 时失败。`AnchoredAdaptive` 使用实际内容宽度调用锁定 SDK 的 large anchored adaptive API。
+`Standard320x50` 明确为 320×50 dp，内容宽度不足 320 dp 时失败。
+`StandardAnchoredAdaptive` 使用实际内容宽度调用 `getCurrentOrientationAnchoredAdaptiveBannerAdSize`，用于恢复普通锚定自适应的紧凑高度；HealthTracker 首页使用此选项。该 Google API 已弃用，本选项为历史尺寸兼容保留，升级底层 SDK 时需复核。
+`AnchoredAdaptive` 保持原有的 large anchored adaptive API 行为，已有使用方不会因新增普通尺寸而改变高度。
 只扣 View 自身 padding；系统安全区、底部导航栏及 IME 由宿主处理一次。容器用 `WRAP_CONTENT`，不限制成 50 dp。
 仅有效请求尺寸改变才重建；广告自然高度变化只重新测量。初始隐藏也会测量合法占位，dp 转 px 向上取整，避免分数密度下少分配像素。
 

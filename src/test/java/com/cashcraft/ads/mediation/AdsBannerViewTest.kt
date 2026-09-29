@@ -7,6 +7,7 @@ import android.widget.FrameLayout
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import com.google.android.libraries.ads.mobile.sdk.banner.AdSize
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -14,6 +15,7 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import kotlin.math.ceil
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33], manifest = Config.NONE)
@@ -131,6 +133,34 @@ class AdsBannerViewTest {
             View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.AT_MOST))
         assertTrue(banner.measuredHeight / activity.resources.displayMetrics.density >= 50f)
         banner.destroy()
+    }
+
+    @Test
+    @Config(qualifiers = "w411dp-h891dp-port-420dpi")
+    @Suppress("DEPRECATION")
+    fun `standard adaptive reserves compact full width space without clipping at fractional density`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val compact = AdsBannerView(activity, PageOwner(), request().copy(size = BannerSize.StandardAnchoredAdaptive), active = false)
+        val large = AdsBannerView(activity, PageOwner(), request().copy(size = BannerSize.AnchoredAdaptive), active = false)
+        try {
+            val widthPx = 1080
+            for (banner in listOf(compact, large)) {
+                banner.visibility = View.INVISIBLE
+                banner.setPadding(21, 3, 21, 7)
+                banner.measure(View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.AT_MOST))
+                assertEquals(widthPx, banner.measuredWidth)
+            }
+            val density = activity.resources.displayMetrics.density
+            val contentWidthDp = ((widthPx - 42) / density).toInt()
+            val expected = AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(activity, contentWidthDp)
+            assertEquals(contentWidthDp, expected.width)
+            assertEquals(ceil(expected.height * density.toDouble()).toInt() + 10, compact.measuredHeight)
+            assertTrue("Standard adaptive must stay shorter than Large", compact.measuredHeight < large.measuredHeight)
+        } finally {
+            compact.destroy()
+            large.destroy()
+        }
     }
 
     private fun request() = BannerRequest(AdPlatform.ADMOB, "test-unit", "page", BannerSize.Standard320x50)

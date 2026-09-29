@@ -5,7 +5,10 @@ sealed interface BannerSize {
     /** A fixed 320 × 50 dp ad; the host must provide at least 320 dp of content width. */
     data object Standard320x50 : BannerSize
 
-    /** Use the host's available content width for an anchored adaptive request. */
+    /** A compact anchored adaptive request using the host's available content width. */
+    data object StandardAnchoredAdaptive : BannerSize
+
+    /** A large anchored adaptive request; preserves this option's original sizing behavior. */
     data object AnchoredAdaptive : BannerSize
 }
 

@@ -172,8 +172,10 @@ class AdsBannerView(
         }
     }
 
+    @Suppress("DEPRECATION") // The standard API intentionally preserves compact, pre-Large sizing.
     private fun requestedAdSize(widthDp: Int): AdSize = when (request.size) {
         BannerSize.Standard320x50 -> AdSize.BANNER
+        BannerSize.StandardAnchoredAdaptive -> AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(context as Activity, widthDp)
         BannerSize.AnchoredAdaptive -> AdSize.getLargeAnchoredAdaptiveBannerAdSize(context as Activity, widthDp)
     }
 
@@ -223,7 +225,7 @@ class AdsBannerView(
         val key = RequestSize(
             if (request.size == BannerSize.Standard320x50) 320 else widthDp,
             pixelsCoveringDp(size.height),
-            if (request.size == BannerSize.AnchoredAdaptive) resources.configuration.orientation else 0,
+            if (request.size != BannerSize.Standard320x50) resources.configuration.orientation else 0,
             resources.displayMetrics.densityDpi,
         )
         if (requestedSize != null && requestedSize != key) releaseAd()

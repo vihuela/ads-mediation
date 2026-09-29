@@ -23,6 +23,8 @@ class BannerRequestTest {
         assertNotEquals(request, request.copy(adUnitId = "another-id"))
         assertNotEquals(request, request.copy(position = "detail_bottom"))
         assertNotEquals(request, request.copy(size = BannerSize.AnchoredAdaptive))
+        assertNotEquals(request.copy(size = BannerSize.AnchoredAdaptive),
+            request.copy(size = BannerSize.StandardAnchoredAdaptive))
     }
 
     @Test
@@ -47,15 +49,17 @@ class BannerRequestTest {
 
     @Test
     fun `adaptive width is structural and platform capability remains a separate gate`() {
-        val adaptive = BannerRequest(AdPlatform.TOPON, "banner-id", "home", BannerSize.AnchoredAdaptive)
-        assertNull(adaptive.sizeError(1))
-        assertThrows(IllegalArgumentException::class.java) { adaptive.sizeError(0) }
-        assertThrows(IllegalArgumentException::class.java) { adaptive.sizeError(-1) }
+        for (size in listOf(BannerSize.AnchoredAdaptive, BannerSize.StandardAnchoredAdaptive)) {
+            val adaptive = BannerRequest(AdPlatform.TOPON, "banner-id", "home", size)
+            assertNull(adaptive.sizeError(1))
+            assertThrows(IllegalArgumentException::class.java) { adaptive.sizeError(0) }
+            assertThrows(IllegalArgumentException::class.java) { adaptive.sizeError(-1) }
+        }
     }
 
     @Test
-    fun `formal TopOn requests fail explicitly for both sizes without a fallback`() {
-        for (size in listOf(BannerSize.Standard320x50, BannerSize.AnchoredAdaptive)) {
+    fun `formal TopOn requests fail explicitly for all sizes without a fallback`() {
+        for (size in listOf(BannerSize.Standard320x50, BannerSize.AnchoredAdaptive, BannerSize.StandardAnchoredAdaptive)) {
             val request = BannerRequest(AdPlatform.TOPON, "placement", "home", size)
             assertEquals("topon_banner_not_supported", request.supportError())
             assertEquals(AdPlatform.TOPON, request.platform)
