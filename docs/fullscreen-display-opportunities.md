@@ -1,10 +1,10 @@
 # 全屏展示机会接入说明
 
-本文说明按业务场景等待全屏广告就绪的新接入方式。它适合“这次业务触发在一段时间内可以展示，广告一旦就绪就尝试展示”的场景。等待机会、底层加载请求和真实展示会话是三件事：机会结束不会取消加载，也不会让已结束的机会在页面返回后复活。
+本文说明按业务场景等待全屏广告就绪的新接入方式。它适合“这次业务触发在一段时间内可以展示，在期限内等待平台结果并选择可用广告展示”的场景。等待机会、底层加载请求和真实展示会话是三件事：机会结束不会取消加载，也不会让已结束的机会在页面返回后复活。
 
 ## API
 
-三个入口都要求 `timeoutMillis` 为正数，从调用时开始计时；排队等待主线程的时间也计入期限。`position` 默认为 `"manual"`，用于业务归因。`isSceneValid` 在主线程执行，应快速读取当前场景状态且不产生副作用。
+插屏和激励默认等待 5 秒，开屏默认等待 12 秒；外部传入 `timeoutMillis` 覆盖默认值，且必须为正数，从调用时开始计时；排队等待主线程的时间也计入期限。`position` 默认为 `"manual"`，用于业务归因。`isSceneValid` 在主线程执行，应快速读取当前场景状态且不产生副作用。
 
 以下列出调用签名，省略函数实现和内部构造参数；句柄由 `Ads` 返回。
 
@@ -17,7 +17,7 @@ object Ads {
     fun showAppOpenWhenReady(
         activity: Activity,
         position: String = "manual",
-        timeoutMillis: Long,
+        timeoutMillis: Long = 12_000L,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdShowResult) -> Unit = {},
     ): AdDisplayOpportunity
@@ -26,7 +26,7 @@ object Ads {
         activity: Activity,
         hostContainer: ViewGroup,
         position: String = "manual",
-        timeoutMillis: Long,
+        timeoutMillis: Long = 12_000L,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdShowResult) -> Unit = {},
     ): AdDisplayOpportunity
@@ -34,7 +34,7 @@ object Ads {
     fun showInterstitialWhenReady(
         activity: Activity,
         position: String = "manual",
-        timeoutMillis: Long,
+        timeoutMillis: Long = 5_000L,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdShowResult) -> Unit = {},
     ): AdDisplayOpportunity
@@ -42,7 +42,7 @@ object Ads {
     fun showRewardedWhenReady(
         activity: Activity,
         position: String = "manual",
-        timeoutMillis: Long,
+        timeoutMillis: Long = 5_000L,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdRewardResult) -> Unit = {},
     ): AdDisplayOpportunity
@@ -61,7 +61,8 @@ object Ads {
 
 | 原因 | 含义 |
 | --- | --- |
-| `wait_timeout` | 在固定期限内没有完成展示交接 |
+| `wait_timeout` | 截止决策时无可用广告或展示条件仍不满足 |
+| `ad_load_failed` | 所有参与平台均明确加载失败，提前结束等待 |
 | `opportunity_cancelled` | 宿主主动取消 |
 | `scene_invalid` | `isSceneValid()` 返回 `false` |
 | `scene_validation_failed` | 场景检查抛出异常 |
@@ -109,7 +110,7 @@ fun leaveLevel() {
 
 机会绑定创建时传入的 Activity。等待期间原 Activity 暂停、销毁、结束、被其他 Activity 实例替换、应用退后台，都会结束尚未交接的机会；SDK 不会把旧机会迁移到新 Activity。首次 Resume 或窗口尚未 ready 时可以在原期限内等待；已因暂停而结束的机会不会在恢复时继续。
 
-机会取消或超时不会停止 AdMob Preloader、TopOn 的既有加载/重试，也不会清空有效缓存。后续兼容的新机会可以复用在途请求或缓存；新的业务 `position` 不会单独隔离广告缓存。竞价模式只比较本次请求广告类型的当前候选，一个平台已就绪即可展示，不为等待另一个平台而延长机会。新等待入口在一个平台初始化成功后即可等待或使用其广告，即使另一平台仍在初始化；`Ads.state` 和 `onInitialized` 仍按两家平台的整体初始化进度报告。
+机会取消或超时不会停止 AdMob Preloader、TopOn 的既有加载/重试，也不会清空有效缓存。后续兼容的新机会可以复用在途请求或缓存；新的业务 `position` 不会单独隔离广告缓存。竞价模式只比较本次请求广告类型的候选：两家成功立即比价，一家成功另一家明确失败立即展示，两家失败立即结束；仍有平台未完成则继续等待。截止时从当前有效缓存选择，有候选且展示条件满足就展示，否则返回超时。已有缓存视为成功。单平台模式成功即展示、明确失败即结束。新等待入口在一个平台初始化成功后即可开始加载等待，但另一平台仍在初始化时会继续给它参与竞价的机会；`Ads.state` 和 `onInitialized` 仍按两家平台的整体初始化进度报告。
 
 新接入应在 `AdsConfig` 中关闭旧自动开屏，由业务场景显式创建开屏机会：
 
@@ -315,3 +316,16 @@ fun LevelScreen(
 - Next-Gen 1.2.1 的插屏和激励没有公开可验证的离队对象有效期；未匹配到加载记录的开屏也无法确认有效性。这些已取出对象解绑回调后销毁，后续机会继续使用 SDK 队列或在途加载。
 
 上述极窄的交接中止窗口不能保证复用同一已取出对象；OpenSpec 任务 2.4 的完整复用验收仍待有效期依据确认。[官方开屏有效期](https://developers.google.com/admob/android/next-gen/app-open)、[插屏预加载说明](https://developers.google.com/admob/android/next-gen/interstitial)、[激励预加载说明](https://developers.google.com/admob/android/next-gen/rewarded)。
+
+## 业务 loading 与后台恢复
+
+loading 使用当前 Activity 页面内的 View/Compose 覆盖层，避免独立 Activity 或夺取窗口焦点的 Dialog。一次业务触发只创建一个机会，不因重组、重复点击或恢复前台重新计时。
+
+等待期间切后台或离开页面会取消机会，底层加载与缓存保留。返回前台后不恢复旧等待、不补弹广告。业务应在原页面恢复前台且仍有效时清理 loading，并且只继续一次被阻塞的业务；原页面已失效则丢弃继续动作。取消可能同步交付回调，应先标记场景失效再取消，避免取消回调误导航。
+
+`onResult` 在等待失败或广告最终关闭/失败时交付；当前没有新增展示交接回调。页面内 loading 可由全屏广告覆盖，最终结果时清理。交给 SDK 后等待计时停止，不限制广告播放时长。
+
+每次机会只主动确保加载一次；明确失败来自平台整体加载失败或初始化失败，而不是聚合平台内部单个广告源失败。本次机会开始前的加载失败记录不会直接导致新机会失败。TopOn 新机会仍可按需发起加载，AdMob 仍依赖持续预加载；本层不增加循环重试。主线程调度可能使截止检查稍晚执行，最终决策使用该次检查时的有效缓存，不再开启新的等待窗口。
+
+
+等待期限限制的是等待平台结果的阶段。若在截止前已满足决策条件并选出候选，随后展示准备跨过截止时间，不会仅因此返回超时；截止时选出的兜底候选也遵循同一规则。选定候选不等于交给 SDK：交接前取消、场景失效、许可撤销、宿主不可展示或广告失效仍会阻止展示。

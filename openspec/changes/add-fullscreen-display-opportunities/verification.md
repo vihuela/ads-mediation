@@ -83,3 +83,23 @@ TopOn 使用入口 session 快照和最近 32 个 showId 的归属阻止可识�
 ## Apply 续验（2026-09-28）
 
 现有宿主 runner 新增 12 轮真实边界验收全部通过，细节见 [host-acceptance.md](host-acceptance.md) 的续验章节。新增一项取消/超时竞态与交接后失败回归测试，JVM 总计 59 项通过；库生产源码未改。AdMob 激励三次续验未通过，分别为 API 33/36 关闭等待超时和 API 36 no_fill，保持 16/21，不替代缺失的 SDK 证据。
+
+
+## 2026-09-29 策略更新
+
+本节替代此前“第一家就绪立即展示”和“到期一律拒绝展示”的行为描述。Bidding 等待所有参与平台成功或明确失败后提前决策；截止检查使用当前有效缓存兜底，无候选才超时。默认插屏/激励 5 秒、开屏 12 秒。普通立即展示入口不变。
+
+验证：`./gradlew testDebugUnitTest assembleDebug lintDebug` 通过；补充后到高价候选用例后 `./gradlew testDebugUnitTest` 再次通过。控制器覆盖等待另一家、提前失败、截止兜底和取消/宿主/许可保护。未执行本次策略的真实 SDK 设备与业务 UI 验收。
+
+
+### 截止交接边界修复
+
+先增加回归测试，在修复前复现 2 个失败用例：截止前选出广告、准备跨期限被拒绝，以及期限错误掩盖了最终场景/宿主/许可错误。统一规则为等待阶段决定是否可选候选，候选准备不再重复按期限拒绝；取消与最终环境检查保留。修复后 `./gradlew testDebugUnitTest assembleDebug lintDebug` 通过，共 64 项单元测试、0 失败。新增测试覆盖 499/500/501ms 决策、502ms 交接及跨期限后的取消/场景/宿主/许可失效。没有新增设备验证，此前按旧规则断言“准备跨期限必须超时”的宿主证据不作为新规则验收。
+
+### 就绪状态重复读取竞态修复
+
+新增 `cache becoming ready during a check does not report load failure` 回归，在 5 秒期限内的 100ms 检查中注入缓存从未就绪变为就绪的时序。修复前实际运行失败，断言消息为 `A successful load must not end the opportunity: ad_load_failed`。修复后 Ads 每轮只读取一次各平台的就绪状态，据此同时计算 ready 和 settled；控制器通过一个 LoadSnapshot 回调取得两者，避免拼接两次读取的结果。
+
+`./gradlew :testDebugUnitTest :assembleDebug :lintDebug --console=plain` 通过；库的 65 项单元测试本次实际执行，0 失败、0 错误、0 跳过，包含新增竞态回归及已有竞价等待、截止兜底和交接保护测试。本次证据为确定性 JVM 时序模拟与库构建/lint，未进行真实 SDK 设备复现或业务 loading 验收。
+
+后续等价精简：取消操作复用 `fail()` 的等待状态保护，`check()` 的收尾分支改为提前返回；保留同一份就绪状态快照、失败判断顺序和交接前校验。`./gradlew :testDebugUnitTest --console=plain` 重新编译生产源码并实际执行 65 项测试（控制器 22 项），0 失败、0 错误、0 跳过。本轮精简未重新执行 assembleDebug、lintDebug 或设备验收。
