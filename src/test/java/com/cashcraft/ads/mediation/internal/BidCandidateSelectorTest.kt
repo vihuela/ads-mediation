@@ -1,12 +1,24 @@
 package com.cashcraft.ads.mediation.internal
 
 import com.cashcraft.ads.mediation.AdPlatform
+import com.cashcraft.ads.mediation.AdFormat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class BidCandidateSelectorTest {
+    @Test
+    fun `Banner is rejected before touching SDK caches or starting a load`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            AdBiddingCoordinator.select(AdFormat.BANNER)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            AdBiddingCoordinator.selectAvailable(AdFormat.BANNER)
+        }
+    }
+
     @Test
     fun `higher available price wins`() {
         val selection = BidCandidateSelector.select(

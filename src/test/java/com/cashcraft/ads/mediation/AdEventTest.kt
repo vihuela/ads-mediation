@@ -1,9 +1,39 @@
 package com.cashcraft.ads.mediation
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class AdEventTest {
+    @Test
+    fun `banner event exposes slot identity without changing legacy event shape`() {
+        val banner = AdEvent(
+            name = AdEventName.BANNER_REFRESH,
+            platform = AdPlatform.ADMOB,
+            format = AdFormat.BANNER,
+            position = "home_banner",
+            sessionId = "display-1",
+            adUnitId = "banner-unit",
+            number = 1L,
+            slotId = "slot-1",
+            result = "filled",
+        ).analyticsParameters()
+
+        assertEquals("ad_banner_refresh", AdEventName.BANNER_REFRESH.analyticsName)
+        assertEquals("banner", banner["ad_type"])
+        assertEquals("slot-1", banner["slot_id"])
+        assertEquals("filled", banner["result"])
+        assertFalse(AdEvent(
+            name = AdEventName.IMPRESSION,
+            platform = AdPlatform.ADMOB,
+            format = AdFormat.REWARDED,
+            position = "game_rewarded",
+            sessionId = "display-2",
+            adUnitId = "rewarded-unit",
+            number = 1L,
+        ).analyticsParameters().containsKey("slot_id"))
+    }
+
     @Test
     fun `paid event exposes Tenjin AdMob revenue fields`() {
         val parameters = AdEvent(

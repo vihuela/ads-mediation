@@ -32,3 +32,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "ads-mediation"
 include(":r8-smoke-app")
+include(":ads-mediation-compose")

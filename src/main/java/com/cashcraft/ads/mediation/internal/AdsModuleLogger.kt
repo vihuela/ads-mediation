@@ -49,6 +49,24 @@ internal class AdsModuleLogger(
         )
     }
 
+    fun bannerDiagnostic(
+        slotId: String,
+        reason: String,
+        responseId: String?,
+        rawValue: String? = null,
+        currency: String? = null,
+    ) {
+        if (!enabled) return
+        Log.w(tag, "banner_diagnostic slot_id=$slotId reason=${reason.oneLine()} " +
+            "response_id=${responseId?.oneLine()} value=${rawValue?.oneLine()} currency=${currency?.oneLine()}")
+    }
+
+    fun bannerRevenueDispatchFailed(event: AdEvent, error: Throwable) {
+        if (!enabled) return
+        Log.e(tag, "banner_revenue_dispatch_failed slot_id=${event.slotId} " +
+            "session_id=${event.sessionId} reason=${error.message.orEmpty().oneLine()}", error)
+    }
+
     fun showFailureException(
         format: AdFormat,
         position: String,
@@ -81,6 +99,7 @@ internal fun formatAdEventLogMessage(event: AdEvent): String = buildString {
     append(" position=").append(event.position.oneLine())
     append(" session_id=").append(event.sessionId)
     append(" number=").append(event.number)
+    event.slotId?.let { append(" slot_id=").append(it) }
     append(" ad_unit_id=").append(event.adUnitId)
     event.adSource?.let { append(" ad_source=").append(it.oneLine()) }
     event.responseId?.let { append(" response_id=").append(it.oneLine()) }

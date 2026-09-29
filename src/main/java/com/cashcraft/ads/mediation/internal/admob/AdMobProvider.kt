@@ -166,12 +166,14 @@ object AdMobAds {
 
     private val loadFailures = mutableMapOf<String, Long>()
     internal fun loadFailureVersion(format: AdMobFormat): Long =
-        loadFailures[format.preloadId()] ?: 0L
+        if (format == AdMobFormat.BANNER) 0L else loadFailures[format.preloadId()] ?: 0L
 
     fun isReady(format: AdMobFormat): Boolean {
+        if (format == AdMobFormat.BANNER) return false
         if (state != AdMobState.READY) return false
         if (pendingAd(format) != null) return true
         return when (format) {
+            AdMobFormat.BANNER -> false
             AdMobFormat.APP_OPEN -> AppOpenAdPreloader.isAdAvailable(PRELOAD_APP_OPEN)
             AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.isAdAvailable(PRELOAD_INTERSTITIAL)
             AdMobFormat.REWARDED -> RewardedAdPreloader.isAdAvailable(PRELOAD_REWARDED)
@@ -374,6 +376,7 @@ object AdMobAds {
     )
 
     internal fun bidPrice(format: AdMobFormat): Double? {
+        if (format == AdMobFormat.BANNER) return null
         pendingAd(format)?.let { return it.priceUsd }
         if (!isReady(format)) return null
         return AdMobNextGenBidPrice.peek(format, format.preloadId())
@@ -398,6 +401,7 @@ object AdMobAds {
             pending.ad.destroy()
         }
         val ad: Ad = when (format) {
+            AdMobFormat.BANNER -> return null
             AdMobFormat.APP_OPEN -> AppOpenAdPreloader.pollAd(PRELOAD_APP_OPEN)
             AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.pollAd(PRELOAD_INTERSTITIAL)
             AdMobFormat.REWARDED -> RewardedAdPreloader.pollAd(PRELOAD_REWARDED)
@@ -429,12 +433,14 @@ object AdMobAds {
     }
 
     private fun AdMobFormat.preloadId(): String = when (this) {
+        AdMobFormat.BANNER -> error("Banner does not use a preload buffer")
         AdMobFormat.APP_OPEN -> PRELOAD_APP_OPEN
         AdMobFormat.INTERSTITIAL -> PRELOAD_INTERSTITIAL
         AdMobFormat.REWARDED -> PRELOAD_REWARDED
     }
 
     private fun AdMobIds.adUnitId(format: AdMobFormat): String = when (format) {
+        AdMobFormat.BANNER -> error("Banner requires an explicit ad unit ID")
         AdMobFormat.APP_OPEN -> appOpenId
         AdMobFormat.INTERSTITIAL -> interstitialId
         AdMobFormat.REWARDED -> rewardedId

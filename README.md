@@ -6,6 +6,9 @@
 
 当前稳定版本：`1.0.5`
 
+本工作树新增的 AdMob Banner View／可选 Compose 接口尚未远程发布，参见
+[Banner 接入与当前验证边界](docs/banner-integration.md)。TopOn Banner 正式入口暂未支持；稳定版 `1.0.5` 不包含这些新增接口。
+
 [![打开 AI 接入提示词](https://img.shields.io/badge/AI-%E6%89%93%E5%BC%80%E5%B9%B6%E5%A4%8D%E5%88%B6%E6%8E%A5%E5%85%A5%E6%8F%90%E7%A4%BA%E8%AF%8D-2ea44f)](#10-复制给-ai完整接入提示词)
 
 依赖坐标：

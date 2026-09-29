@@ -9,6 +9,7 @@ import com.cashcraft.ads.mediation.AdEventName
 import com.cashcraft.ads.mediation.AdFormat
 import com.cashcraft.ads.mediation.AdMediationMode
 import com.cashcraft.ads.mediation.AdPlatform
+import com.cashcraft.ads.mediation.AdRevenueListener
 import com.cashcraft.ads.mediation.AdShowResult
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
@@ -31,16 +32,12 @@ internal class AdEventDispatcher(
         format: AdFormat,
         position: String,
         adUnitId: String,
-        attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
+        attempt: FullScreenShowAttempt? = null,
         onCreated: (AdShowSession) -> Unit = {},
     ): AdShowSession {
+        require(format != AdFormat.BANNER) { "Banner requires beginBannerSlot" }
         val typedPosition = position.withAdType(format)
-        val number = synchronized(preferences) {
-            val key = "${format.analyticsValue}_position_count"
-            val next = preferences.getLong(key, 0L) + 1L
-            preferences.edit { putLong(key, next) }
-            next
-        }
+        val number = nextNumber(format, "position")
         return AdShowSession(
             listener = listener,
             platform = platform,
@@ -51,18 +48,14 @@ internal class AdEventDispatcher(
             sessionId = UUID.randomUUID().toString(),
             number = number,
             logger = logger,
-            attempt = attempt,
+            attempt = attempt ?: FullScreenShowAttempt(),
             onCreated = onCreated,
         )
     }
 
     fun beginLoad(format: AdFormat, adUnitId: String, bufferSize: Int): AdLoadSession {
-        val number = synchronized(preferences) {
-            val key = "${format.analyticsValue}_load_count"
-            val next = preferences.getLong(key, 0L) + 1L
-            preferences.edit { putLong(key, next) }
-            next
-        }
+        require(format != AdFormat.BANNER) { "Banner requires createBannerLoad" }
+        val number = nextNumber(format, "load")
         val requestId = UUID.randomUUID().toString()
         return AdLoadSession(
             listener = listener,
@@ -78,6 +71,53 @@ internal class AdEventDispatcher(
             startedAtMillis = SystemClock.elapsedRealtime(),
             logger = logger,
         ).also(AdLoadSession::request)
+    }
+
+    fun beginBannerSlot(
+        position: String,
+        adUnitId: String,
+        revenueListener: AdRevenueListener,
+        onCreated: (BannerSlot) -> Unit = {},
+    ): BannerSlot = BannerSlot(
+        listener = listener,
+        platform = platform,
+        mediationMode = mediationMode,
+        position = position.withAdType(AdFormat.BANNER),
+        adUnitId = adUnitId,
+        slotId = UUID.randomUUID().toString(),
+        number = nextNumber(AdFormat.BANNER, "position"),
+        logger = logger,
+        revenueListener = revenueListener,
+        onCreated = onCreated,
+    )
+
+    /** The caller emits request() only after it has actually invoked the SDK load method. */
+    fun createBannerLoad(slot: BannerSlot): AdLoadSession {
+        check(!slot.isEnded) { "Banner slot has ended" }
+        require(slot.platform == platform) { "Banner slot belongs to another platform" }
+        val requestId = UUID.randomUUID().toString()
+        return AdLoadSession(
+            listener = listener,
+            platform = platform,
+            mediationMode = mediationMode,
+            format = AdFormat.BANNER,
+            position = slot.position,
+            adUnitId = slot.adUnitId,
+            sessionId = requestId,
+            requestId = requestId,
+            number = nextNumber(AdFormat.BANNER, "load"),
+            bufferSize = null,
+            startedAtMillis = SystemClock.elapsedRealtime(),
+            logger = logger,
+            slotId = slot.slotId,
+        )
+    }
+
+    private fun nextNumber(format: AdFormat, kind: String): Long = synchronized(preferences) {
+        val key = "${format.analyticsValue}_${kind}_count"
+        val next = preferences.getLong(key, 0L) + 1L
+        preferences.edit { putLong(key, next) }
+        next
     }
 
     private companion object {
@@ -105,12 +145,13 @@ internal class AdLoadSession(
     private val position: String,
     private val adUnitId: String,
     private val sessionId: String,
-    private val requestId: String,
+    val requestId: String,
     private val number: Long,
-    private val bufferSize: Int,
+    private val bufferSize: Int?,
     private val startedAtMillis: Long,
     private val clock: AdLoadClock = AdLoadClock(SystemClock::elapsedRealtime),
     private val logger: AdsModuleLogger? = null,
+    private val slotId: String? = null,
 ) {
     private val terminal = AtomicBoolean(false)
 
@@ -178,6 +219,104 @@ internal class AdLoadSession(
             responseId = responseId,
             latencyMillis = latencyMillis,
             bufferSize = bufferSize,
+            slotId = slotId,
+        )
+        logger?.event(event)
+        runCatching { listener.onEvent(event) }
+            .onFailure { error -> logger?.eventDispatchFailed(event, error) }
+    }
+}
+
+/** One business slot can contain several independently identified Banner displays. */
+internal class BannerSlot(
+    private val listener: AdEventListener,
+    val platform: AdPlatform,
+    private val mediationMode: AdMediationMode,
+    val position: String,
+    val adUnitId: String,
+    val slotId: String,
+    private val number: Long,
+    private val logger: AdsModuleLogger? = null,
+    private val revenueListener: AdRevenueListener = AdRevenueListener.NONE,
+    onCreated: (BannerSlot) -> Unit = {},
+) {
+    private val ended = AtomicBoolean(false)
+
+    val isEnded: Boolean get() = ended.get()
+
+    init {
+        // Publish ownership before the external POSITION listener can reenter the host.
+        onCreated(this)
+        emit(AdEventName.POSITION, sessionId = slotId)
+    }
+
+    fun end() { ended.set(true) }
+
+    /**
+     * Called only when the adapter has confirmed a NEW stable response. The adapter retains the
+     * returned session for duplicate/late callbacks; this is not an identity lookup or a fallback.
+     */
+    fun newDisplay(
+        responseId: String?,
+        requestId: String? = null,
+        adSource: String? = null,
+        mediationAdapterClassName: String? = null,
+    ): BannerDisplaySession? {
+        if (isEnded) return null
+        val identity = responseId?.trim()?.takeIf(String::isNotEmpty)
+        if (identity == null) {
+            logger?.bannerDiagnostic(slotId, "missing_display_identity", responseId)
+            return null
+        }
+        return BannerDisplaySession(
+            event = AdEvent(
+                name = AdEventName.IMPRESSION,
+                platform = platform,
+                mediationMode = mediationMode,
+                format = AdFormat.BANNER,
+                position = position,
+                sessionId = UUID.randomUUID().toString(),
+                adUnitId = adUnitId,
+                number = number,
+                slotId = slotId,
+                requestId = requestId,
+                responseId = identity,
+                adSource = adSource,
+                mediationAdapterClassName = mediationAdapterClassName,
+            ),
+            listener = listener,
+            revenueListener = revenueListener,
+            slotEnded = ended,
+            logger = logger,
+        )
+    }
+
+    /** Refresh failure need not identify a new display and must leave the old one usable. */
+    fun refreshFailed(errorCode: String?, reason: String?) {
+        if (isEnded) return
+        emit(AdEventName.BANNER_REFRESH, slotId, result = "failed", errorCode = errorCode, reason = reason)
+    }
+
+    private fun emit(
+        name: AdEventName,
+        sessionId: String,
+        result: String? = null,
+        reason: String? = null,
+        errorCode: String? = null,
+    ) {
+        val event = AdEvent(
+            name = name,
+            platform = platform,
+            mediationMode = mediationMode,
+            format = AdFormat.BANNER,
+            position = position,
+            sessionId = sessionId,
+            adUnitId = adUnitId,
+            number = number,
+            slotId = slotId,
+            result = result,
+            reason = reason,
+            errorCode = errorCode,
         )
         logger?.event(event)
         runCatching { listener.onEvent(event) }

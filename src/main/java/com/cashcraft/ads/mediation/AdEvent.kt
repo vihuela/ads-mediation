@@ -4,6 +4,7 @@ enum class AdFormat(val analyticsValue: String) {
     APP_OPEN("app_open"),
     INTERSTITIAL("interstitial"),
     REWARDED("rewarded"),
+    BANNER("banner"),
 }
 
 enum class AdEventName(val analyticsName: String) {
@@ -17,6 +18,7 @@ enum class AdEventName(val analyticsName: String) {
     DISMISS("ad_close"),
     PAID("ad_paid"),
     REWARD_EARNED("ad_reward_earned"),
+    BANNER_REFRESH("ad_banner_refresh"),
 }
 
 /** SDK-neutral event payload shared by AdMob and TopOn. */
@@ -55,6 +57,7 @@ data class AdEvent(
         AdPlatform.ADMOB -> AdMediationMode.ADMOB
         AdPlatform.TOPON -> AdMediationMode.TOPON
     },
+    val slotId: String? = null,
 ) {
     /** Field names intentionally retain the existing analytics contract. */
     fun analyticsParameters(): Map<String, Any> = buildMap {
@@ -65,6 +68,7 @@ data class AdEvent(
         put("session_id", sessionId)
         put("ad_unit_id", adUnitId)
         put("number", number)
+        slotId?.let { put("slot_id", it) }
         reason?.let { put("reason", it.take(MAX_REASON_LENGTH)) }
         errorCode?.let { put("error_code", it) }
         adSource?.let { put("ad_source", it) }

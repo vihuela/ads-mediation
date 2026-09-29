@@ -43,6 +43,7 @@ class AdsModuleLoggerTest {
                 adUnitId = "placement",
                 number = 4L,
                 requestId = "load-request",
+                slotId = "banner-slot",
                 result = "no_fill",
                 latencyMillis = 1_250L,
                 bufferSize = 1,
@@ -50,6 +51,7 @@ class AdsModuleLoggerTest {
         )
 
         assertTrue(message.contains("request_id=load-request"))
+        assertTrue(message.contains("slot_id=banner-slot"))
         assertTrue(message.contains("result=no_fill"))
         assertTrue(message.contains("latency_ms=1250"))
         assertTrue(message.contains("buffer_size=1"))

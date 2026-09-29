@@ -6,6 +6,15 @@ import org.junit.Test
 
 class AdsConfigTest {
     @Test
+    fun `Banner cannot fall back to any full screen placement`() {
+        val admob = AdMobProviderConfig(AdMobIds.TEST)
+        val topon = testTopOnProvider()
+        listOf(admob, topon, BiddingProviderConfig(admob, topon)).forEach { provider ->
+            assertThrows(IllegalArgumentException::class.java) { provider.adUnitId(AdFormat.BANNER) }
+        }
+    }
+
+    @Test
     fun `every format preloads two ads by default`() {
         val preload = AdMobPreloadConfig()
 

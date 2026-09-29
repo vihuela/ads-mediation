@@ -1,6 +1,9 @@
 package com.cashcraft.ads.mediation.smoke
 
 import android.app.Application
+import android.util.Log
+import com.cashcraft.ads.mediation.AdFormat
+import com.cashcraft.ads.mediation.AdRevenueListener
 import com.cashcraft.ads.mediation.AdMobIds
 import com.cashcraft.ads.mediation.AdMobProviderConfig
 import com.cashcraft.ads.mediation.Ads
@@ -30,7 +33,11 @@ class SmokeApplication : Application() {
                     ),
                 ),
                 umpConsent = UmpConsentConfig(enabled = false),
-                loggingEnabled = false,
+                loggingEnabled = true,
+                revenueListener = AdRevenueListener { payload ->
+                    if (payload.format == AdFormat.BANNER) Log.i("BannerRevenue",
+                        "session_id=${payload.sessionId} response_id=${payload.impressionId} micros=${payload.valueMicros}")
+                },
                 autoShowAppOpen = false,
             ),
         )

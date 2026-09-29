@@ -15,6 +15,8 @@ import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.cashcraft.ads.mediation.internal.AutoAppOpenController
+import com.cashcraft.ads.mediation.internal.BannerProviderReadiness
+import com.cashcraft.ads.mediation.internal.BannerReadiness
 import com.cashcraft.ads.mediation.internal.BidDecision
 import com.cashcraft.ads.mediation.internal.DisplayOpportunityController
 import com.cashcraft.ads.mediation.internal.FullScreenShowAttempt
@@ -37,6 +39,7 @@ object Ads {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
     private val providerInitializationStarted = AtomicBoolean(false)
+    private val bannerProviders = BannerProviderReadiness()
 
     @Volatile
     private var activePlatform: AdPlatform? = null
@@ -144,6 +147,7 @@ object Ads {
 
         if (!isFirstInitialization) return
         onMain {
+            bannerProviders.configure(config.provider)
             AdLifecycleMonitor.addListener(lifecycleListener)
             AdLifecycleMonitor.install(application)
             if (config.umpConsent.enabled) {
@@ -170,6 +174,7 @@ object Ads {
         if (!umpConsentManager.snapshot.canRequestAds) return
         if (!providerInitializationStarted.compareAndSet(false, true)) return
         initializationStage = InitializationStage.PROVIDER_INITIALIZING
+        bannerProviders.started()
         val initialActivity = AdLifecycleMonitor.currentActivity
             ?.takeUnless { it.isFinishing || it.isDestroyed }
         when (val provider = config.provider) {
@@ -186,7 +191,9 @@ object Ads {
                     appOpenPosition = config.appOpenPosition,
                     mediationMode = AdMediationMode.ADMOB,
                 ),
-                onInitialized = ::finishInitialization,
+                onInitialized = { success ->
+                    finishSingleProviderInitialization(AdPlatform.ADMOB, success)
+                },
                 initialActivity = initialActivity,
             )
 
@@ -194,7 +201,9 @@ object Ads {
                 application = application,
                 commonConfig = config,
                 mediationMode = AdMediationMode.TOPON,
-                onInitialized = ::finishInitialization,
+                onInitialized = { success ->
+                    finishSingleProviderInitialization(AdPlatform.TOPON, success)
+                },
                 initialActivity = initialActivity,
             )
 
@@ -229,8 +238,14 @@ object Ads {
         }
     }
 
+    private fun finishSingleProviderInitialization(platform: AdPlatform, success: Boolean) {
+        bannerProviders.completed(platform, success)
+        finishInitialization(success)
+    }
+
     private fun finishBiddingProviderInitialization(isAdMob: Boolean, success: Boolean) {
         if (isAdMob) admobInitializationResult = success else topOnInitializationResult = success
+        bannerProviders.completed(if (isAdMob) AdPlatform.ADMOB else AdPlatform.TOPON, success)
         val admobResult = admobInitializationResult ?: return
         val topOnResult = topOnInitializationResult ?: return
         finishInitialization(admobResult || topOnResult)
@@ -238,6 +253,7 @@ object Ads {
 
     private fun finishInitialization(success: Boolean) {
         initializationStage = if (success) InitializationStage.COMPLETE else InitializationStage.FAILED
+        if (!success) bannerProviders.failedPending()
         initializationListeners.forEach { listener -> runCatching { listener(success) } }
         initializationListeners.clear()
         if (success && config.provider is BiddingProviderConfig) {
@@ -245,12 +261,38 @@ object Ads {
         }
     }
 
-    fun isReady(format: AdFormat): Boolean = ::config.isInitialized && consentSnapshot.canRequestAds &&
+    fun isReady(format: AdFormat): Boolean = format != AdFormat.BANNER &&
+        ::config.isInitialized && consentSnapshot.canRequestAds &&
         when (config.provider) {
             is AdMobProviderConfig -> AdMobAds.isReady(format)
             is TopOnProviderConfig -> TopOnAds.isReady(format)
             is BiddingProviderConfig -> AdMobAds.isReady(format) || TopOnAds.isReady(format)
         }
+
+    /** Request-time consent stays a live read; runtime privacy observation is not introduced. */
+    internal fun bannerReadiness(platform: AdPlatform): BannerReadiness =
+        bannerProviders.read(platform, consentSnapshot.canRequestAds)
+
+    /** Main-thread registration and disposal, owned by the Banner's page lifecycle. */
+    internal fun observeBannerReadiness(platform: AdPlatform, onChanged: () -> Unit): () -> Unit {
+        check(Looper.myLooper() == Looper.getMainLooper()) { "Banner observation requires the main thread" }
+        return bannerProviders.observe(platform, onChanged)
+    }
+
+    internal fun bannerEvents(platform: AdPlatform): AdEventDispatcher? =
+        if (!::config.isInitialized) null else AdEventDispatcher(
+            application, platform, config.provider.mediationMode, config.eventListener,
+            config.loggingEnabled, config.logTag,
+        )
+
+    internal val bannerRevenueListener: AdRevenueListener
+        get() = if (::config.isInitialized) config.revenueListener else AdRevenueListener.NONE
+
+    internal fun bannerLogger(): com.cashcraft.ads.mediation.internal.AdsModuleLogger =
+        com.cashcraft.ads.mediation.internal.AdsModuleLogger(
+            ::config.isInitialized && config.loggingEnabled,
+            if (::config.isInitialized) config.logTag else "AdsMediation",
+        )
 
     /**
      * 无需业务提供容器。TopOn 使用 Activity 的 android.R.id.content（回退到 decorView）
@@ -404,6 +446,7 @@ object Ads {
         hostContainer: ViewGroup? = null,
         onResult: (AdRewardResult) -> Unit,
     ): AdDisplayOpportunity {
+        require(format != AdFormat.BANNER) { "Banner does not use full-screen display opportunities" }
         // Capture before posting: a congested main queue must not extend the caller's deadline.
         val startedAt = SystemClock.elapsedRealtime()
         lateinit var controller: DisplayOpportunityController
@@ -519,6 +562,7 @@ object Ads {
         val callback: (AdShowResult) -> Unit = { onResult(AdRewardResult(false, it, sessionId)) }
         when (winner) {
             AdPlatform.ADMOB -> when (format) {
+                AdFormat.BANNER -> error("Banner does not use full-screen display")
                 AdFormat.APP_OPEN -> AdMobAds.showBiddingAppOpen(
                     activity, position, onSessionStarted, callback, attempt, created,
                 )
@@ -530,6 +574,7 @@ object Ads {
                 )
             }
             AdPlatform.TOPON -> when (format) {
+                AdFormat.BANNER -> error("Banner does not use full-screen display")
                 AdFormat.APP_OPEN -> TopOnAds.showBiddingAppOpen(
                     activity, position, onSessionStarted, callback, hostContainer, attempt, created,
                 )
@@ -560,6 +605,7 @@ object Ads {
         onResult: (AdRewardResult) -> Unit,
         appOpenHostContainer: ViewGroup? = null,
     ) {
+        require(format != AdFormat.BANNER) { "Banner does not use full-screen bidding" }
         val attempt = FullScreenShowAttempt().apply { guard = ::commonShowFailure }
         FullScreenShowGate.reserve(attempt)?.let { reason ->
             val sessionId = emitFacadeShowFailure(format, position, reason)

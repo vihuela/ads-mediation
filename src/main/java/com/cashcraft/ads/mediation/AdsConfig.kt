@@ -87,6 +87,7 @@ data class AdMobProviderConfig(
     override val platform: AdPlatform = AdPlatform.ADMOB
 
     override fun adUnitId(format: AdFormat): String = when (format) {
+        AdFormat.BANNER -> throw IllegalArgumentException("Banner requires an explicit ad unit ID")
         AdFormat.APP_OPEN -> ids.appOpenId
         AdFormat.INTERSTITIAL -> ids.interstitialId
         AdFormat.REWARDED -> ids.rewardedId
@@ -116,6 +117,7 @@ data class TopOnProviderConfig(
     override val platform: AdPlatform = AdPlatform.TOPON
 
     override fun adUnitId(format: AdFormat): String = when (format) {
+        AdFormat.BANNER -> throw IllegalArgumentException("Banner requires an explicit placement ID")
         AdFormat.APP_OPEN -> ids.appOpenPlacementId
         AdFormat.INTERSTITIAL -> ids.interstitialPlacementId
         AdFormat.REWARDED -> ids.rewardedPlacementId

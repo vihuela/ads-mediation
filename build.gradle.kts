@@ -61,6 +61,8 @@ configurations.configureEach {
 }
 
 dependencies {
+    // LifecycleOwner is part of the public View API; Compose remains an optional module.
+    api(libs.androidx.lifecycle.runtime)
     // Direct AdMob provider + TopOn's GMA Next-Gen network adapter.
     implementation(libs.ads.mobile.sdk)
     // GMA Next-Gen 1.2.1 still declares WorkManager 2.7.0/Room 2.2.5. With
@@ -100,6 +102,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
 }
 
 afterEvaluate {

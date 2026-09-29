@@ -207,17 +207,22 @@ internal object TopOnAds {
     fun isReady(format: AdFormat): Boolean {
         if (state != TopOnState.READY) return false
         return when (format) {
+            AdFormat.BANNER -> false
             AdFormat.APP_OPEN -> ::appOpenAd.isInitialized && appOpenAd.isAdReady
             AdFormat.INTERSTITIAL -> ::interstitialAd.isInitialized && interstitialAd.isAdReady
             AdFormat.REWARDED -> ::rewardedAd.isInitialized && rewardedAd.isAdReady
         }
     }
 
-    fun ensureLoaded(format: AdFormat) = onMain {
-        when (format) {
-            AdFormat.APP_OPEN -> loadAppOpen()
-            AdFormat.INTERSTITIAL -> loadInterstitial()
-            AdFormat.REWARDED -> loadRewarded()
+    fun ensureLoaded(format: AdFormat) {
+        require(format != AdFormat.BANNER) { "Banner does not use full-screen preloading" }
+        onMain {
+            when (format) {
+                AdFormat.BANNER -> Unit
+                AdFormat.APP_OPEN -> loadAppOpen()
+                AdFormat.INTERSTITIAL -> loadInterstitial()
+                AdFormat.REWARDED -> loadRewarded()
+            }
         }
     }
 
@@ -227,6 +232,7 @@ internal object TopOnAds {
         // checkValidAdCaches().firstOrNull() is only the first item in the cache snapshot and is
         // not documented as the next ad selected by TopOn when multiple ads are cached.
         val info = when (format) {
+            AdFormat.BANNER -> return null
             AdFormat.APP_OPEN -> appOpenAd.checkAdStatus().getTUTopAdInfo()
             AdFormat.INTERSTITIAL -> interstitialAd.checkAdStatus().getTUTopAdInfo()
             AdFormat.REWARDED -> rewardedAd.checkAdStatus().getTUTopAdInfo()
