@@ -1,5 +1,8 @@
 package com.cashcraft.ads.mediation
 
+import android.app.Activity
+import com.google.android.libraries.ads.mobile.sdk.banner.AdSize
+
 /** Requested Banner size; constructing it does not certify support by a selected provider. */
 sealed interface BannerSize {
     /** A fixed 320 × 50 dp ad; the host must provide at least 320 dp of content width. */
@@ -37,3 +40,12 @@ data class BannerRequest(
         AdPlatform.TOPON -> "topon_banner_not_supported"
     }
 }
+
+@Suppress("DEPRECATION")
+internal fun BannerRequest.resolveAdSize(activity: Activity, contentWidthDp: Int): AdSize =
+    when (size) {
+        BannerSize.Standard320x50 -> AdSize.BANNER
+        BannerSize.StandardAnchoredAdaptive ->
+            AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(activity, contentWidthDp)
+        BannerSize.AnchoredAdaptive -> AdSize.getLargeAnchoredAdaptiveBannerAdSize(activity, contentWidthDp)
+    }

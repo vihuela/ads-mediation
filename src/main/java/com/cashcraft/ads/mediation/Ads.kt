@@ -269,6 +269,24 @@ object Ads {
             is BiddingProviderConfig -> AdMobAds.isReady(format) || TopOnAds.isReady(format)
         }
 
+    /** Starts the AdMob Banner preloader for this measured placement. */
+    fun preloadBanner(activity: Activity, request: BannerRequest, contentWidthDp: Int) = onMain {
+        if (!::config.isInitialized || request.platform != AdPlatform.ADMOB || contentWidthDp <= 0) {
+            return@onMain
+        }
+        val provider = when (val configured = config.provider) {
+            is AdMobProviderConfig -> configured
+            is BiddingProviderConfig -> configured.admob
+            is TopOnProviderConfig -> return@onMain
+        }
+        if (request.sizeError(contentWidthDp) != null) return@onMain
+        AdMobAds.preloadBanner(
+            request = request,
+            size = request.resolveAdSize(activity, contentWidthDp),
+            bufferSize = provider.preload.banner,
+        )
+    }
+
     /** Request-time consent stays a live read; runtime privacy observation is not introduced. */
     internal fun bannerReadiness(platform: AdPlatform): BannerReadiness =
         bannerProviders.read(platform, consentSnapshot.canRequestAds)

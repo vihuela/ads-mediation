@@ -21,25 +21,29 @@ internal class AdMobBannerEvents(
     private val displays = LinkedHashMap<String, BannerDisplaySession>()
     private var ended = false
     private var loadFinished = false
+    private var trackLoad = true
+
+    @Synchronized
+    fun suppressLoadTracking() { trackLoad = false }
 
     @Synchronized
     fun prepareLoaded(response: BannerResponse) {
-        if (!ended) remember(response, if (loadFinished) null else load.requestId)
+        if (!ended) remember(response, if (loadFinished || !trackLoad) null else load.requestId)
     }
 
     @Synchronized
     fun loaded(response: BannerResponse) {
         if (ended) return
-        remember(response, if (loadFinished) null else load.requestId)
+        remember(response, if (loadFinished || !trackLoad) null else load.requestId)
         loadFinished = true
-        load.loaded(response.source, response.id)
+        if (trackLoad) load.loaded(response.source, response.id)
     }
 
     @Synchronized
     fun failed(code: String?, reason: String?, responseId: String?) {
         if (ended) return
         loadFinished = true
-        load.failed("failed", code, reason, responseId)
+        if (trackLoad) load.failed("failed", code, reason, responseId)
     }
 
     @Synchronized

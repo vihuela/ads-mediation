@@ -56,15 +56,18 @@ data class AdMobPreloadConfig(
     val appOpen: Int = DEFAULT_BUFFER_SIZE,
     val interstitial: Int = DEFAULT_BUFFER_SIZE,
     val rewarded: Int = DEFAULT_BUFFER_SIZE,
+    val banner: Int = DEFAULT_BANNER_BUFFER_SIZE,
 ) {
     init {
         require(appOpen in MIN_BUFFER_SIZE..MAX_BUFFER_SIZE) { "appOpen must be in 1..15" }
         require(interstitial in MIN_BUFFER_SIZE..MAX_BUFFER_SIZE) { "interstitial must be in 1..15" }
         require(rewarded in MIN_BUFFER_SIZE..MAX_BUFFER_SIZE) { "rewarded must be in 1..15" }
+        require(banner in MIN_BUFFER_SIZE..MAX_BUFFER_SIZE) { "banner must be in 1..15" }
     }
 
     companion object {
         const val DEFAULT_BUFFER_SIZE = 2
+        const val DEFAULT_BANNER_BUFFER_SIZE = 1
         private const val MIN_BUFFER_SIZE = 1
         private const val MAX_BUFFER_SIZE = 15
     }

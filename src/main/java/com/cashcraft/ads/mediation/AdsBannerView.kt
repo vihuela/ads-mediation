@@ -16,6 +16,7 @@ import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.BannerReadiness
 import com.cashcraft.ads.mediation.internal.BannerSlot
+import com.cashcraft.ads.mediation.admob.AdMobAds
 import com.cashcraft.ads.mediation.internal.admob.AdMobBannerEvents
 import com.cashcraft.ads.mediation.internal.admob.BannerResponse
 import com.google.android.libraries.ads.mobile.sdk.banner.AdSize
@@ -172,12 +173,7 @@ class AdsBannerView(
         }
     }
 
-    @Suppress("DEPRECATION") // The standard API intentionally preserves compact, pre-Large sizing.
-    private fun requestedAdSize(widthDp: Int): AdSize = when (request.size) {
-        BannerSize.Standard320x50 -> AdSize.BANNER
-        BannerSize.StandardAnchoredAdaptive -> AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(context as Activity, widthDp)
-        BannerSize.AnchoredAdaptive -> AdSize.getLargeAnchoredAdaptiveBannerAdSize(context as Activity, widthDp)
-    }
+    private fun requestedAdSize(widthDp: Int): AdSize = request.resolveAdSize(context as Activity, widthDp)
 
     private fun pixelsCoveringDp(dp: Int): Int = ceil(dp * resources.displayMetrics.density.toDouble()).toInt()
 
@@ -274,10 +270,22 @@ class AdsBannerView(
                 view.post {
                     if (!isCurrent(currentGeneration)) return@post
                     if (!eligible()) { releaseAd(); return@post }
+                    val preloadedAd = AdMobAds.pollBanner(request, size)
+                    val callback = if (preloadedAd == null) {
+                        loadCallback(WeakReference(this), currentGeneration, relay)
+                    } else {
+                        loadCallback(WeakReference(this), currentGeneration, relay) { ad ->
+                            view.registerBannerAd(ad, context as Activity)
+                        }
+                    }
                     val error = runCatching {
-                        view.loadAd(sdkRequest, loadCallback(WeakReference(this), currentGeneration, relay))
+                        if (preloadedAd == null) view.loadAd(sdkRequest, callback)
+                        else {
+                            relay.suppressLoadTracking()
+                            callback.onAdLoaded(preloadedAd)
+                        }
                     }.exceptionOrNull()
-                    load.request()
+                    if (preloadedAd == null) load.request()
                     if (error != null && isCurrent(currentGeneration)) {
                         relay.failed("load_exception", error.message, null)
                         if (isCurrent(currentGeneration)) {
@@ -386,12 +394,20 @@ class AdsBannerView(
                 source?.adapterClassName ?: info.adapterClassName)
         }.getOrDefault(BannerResponse(null))
 
-        fun loadCallback(owner: WeakReference<AdsBannerView>, generation: Long, relay: AdMobBannerEvents) =
+        fun loadCallback(
+            owner: WeakReference<AdsBannerView>,
+            generation: Long,
+            relay: AdMobBannerEvents,
+            registerBanner: ((BannerAd) -> Unit)? = null,
+        ) =
             object : AdLoadCallback<BannerAd> {
                 override fun onAdLoaded(ad: BannerAd) {
                     val response = snapshot(ad)
                     relay.prepareLoaded(response)
-                    val configurationError = runCatching { installCallbacks(ad, relay) }.exceptionOrNull()
+                    val configurationError = runCatching {
+                        installCallbacks(ad, relay)
+                        registerBanner?.invoke(ad)
+                    }.exceptionOrNull()
                     if (configurationError != null) {
                         main.post {
                             relay.failed("callback_configuration_failed", configurationError.message, response.id)

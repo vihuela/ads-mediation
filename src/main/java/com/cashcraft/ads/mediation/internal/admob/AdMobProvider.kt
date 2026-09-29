@@ -12,6 +12,10 @@ import com.google.android.libraries.ads.mobile.sdk.interstitial.InterstitialAd
 import com.google.android.libraries.ads.mobile.sdk.rewarded.RewardedAd
 import com.google.android.libraries.ads.mobile.sdk.appopen.AppOpenAdEventCallback
 import com.google.android.libraries.ads.mobile.sdk.appopen.AppOpenAdPreloader
+import com.google.android.libraries.ads.mobile.sdk.banner.AdSize
+import com.google.android.libraries.ads.mobile.sdk.banner.BannerAd
+import com.google.android.libraries.ads.mobile.sdk.banner.BannerAdPreloader
+import com.google.android.libraries.ads.mobile.sdk.banner.BannerAdRequest
 import com.google.android.libraries.ads.mobile.sdk.common.AdRequest
 import com.google.android.libraries.ads.mobile.sdk.common.AdValue
 import com.google.android.libraries.ads.mobile.sdk.common.FullScreenContentError
@@ -25,6 +29,7 @@ import com.google.android.libraries.ads.mobile.sdk.interstitial.InterstitialAdPr
 import com.google.android.libraries.ads.mobile.sdk.rewarded.RewardedAdEventCallback
 import com.google.android.libraries.ads.mobile.sdk.rewarded.RewardedAdPreloader
 import com.cashcraft.ads.mediation.AdPlatform
+import com.cashcraft.ads.mediation.BannerRequest
 import com.cashcraft.ads.mediation.AdMobRevenuePayload
 import com.cashcraft.ads.mediation.AdShowResult
 import com.cashcraft.ads.mediation.revenueEventId
@@ -74,6 +79,7 @@ object AdMobAds {
     private val preloadDescriptors = mutableMapOf<String, PreloadDescriptor>()
     private val preloadLoadSessions = mutableMapOf<String, AdLoadSession>()
     private val preloadStartedAt = mutableMapOf<String, Long>()
+    private val bannerPreloadDescriptors = mutableMapOf<Pair<String, String>, BannerPreloadDescriptor>()
     private val responseLoadBounds = mutableMapOf<String, Long>()
     private val pendingAds = mutableMapOf<AdMobFormat, RetainedAd<Ad>>()
     private val takenAds = mutableMapOf<Ad, RetainedAd<Ad>>()
@@ -179,6 +185,29 @@ object AdMobAds {
             AdMobFormat.REWARDED -> RewardedAdPreloader.isAdAvailable(PRELOAD_REWARDED)
         }
     }
+
+    internal fun preloadBanner(request: BannerRequest, size: AdSize, bufferSize: Int) = onMain {
+        if (state == AdMobState.FAILED) return@onMain
+        val descriptor = BannerPreloadDescriptor(
+            preloadId = bannerPreloadId(request, size),
+            adUnitId = request.adUnitId,
+            size = size,
+            bufferSize = bufferSize,
+        )
+        val placement = request.adUnitId to request.position
+        val previous = bannerPreloadDescriptors.put(placement, descriptor)
+        if (previous != null && previous.preloadId != descriptor.preloadId) {
+            BannerAdPreloader.destroy(previous.preloadId)
+        }
+        if (state == AdMobState.READY) startBannerPreloading(descriptor)
+    }
+
+    internal fun pollBanner(request: BannerRequest, size: AdSize): BannerAd? =
+        if (state == AdMobState.READY && request.platform == AdPlatform.ADMOB) {
+            BannerAdPreloader.pollAd(bannerPreloadId(request, size))
+        } else {
+            null
+        }
 
     fun showAppOpen(
         activity: Activity,
@@ -352,7 +381,19 @@ object AdMobAds {
             preloadConfiguration(config.ids.rewardedId, config.preload.rewarded),
             preloadCallback,
         )
+        bannerPreloadDescriptors.values.forEach(::startBannerPreloading)
     }
+
+    private fun startBannerPreloading(descriptor: BannerPreloadDescriptor) {
+        val request = BannerAdRequest.Builder(descriptor.adUnitId, descriptor.size).build()
+        BannerAdPreloader.start(
+            descriptor.preloadId,
+            PreloadConfiguration(request, descriptor.bufferSize),
+        )
+    }
+
+    private fun bannerPreloadId(request: BannerRequest, size: AdSize) =
+        "cashcraft_banner:${request.adUnitId}:${request.position}:${size.width}x${size.height}"
 
     private fun beginPreloadCycle(preloadId: String) {
         val descriptor = preloadDescriptors[preloadId] ?: return
@@ -713,6 +754,13 @@ object AdMobAds {
     private data class PreloadDescriptor(
         val format: AdMobFormat,
         val adUnitId: String,
+        val bufferSize: Int,
+    )
+
+    private data class BannerPreloadDescriptor(
+        val preloadId: String,
+        val adUnitId: String,
+        val size: AdSize,
         val bufferSize: Int,
     )
 }
