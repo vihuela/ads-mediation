@@ -25,7 +25,7 @@ class DisplayOpportunityControllerTest {
         harnesses.forEach { it.controller.cancel(); it.controller.attempt.complete() }
     }
 
-    @Test fun `deadline includes main queue time and a late timer cannot show`() {
+    @Test fun `deadline includes main queue time and final check uses available cache`() {
         val queued = harness(queuedFor = 500)
         queued.controller.start()
         assertEquals("wait_timeout", queued.reason)
@@ -40,11 +40,10 @@ class DisplayOpportunityControllerTest {
         h.now = 510
         h.ready = true
         h.tick()
-        assertEquals("wait_timeout", h.reason)
-        assertEquals(0, h.shows)
-        assertEquals(1, h.results.size)
+        assertEquals(1, h.sdkCalls)
+        assertTrue(h.results.isEmpty())
         assertNull(h.scheduled)
-        assertTrue(h.events.isEmpty())
+        h.finishSdk()
     }
 
     @Test fun `scene predicate cannot extend deadline or escape cleanup by throwing`() {
@@ -92,7 +91,8 @@ class DisplayOpportunityControllerTest {
         h.now = 500
         h.ready = true
         h.tick()
-        assertEquals("wait_timeout", h.reason)
+        assertEquals(1, h.sdkCalls)
+        h.finishSdk()
 
         val invalid = harness()
         invalid.precondition = "sdk_initializing"
@@ -135,8 +135,8 @@ class DisplayOpportunityControllerTest {
         expired.precondition = displayOpportunityFailureReason("sdk_initializing", AdsState.INITIALIZING, true)
         expired.ready = true
         expired.tick()
-        assertEquals("wait_timeout", expired.reason)
-        assertEquals(0, expired.sdkCalls)
+        assertEquals(1, expired.sdkCalls)
+        expired.finishSdk()
     }
 
     @Test fun `initialization failure or permission revocation ends an existing wait`() {
@@ -278,19 +278,42 @@ class DisplayOpportunityControllerTest {
         }
     }
 
-    @Test fun `deadline and consent are checked again after candidate preparation`() {
-        val expired = harness()
-        expired.ready = true
-        expired.beforeCommit = { expired.now = 500 }
-        expired.controller.start()
-        assertEquals("wait_timeout", expired.reason)
-        assertEquals(0, expired.sdkCalls)
-        val revoked = harness()
-        revoked.ready = true
-        revoked.beforeCommit = { revoked.precondition = "consent_not_obtained" }
-        revoked.controller.start()
-        assertEquals("consent_not_obtained", revoked.reason)
-        assertEquals(0, revoked.sdkCalls)
+    @Test fun `candidate selected before or at deadline can finish handoff after deadline`() {
+        for (selectedAt in listOf(499L, 500L, 501L)) {
+            val h = harness()
+            h.controller.start()
+            h.now = selectedAt
+            h.ready = true
+            h.beforeCommit = { h.now = 502 }
+            h.tick()
+            assertEquals(1, h.sdkCalls)
+            assertTrue(h.results.isEmpty())
+            assertNull(h.scheduled)
+            h.finishSdk()
+            assertEquals(1, h.results.size)
+        }
+    }
+
+    @Test fun `crossing deadline during preparation does not bypass final guards`() {
+        for (failure in listOf("opportunity_cancelled", "scene_invalid", "activity_not_resumed", "consent_not_obtained")) {
+            val h = harness()
+            h.controller.start()
+            h.ready = true
+            h.now = 499
+            h.beforeCommit = {
+                h.now = 502
+                when (failure) {
+                    "opportunity_cancelled" -> h.controller.cancel()
+                    "scene_invalid" -> h.scene = { false }
+                    "activity_not_resumed" -> h.hostFailure = failure
+                    "consent_not_obtained" -> h.precondition = failure
+                }
+            }
+            h.tick()
+            assertEquals(0, h.sdkCalls)
+            assertEquals(failure, h.reason)
+            assertEquals(1, h.results.size)
+        }
     }
 
     @Test fun `SDK handoff ends waiting and preserves close reward and one final result`() {
@@ -356,9 +379,99 @@ class DisplayOpportunityControllerTest {
         assertFalse(acceptsTopOnCallback(null, null, null, true))
     }
 
+    @Test fun `one cached bidder waits until the other settles or the deadline`() {
+        for (otherFinishes in listOf(true, false)) {
+            val h = harness()
+            h.ready = true
+            h.settled = false
+            h.controller.start()
+            h.now = 300
+            h.tick()
+            assertEquals(0, h.sdkCalls)
+            if (otherFinishes) h.settled = true else h.now = 500
+            h.tick()
+            assertEquals(1, h.sdkCalls)
+            assertTrue(h.results.isEmpty())
+            h.finishSdk()
+            assertEquals(1, h.results.size)
+        }
+    }
+
+    @Test fun `later higher priced bidder participates before the deadline`() {
+        val h = harness()
+        var topOnReady = false
+        var winner: AdPlatform? = null
+        h.ready = true // AdMob is cached first.
+        h.settled = false
+        h.beforeCommit = {
+            winner = BidCandidateSelector.select(true, 0.01, topOnReady, 0.05)?.winner
+        }
+        h.controller.start()
+        assertEquals(0, h.sdkCalls)
+        topOnReady = true
+        h.settled = true
+        h.now = 200
+        h.tick()
+        assertEquals(AdPlatform.TOPON, winner)
+        assertEquals(1, h.sdkCalls)
+        h.finishSdk()
+    }
+
+    @Test fun `cache becoming ready during a check does not report load failure`() {
+        val h = harness(timeout = 5_000)
+        h.controller.start()
+        h.now = 100
+        h.readReady = { h.ready.also { h.ready = true } }
+        h.tick()
+        assertTrue("A successful load must not end the opportunity: ${h.reason}", h.results.isEmpty())
+        h.tick()
+        assertEquals(1, h.sdkCalls)
+        h.finishSdk()
+        assertEquals(AdShowResult.Dismissed, h.results.single().showResult)
+    }
+
+    @Test fun `all failures finish early but one failure with a pending bidder keeps waiting`() {
+        val h = harness()
+        h.settled = false
+        h.controller.start()
+        h.now = 100
+        h.tick()
+        assertTrue(h.results.isEmpty())
+        h.settled = true
+        h.now = 200
+        h.tick()
+        assertEquals("ad_load_failed", h.reason)
+        assertEquals(0, h.sdkCalls)
+        assertNull(h.scheduled)
+        h.ready = true
+        h.tick()
+        assertEquals(0, h.sdkCalls)
+    }
+
+    @Test fun `deadline fallback still respects cancellation scene host and permission`() {
+        for (failure in listOf("cancel", "scene", "host", "permission")) {
+            val h = harness()
+            h.ready = true
+            h.settled = false
+            h.controller.start()
+            h.now = 500
+            when (failure) {
+                "cancel" -> h.controller.cancel()
+                "scene" -> h.scene = { false }
+                "host" -> h.hostFailure = "activity_not_resumed"
+                "permission" -> h.precondition = "consent_not_obtained"
+            }
+            h.tick()
+            assertEquals(0, h.sdkCalls)
+            assertEquals(1, h.results.size)
+        }
+    }
+
     private class Harness(timeout: Long, queuedFor: Long) {
         var now = queuedFor
         var ready = false
+        var readReady: () -> Boolean = { ready }
+        var settled: Boolean? = null
         var precondition: String? = null
         var hostFailure: String? = null
         var scene: () -> Boolean = { true }
@@ -385,7 +498,10 @@ class DisplayOpportunityControllerTest {
             precondition = { precondition },
             sceneValid = { scene() },
             hostFailure = { hostFailure },
-            isReady = { ready },
+            loadSnapshot = {
+                val ready = readReady()
+                DisplayOpportunityController.LoadSnapshot(ready, settled ?: ready)
+            },
             ensureLoaded = { ensures++; ensure() },
             show = { attempt, callback -> show(attempt, callback) },
             onCleanup = { cleanups++ },

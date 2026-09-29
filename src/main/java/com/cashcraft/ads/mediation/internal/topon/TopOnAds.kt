@@ -74,6 +74,12 @@ internal object TopOnAds {
     @SuppressLint("StaticFieldLeak")
     private lateinit var rewardedAd: TURewardVideoAd
 
+    private val loadFailures = mutableMapOf<AdFormat, Long>()
+    internal fun loadFailureVersion(format: AdFormat): Long = loadFailures[format] ?: 0L
+    private fun recordLoadFailure(format: AdFormat) {
+        loadFailures[format] = loadFailureVersion(format) + 1
+    }
+
     private var appOpenLoading = false
     private var interstitialLoading = false
     private var rewardedLoading = false
@@ -362,12 +368,12 @@ internal object TopOnAds {
         loadAppOpen()
         // Stagger formats so the latency-sensitive splash request is not competing with two other
         // waterfalls at process start.
-        mainHandler.postDelayed(::loadInterstitial, INTERSTITIAL_PRELOAD_DELAY_MILLIS)
-        mainHandler.postDelayed(::loadRewarded, REWARDED_PRELOAD_DELAY_MILLIS)
+        mainHandler.postDelayed({ loadInterstitial() }, INTERSTITIAL_PRELOAD_DELAY_MILLIS)
+        mainHandler.postDelayed({ loadRewarded() }, REWARDED_PRELOAD_DELAY_MILLIS)
     }
 
-    private fun loadAppOpen() {
-        if (state != TopOnState.READY || appOpenLoading || appOpenAd.isAdReady) return
+    private fun loadAppOpen(afterShow: Boolean = false) {
+        if (state != TopOnState.READY || appOpenLoading || (!afterShow && appOpenAd.isAdReady)) return
         appOpenLoading = true
         appOpenLoadSession = events.beginLoad(
             AdFormat.APP_OPEN,
@@ -376,12 +382,13 @@ internal object TopOnAds {
         )
         runCatching(appOpenAd::loadAd).onFailure { error ->
             appOpenLoading = false
+            recordLoadFailure(AdFormat.APP_OPEN)
             appOpenLoadSession?.failed("error", "exception", error.message, null)
         }
     }
 
-    private fun loadInterstitial() {
-        if (state != TopOnState.READY || interstitialLoading || interstitialAd.isAdReady) return
+    private fun loadInterstitial(afterShow: Boolean = false) {
+        if (state != TopOnState.READY || interstitialLoading || (!afterShow && interstitialAd.isAdReady)) return
         interstitialLoading = true
         interstitialLoadSession = events.beginLoad(
             AdFormat.INTERSTITIAL,
@@ -390,12 +397,13 @@ internal object TopOnAds {
         )
         runCatching(interstitialAd::load).onFailure { error ->
             interstitialLoading = false
+            recordLoadFailure(AdFormat.INTERSTITIAL)
             interstitialLoadSession?.failed("error", "exception", error.message, null)
         }
     }
 
-    private fun loadRewarded() {
-        if (state != TopOnState.READY || rewardedLoading || rewardedAd.isAdReady) return
+    private fun loadRewarded(afterShow: Boolean = false) {
+        if (state != TopOnState.READY || rewardedLoading || (!afterShow && rewardedAd.isAdReady)) return
         rewardedLoading = true
         rewardedLoadSession = events.beginLoad(
             AdFormat.REWARDED,
@@ -404,6 +412,7 @@ internal object TopOnAds {
         )
         runCatching(rewardedAd::load).onFailure { error ->
             rewardedLoading = false
+            recordLoadFailure(AdFormat.REWARDED)
             rewardedLoadSession?.failed("error", "exception", error.message, null)
         }
     }
@@ -416,6 +425,7 @@ internal object TopOnAds {
 
         override fun onInterstitialAdLoadFail(error: AdError) = onMain {
             interstitialLoading = false
+            recordLoadFailure(AdFormat.INTERSTITIAL)
             interstitialLoadSession?.failedFrom(error)
         }
 
@@ -432,6 +442,10 @@ internal object TopOnAds {
                     rememberShowSession(info.showId, session)
                     rememberRevenueSession(info.showId, session)
                     session.impression(info.networkName, info.showId)
+                    if (!captured.refillStarted) {
+                        captured.refillStarted = true
+                        loadInterstitial(afterShow = true)
+                    }
                 }
             }
         }
@@ -484,6 +498,7 @@ internal object TopOnAds {
 
         override fun onRewardedVideoAdFailed(error: AdError) = onMain {
             rewardedLoading = false
+            recordLoadFailure(AdFormat.REWARDED)
             rewardedLoadSession?.failedFrom(error)
         }
 
@@ -500,6 +515,10 @@ internal object TopOnAds {
                     rememberShowSession(info.showId, session)
                     rememberRevenueSession(info.showId, session)
                     session.impression(info.networkName, info.showId)
+                    if (!captured.refillStarted) {
+                        captured.refillStarted = true
+                        loadRewarded(afterShow = true)
+                    }
                 }
             }
         }
@@ -571,6 +590,7 @@ internal object TopOnAds {
 
         override fun onNoAdError(error: AdError) = onMain {
             appOpenLoading = false
+            recordLoadFailure(AdFormat.APP_OPEN)
             appOpenLoadSession?.failedFrom(error)
         }
 
@@ -587,6 +607,10 @@ internal object TopOnAds {
                     rememberShowSession(info.showId, session)
                     rememberRevenueSession(info.showId, session)
                     session.impression(info.networkName, info.showId)
+                    if (!captured.refillStarted) {
+                        captured.refillStarted = true
+                        loadAppOpen(afterShow = true)
+                    }
                 }
             }
         }
@@ -1073,12 +1097,14 @@ internal object TopOnAds {
     private data class ActiveShow(
         val session: AdShowSession,
         val onResult: (AdShowResult) -> Unit,
+        var refillStarted: Boolean = false,
     )
 
     private data class ActiveRewardedShow(
         val session: AdShowSession,
         val onResult: (AdRewardResult) -> Unit,
         var rewardEarned: Boolean = false,
+        var refillStarted: Boolean = false,
     )
 
     private val MICROS_PER_UNIT = BigDecimal("1000000")

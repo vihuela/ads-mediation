@@ -164,6 +164,10 @@ object AdMobAds {
         }
     }
 
+    private val loadFailures = mutableMapOf<String, Long>()
+    internal fun loadFailureVersion(format: AdMobFormat): Long =
+        loadFailures[format.preloadId()] ?: 0L
+
     fun isReady(format: AdMobFormat): Boolean {
         if (state != AdMobState.READY) return false
         if (pendingAd(format) != null) return true
@@ -297,6 +301,7 @@ object AdMobAds {
 
             override fun onAdFailedToPreload(preloadId: String, adError: LoadAdError) {
                 mainHandler.post {
+                    loadFailures[preloadId] = (loadFailures[preloadId] ?: 0L) + 1
                     preloadLoadSessions[preloadId]?.failed(
                         result = adError.analyticsLoadResult(),
                         errorCode = adError.code.name,

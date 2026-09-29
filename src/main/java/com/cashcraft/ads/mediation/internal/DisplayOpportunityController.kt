@@ -13,12 +13,14 @@ internal class DisplayOpportunityController(
     private var precondition: (() -> String?)?,
     private var sceneValid: (() -> Boolean)?,
     private var hostFailure: (() -> String?)?,
-    private var isReady: (() -> Boolean)?,
+    private var loadSnapshot: (() -> LoadSnapshot)?,
     private var ensureLoaded: (() -> Unit)?,
     private var show: ((FullScreenShowAttempt, (AdRewardResult) -> Unit) -> Unit)?,
     private var onCleanup: (() -> Unit)?,
     private var onResult: ((AdRewardResult) -> Unit)?,
 ) {
+    data class LoadSnapshot(val ready: Boolean, val settled: Boolean)
+
     private enum class State { WAITING, SDK_SHOW, FINISHED }
     private var state = State.WAITING
     private var started = false
@@ -30,10 +32,7 @@ internal class DisplayOpportunityController(
 
     init {
         attempt.guard = ::finalFailure
-        attempt.handoffGuard = {
-            if (nowMillis() - startedAtMillis >= timeoutMillis) "wait_timeout"
-            else precondition?.invoke()
-        }
+        attempt.handoffGuard = { precondition?.invoke() }
         attempt.onCommitted = {
             state = State.SDK_SHOW
             cleanWaiting()
@@ -53,20 +52,15 @@ internal class DisplayOpportunityController(
         sessionId = session.sessionId
     }
 
-    fun cancel(reason: String = "opportunity_cancelled") {
-        if (state == State.WAITING) fail(reason)
-    }
+    fun cancel(reason: String = "opportunity_cancelled") = fail(reason)
 
     private fun environmentFailure(): String? {
-        if (nowMillis() - startedAtMillis >= timeoutMillis) return "wait_timeout"
         precondition?.invoke()?.takeUnless { it == "sdk_initializing" }?.let { return it }
         val valid = try { sceneValid?.invoke() == true } catch (_: Exception) {
             return "scene_validation_failed"
         }
         if (state != State.WAITING) return "opportunity_cancelled"
         if (!valid) return "scene_invalid"
-        // Include time spent inside a host predicate in the original deadline.
-        if (nowMillis() - startedAtMillis >= timeoutMillis) return "wait_timeout"
         return hostFailure?.invoke() ?: precondition?.invoke()
     }
 
@@ -80,20 +74,26 @@ internal class DisplayOpportunityController(
         val reason = environmentFailure()
         if (state != State.WAITING) return
         if (reason != null && reason !in TRANSIENT_REASONS) return fail(reason)
-        if (!loadEnsured && precondition?.invoke() == null) {
+        if (!loadEnsured && nowMillis() - startedAtMillis < timeoutMillis && precondition?.invoke() == null) {
             loadEnsured = true
             ensureLoaded?.invoke()
         }
         if (state != State.WAITING) return
-        if (!attempting && reason == null && isReady?.invoke() == true) {
+        val expired = nowMillis() - startedAtMillis >= timeoutMillis
+        val (ready, settled) = loadSnapshot?.invoke() ?: return
+        if (!attempting && reason == null && ready && (settled || expired)) {
             if (state != State.WAITING) return
+            // The deadline limits waiting for bidders, not preparation of the selected ad.
+            // Provider guards still recheck cancellation, scene, host, consent and ad validity.
             attempting = true
             show?.invoke(attempt) { finish(it) }
         }
-        if (state == State.WAITING) {
-            val remaining = timeoutMillis - (nowMillis() - startedAtMillis)
-            if (remaining <= 0) fail("wait_timeout") else schedule(check, minOf(100L, remaining))
-        }
+        if (state != State.WAITING) return
+        if (expired) return fail("wait_timeout")
+        if (settled && !ready) return fail("ad_load_failed")
+        val remaining = timeoutMillis - (nowMillis() - startedAtMillis)
+        if (remaining <= 0) return fail("wait_timeout")
+        schedule(check, minOf(100L, remaining))
     }
 
     private fun fail(reason: String) {
@@ -121,7 +121,7 @@ internal class DisplayOpportunityController(
         precondition = null
         sceneValid = null
         hostFailure = null
-        isReady = null
+        loadSnapshot = null
         ensureLoaded = null
         show = null
         val cleanup = onCleanup

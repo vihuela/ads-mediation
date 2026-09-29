@@ -252,13 +252,21 @@ object Ads {
             is BiddingProviderConfig -> AdMobAds.isReady(format) || TopOnAds.isReady(format)
         }
 
+    /**
+     * 无需业务提供容器。TopOn 使用 Activity 的 android.R.id.content（回退到 decorView）
+     * 挂载临时广告容器，并在关闭或失败后移除；AdMob 直接调用 SDK 的全屏展示接口。
+     */
     fun showAppOpen(
         activity: Activity,
         position: String = "manual",
         onResult: (AdShowResult) -> Unit = {},
     ) = showAppOpenInternal(activity, null, position, onResult)
 
-    /** Uses a host-owned container for providers, such as TopOn, that render splash ads into a view. */
+    /**
+     * 指定开屏广告的挂载位置；不需要指定时使用不带 hostContainer 的重载。
+     * @param hostContainer TopOn TUSplashAd 的广告挂载父容器，须位于当前 Activity 窗口内且可见。
+     * 这不是业务 loading 容器；AdMob 不使用此参数，插屏和激励接口也不需要此参数。
+     */
     fun showAppOpen(
         activity: Activity,
         hostContainer: ViewGroup,
@@ -334,11 +342,14 @@ object Ads {
         }
     }
 
-    /** Waits within this scene's fixed deadline; cancellation leaves SDK loading intact. */
+    /**
+     * 等待平台结果，截止时使用可用缓存兜底；取消机会不停止底层加载。
+     * 无需业务提供容器：TopOn 默认挂载到 Activity 的 android.R.id.content，回退到 decorView。
+     */
     fun showAppOpenWhenReady(
         activity: Activity,
         position: String = "manual",
-        timeoutMillis: Long,
+        timeoutMillis: Long = 12_000L,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdShowResult) -> Unit = {},
     ): AdDisplayOpportunity = createOpportunity(
@@ -346,11 +357,16 @@ object Ads {
         onResult = { onResult(it.showResult) },
     )
 
+    /**
+     * 等待规则与无容器重载相同，仅覆盖 TopOn 开屏广告的挂载位置。
+     * @param hostContainer 当前 Activity 窗口内可见的广告父容器，不是业务 loading 容器。
+     * AdMob 不使用此参数；不需要指定挂载位置时使用不带此参数的重载。
+     */
     fun showAppOpenWhenReady(
         activity: Activity,
         hostContainer: ViewGroup,
         position: String = "manual",
-        timeoutMillis: Long,
+        timeoutMillis: Long = 12_000L,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdShowResult) -> Unit = {},
     ): AdDisplayOpportunity = createOpportunity(
@@ -361,7 +377,7 @@ object Ads {
     fun showInterstitialWhenReady(
         activity: Activity,
         position: String = "manual",
-        timeoutMillis: Long,
+        timeoutMillis: Long = 5_000L,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdShowResult) -> Unit = {},
     ): AdDisplayOpportunity = createOpportunity(
@@ -372,7 +388,7 @@ object Ads {
     fun showRewardedWhenReady(
         activity: Activity,
         position: String = "manual",
-        timeoutMillis: Long,
+        timeoutMillis: Long = 5_000L,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdRewardResult) -> Unit = {},
     ): AdDisplayOpportunity = createOpportunity(
@@ -392,6 +408,8 @@ object Ads {
         val startedAt = SystemClock.elapsedRealtime()
         lateinit var controller: DisplayOpportunityController
         val handle = AdDisplayOpportunity { onMain { controller.cancel() } }
+        var admobFailureVersion = 0L
+        var topOnFailureVersion = 0L
         val boundActivity = activity
         val listener = object : AdLifecycleMonitor.Listener {
             override fun onActivityPaused(activity: Activity) {
@@ -416,7 +434,23 @@ object Ads {
             precondition = ::opportunityPrecondition,
             sceneValid = isSceneValid,
             hostFailure = { AdLifecycleMonitor.activityWaitFailureReason(activity) },
-            isReady = { isReady(format) },
+            loadSnapshot = {
+                // SDK caches can change between calls; reuse each readiness sample for both decisions.
+                val admobReady = AdMobAds.isReady(format)
+                val topOnReady = TopOnAds.isReady(format)
+                val admobFinished = admobReady || AdMobAds.state == AdMobState.FAILED ||
+                    AdMobAds.loadFailureVersion(format) != admobFailureVersion
+                val topOnFinished = topOnReady || TopOnAds.state == TopOnState.FAILED ||
+                    TopOnAds.loadFailureVersion(format) != topOnFailureVersion
+                when (config.provider) {
+                    is AdMobProviderConfig -> DisplayOpportunityController.LoadSnapshot(admobReady, admobFinished)
+                    is TopOnProviderConfig -> DisplayOpportunityController.LoadSnapshot(topOnReady, topOnFinished)
+                    is BiddingProviderConfig -> DisplayOpportunityController.LoadSnapshot(
+                        ready = admobReady || topOnReady,
+                        settled = admobFinished && topOnFinished,
+                    )
+                }
+            },
             ensureLoaded = {
                 if (config.provider !is AdMobProviderConfig) TopOnAds.ensureLoaded(format)
             },
@@ -449,6 +483,8 @@ object Ads {
             onResult = onResult,
         )
         onMain {
+            admobFailureVersion = AdMobAds.loadFailureVersion(format)
+            topOnFailureVersion = TopOnAds.loadFailureVersion(format)
             AdLifecycleMonitor.addListener(listener)
             controller.start()
         }
