@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import java.lang.ref.WeakReference
+import java.util.Collections
 import java.util.WeakHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -23,7 +24,7 @@ internal object AdLifecycleMonitor {
     private val listeners = CopyOnWriteArrayList<Listener>()
     private var installedApplication: Application? = null
     private var resumedActivity = WeakReference<Activity>(null)
-    private var startedActivityCount = 0
+    private val startedActivities = Collections.newSetFromMap(WeakHashMap<Activity, Boolean>())
     private val awaitingFirstResume = WeakHashMap<Activity, Boolean>()
 
     @Volatile
@@ -36,6 +37,7 @@ internal object AdLifecycleMonitor {
     private val callbacks = object : Application.ActivityLifecycleCallbacks {
         override fun onActivityResumed(activity: Activity) {
             awaitingFirstResume[activity] = false
+            startedActivities.add(activity)
             resumedActivity = WeakReference(activity)
             if (!isAppInForeground) enterForeground(activity)
             listeners.forEach { it.onActivityResumed(activity) }
@@ -49,18 +51,20 @@ internal object AdLifecycleMonitor {
         }
 
         override fun onActivityStarted(activity: Activity) {
-            startedActivityCount++
-            if (startedActivityCount == 1) enterForeground(activity)
+            startedActivities.add(activity)
+            if (startedActivities.size == 1) enterForeground(activity)
         }
 
         override fun onActivityStopped(activity: Activity) {
             awaitingFirstResume[activity] = false
-            startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
-            if (startedActivityCount == 0) enterBackground()
+            // Installation can happen after another Activity's onStart. Its later onStop
+            // must not remove the foreground state of an Activity we did observe.
+            if (startedActivities.remove(activity) && startedActivities.isEmpty()) enterBackground()
         }
 
         override fun onActivityDestroyed(activity: Activity) {
             awaitingFirstResume.remove(activity)
+            startedActivities.remove(activity)
             if (resumedActivity.get() === activity) resumedActivity.clear()
             listeners.forEach { it.onActivityDestroyed(activity) }
         }
@@ -110,7 +114,7 @@ internal object AdLifecycleMonitor {
 
     private fun seed(activity: Activity) {
         resumedActivity = WeakReference(activity)
-        startedActivityCount = startedActivityCount.coerceAtLeast(1)
+        startedActivities.add(activity)
         isAppInForeground = true
     }
 
