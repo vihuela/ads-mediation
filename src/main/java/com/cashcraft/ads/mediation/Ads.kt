@@ -41,8 +41,10 @@ object Ads {
     private val providerInitializationStarted = AtomicBoolean(false)
     private val bannerProviders = BannerProviderReadiness()
 
+    /** Configured mode, or null before initialization. An individual ad's platform is in its event. */
     @Volatile
-    private var activePlatform: AdPlatform? = null
+    var mediationMode: AdMediationMode? = null
+        private set
 
     @Volatile
     private var initializationStage = InitializationStage.NOT_STARTED
@@ -61,8 +63,13 @@ object Ads {
         }
     }
 
+    /** Fixed provider only; null before initialization and in bidding mode. Not the last ad's winner. */
     val platform: AdPlatform?
-        get() = activePlatform
+        get() = when (mediationMode) {
+            AdMediationMode.ADMOB -> AdPlatform.ADMOB
+            AdMediationMode.TOPON -> AdPlatform.TOPON
+            AdMediationMode.BIDDING, null -> null
+        }
 
     val state: AdsState
         get() = when (initializationStage) {
@@ -84,6 +91,12 @@ object Ads {
             }
         }
 
+    /**
+     * Fixes the configuration for this process. Repeated calls with the same Application and an
+     * equal AdsConfig only observe the original initialization result; they do not reconfigure it.
+     * Reuse the config's listener instances as well as its values.
+     * @throws IllegalArgumentException if a subsequent call changes the Application or AdsConfig.
+     */
     fun initialize(
         application: Application,
         config: AdsConfig,
@@ -91,11 +104,13 @@ object Ads {
     ) {
         var isFirstInitialization = false
         synchronized(this) {
-            val existing = activePlatform
-            require(existing == null || existing == config.provider.platform) {
-                "Ads is already initialized with $existing"
-            }
             if (::config.isInitialized) {
+                require(this.application === application) {
+                    "Ads is already initialized with a different Application"
+                }
+                require(this.config == config) {
+                    "Ads is already initialized with a different AdsConfig; reuse the original configuration"
+                }
                 when (state) {
                     AdsState.READY -> mainHandler.post { onInitialized(true) }
                     AdsState.FAILED -> mainHandler.post { onInitialized(false) }
@@ -105,9 +120,9 @@ object Ads {
                 }
                 return
             }
-            activePlatform = config.provider.platform.takeUnless { config.provider is BiddingProviderConfig }
             this.application = application
             this.config = config
+            mediationMode = config.provider.mediationMode
             umpConsentManager = UmpConsentManager(
                 context = application,
                 config = config.umpConsent,
@@ -124,7 +139,8 @@ object Ads {
             )
             autoBiddingAppOpenController = AutoAppOpenController(
                 isEnabled = {
-                    this.config.autoShowAppOpen && this.config.provider is BiddingProviderConfig
+                    this.config.autoShowAppOpen && this.config.provider is BiddingProviderConfig &&
+                        this.config.provider.isFormatEnabled(AdFormat.APP_OPEN)
                 },
                 isProviderReady = { initializationStage == InitializationStage.COMPLETE },
                 providerFailureReason = { null },
@@ -262,7 +278,7 @@ object Ads {
     }
 
     fun isReady(format: AdFormat): Boolean = format != AdFormat.BANNER &&
-        ::config.isInitialized && consentSnapshot.canRequestAds &&
+        ::config.isInitialized && config.provider.isFormatEnabled(format) && consentSnapshot.canRequestAds &&
         when (config.provider) {
             is AdMobProviderConfig -> AdMobAds.isReady(format)
             is TopOnProviderConfig -> TopOnAds.isReady(format)
@@ -279,7 +295,7 @@ object Ads {
             is BiddingProviderConfig -> configured.admob
             is TopOnProviderConfig -> return@onMain
         }
-        if (request.sizeError(contentWidthDp) != null) return@onMain
+        if (provider.preload.banner == 0 || request.sizeError(contentWidthDp) != null) return@onMain
         AdMobAds.preloadBanner(
             request = request,
             size = request.resolveAdSize(activity, contentWidthDp),
@@ -340,7 +356,7 @@ object Ads {
         position: String,
         onResult: (AdShowResult) -> Unit,
     ) = onMain {
-        val failure = commonShowFailure()
+        val failure = commonShowFailure(AdFormat.APP_OPEN)
         if (failure != null) {
             failShow(AdFormat.APP_OPEN, position, failure, onResult)
             return@onMain
@@ -368,7 +384,7 @@ object Ads {
         position: String,
         onResult: (AdShowResult) -> Unit = {},
     ) = onMain {
-        val failure = commonShowFailure()
+        val failure = commonShowFailure(AdFormat.INTERSTITIAL)
         if (failure != null) {
             failShow(AdFormat.INTERSTITIAL, position, failure, onResult)
             return@onMain
@@ -390,7 +406,7 @@ object Ads {
         position: String,
         onResult: (AdRewardResult) -> Unit,
     ) = onMain {
-        val failure = commonShowFailure()
+        val failure = commonShowFailure(AdFormat.REWARDED)
         if (failure != null) {
             failRewardedShow(position, failure, onResult)
             return@onMain
@@ -492,16 +508,18 @@ object Ads {
             nowMillis = SystemClock::elapsedRealtime,
             schedule = { check, delay -> mainHandler.postDelayed(check, delay) },
             unschedule = mainHandler::removeCallbacks,
-            precondition = ::opportunityPrecondition,
+            precondition = { opportunityPrecondition(format) },
             sceneValid = isSceneValid,
             hostFailure = { AdLifecycleMonitor.activityWaitFailureReason(activity) },
             loadSnapshot = {
                 // SDK caches can change between calls; reuse each readiness sample for both decisions.
-                val admobReady = AdMobAds.isReady(format)
-                val topOnReady = TopOnAds.isReady(format)
-                val admobFinished = admobReady || AdMobAds.state == AdMobState.FAILED ||
+                val admobEnabled = config.provider.isFormatEnabled(AdPlatform.ADMOB, format)
+                val topOnEnabled = config.provider.isFormatEnabled(AdPlatform.TOPON, format)
+                val admobReady = admobEnabled && AdMobAds.isReady(format)
+                val topOnReady = topOnEnabled && TopOnAds.isReady(format)
+                val admobFinished = !admobEnabled || admobReady || AdMobAds.state == AdMobState.FAILED ||
                     AdMobAds.loadFailureVersion(format) != admobFailureVersion
-                val topOnFinished = topOnReady || TopOnAds.state == TopOnState.FAILED ||
+                val topOnFinished = !topOnEnabled || topOnReady || TopOnAds.state == TopOnState.FAILED ||
                     TopOnAds.loadFailureVersion(format) != topOnFailureVersion
                 when (config.provider) {
                     is AdMobProviderConfig -> DisplayOpportunityController.LoadSnapshot(admobReady, admobFinished)
@@ -513,7 +531,7 @@ object Ads {
                 }
             },
             ensureLoaded = {
-                if (config.provider !is AdMobProviderConfig) TopOnAds.ensureLoaded(format)
+                if (config.provider.isFormatEnabled(AdPlatform.TOPON, format)) TopOnAds.ensureLoaded(format)
             },
             show = { attempt, callback ->
                 val decision = if (config.provider is BiddingProviderConfig) {
@@ -552,12 +570,13 @@ object Ads {
         return handle
     }
 
-    private fun opportunityPrecondition(): String? = displayOpportunityFailureReason(
-        commonFailure = commonShowFailure(),
+    private fun opportunityPrecondition(format: AdFormat): String? = displayOpportunityFailureReason(
+        commonFailure = commonShowFailure(format),
         state = state,
         hasReadyBiddingProvider = providerInitializationStarted.get() &&
             ::config.isInitialized && config.provider is BiddingProviderConfig &&
-            (AdMobAds.state == AdMobState.READY || TopOnAds.state == TopOnState.READY),
+            ((config.provider.isFormatEnabled(AdPlatform.ADMOB, format) && AdMobAds.state == AdMobState.READY) ||
+                (config.provider.isFormatEnabled(AdPlatform.TOPON, format) && TopOnAds.state == TopOnState.READY)),
     )
 
     /** Both waiting and immediate bidding pass the same owner all the way to SDK show(). */
@@ -606,8 +625,9 @@ object Ads {
         }
     }
 
-    private fun commonShowFailure(): String? = when {
+    private fun commonShowFailure(format: AdFormat): String? = when {
         !::config.isInitialized -> "sdk_not_initialized"
+        !config.provider.isFormatEnabled(format) -> "ad_format_disabled"
         !consentSnapshot.canRequestAds -> CONSENT_NOT_OBTAINED
         !providerInitializationStarted.get() -> "sdk_initializing"
         initializationStage == InitializationStage.FAILED -> "sdk_initialization_failed"
@@ -624,7 +644,7 @@ object Ads {
         appOpenHostContainer: ViewGroup? = null,
     ) {
         require(format != AdFormat.BANNER) { "Banner does not use full-screen bidding" }
-        val attempt = FullScreenShowAttempt().apply { guard = ::commonShowFailure }
+        val attempt = FullScreenShowAttempt().apply { guard = { commonShowFailure(format) } }
         FullScreenShowGate.reserve(attempt)?.let { reason ->
             val sessionId = emitFacadeShowFailure(format, position, reason)
             onResult(AdRewardResult(false, AdShowResult.Failed(reason), sessionId))

@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package com.cashcraft.ads.mediation.admob
 
 import android.app.Activity
@@ -32,6 +34,9 @@ import com.cashcraft.ads.mediation.AdPlatform
 import com.cashcraft.ads.mediation.BannerRequest
 import com.cashcraft.ads.mediation.AdMobRevenuePayload
 import com.cashcraft.ads.mediation.AdShowResult
+import com.cashcraft.ads.mediation.adUnitId
+import com.cashcraft.ads.mediation.bufferSize
+import com.cashcraft.ads.mediation.isFormatEnabled
 import com.cashcraft.ads.mediation.revenueEventId
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
@@ -59,9 +64,19 @@ enum class AdMobState {
 /**
  * Minimal host facade for GMA Next-Gen app-open, interstitial, and rewarded ads.
  *
+ * Retained only for existing integrations. New integrations should use
+ * `com.cashcraft.ads.mediation.Ads` with `com.cashcraft.ads.mediation.AdsConfig`.
+ * Do not mix this entry point with `Ads`; this legacy entry point does not provide the unified gates.
+ *
  * The SDK preloaders own cache lifetime and replenishment. Every public show attempt emits one
  * `ad_position`, followed by exactly one terminal `ad_impression` or `ad_show_fail` event.
  */
+@Deprecated(
+    message = "Retained for existing integrations only. Use com.cashcraft.ads.mediation.Ads with " +
+        "com.cashcraft.ads.mediation.AdsConfig for new integrations. Do not mix with Ads; " +
+        "this legacy entry point does not provide the unified gates.",
+    level = DeprecationLevel.WARNING,
+)
 object AdMobAds {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -121,7 +136,7 @@ object AdMobAds {
                 logTag = config.logTag,
             )
             autoAppOpenController = AutoAppOpenController(
-                isEnabled = { this.config.autoShowAppOpen },
+                isEnabled = { this.config.autoShowAppOpen && isFormatEnabled(AdMobFormat.APP_OPEN) },
                 isProviderReady = { state == AdMobState.READY },
                 providerFailureReason = {
                     state.takeUnless { it == AdMobState.READY }?.showFailureReason()
@@ -174,8 +189,11 @@ object AdMobAds {
     internal fun loadFailureVersion(format: AdMobFormat): Long =
         if (format == AdMobFormat.BANNER) 0L else loadFailures[format.preloadId()] ?: 0L
 
+    private fun isFormatEnabled(format: AdMobFormat): Boolean =
+        ::config.isInitialized && config.ids.isFormatEnabled(format, config.preload)
+
     fun isReady(format: AdMobFormat): Boolean {
-        if (format == AdMobFormat.BANNER) return false
+        if (format == AdMobFormat.BANNER || !isFormatEnabled(format)) return false
         if (state != AdMobState.READY) return false
         if (pendingAd(format) != null) return true
         return when (format) {
@@ -187,7 +205,7 @@ object AdMobAds {
     }
 
     internal fun preloadBanner(request: BannerRequest, size: AdSize, bufferSize: Int) = onMain {
-        if (state == AdMobState.FAILED) return@onMain
+        if (state == AdMobState.FAILED || bufferSize <= 0) return@onMain
         val descriptor = BannerPreloadDescriptor(
             preloadId = bannerPreloadId(request, size),
             adUnitId = request.adUnitId,
@@ -203,7 +221,7 @@ object AdMobAds {
     }
 
     internal fun pollBanner(request: BannerRequest, size: AdSize): BannerAd? =
-        if (state == AdMobState.READY && request.platform == AdPlatform.ADMOB) {
+        if (state == AdMobState.READY && request.platform == AdPlatform.ADMOB && config.preload.banner > 0) {
             BannerAdPreloader.pollAd(bannerPreloadId(request, size))
         } else {
             null
@@ -347,40 +365,20 @@ object AdMobAds {
             }
         }
         preloadDescriptors.clear()
-        preloadDescriptors[PRELOAD_APP_OPEN] = PreloadDescriptor(
-            format = AdMobFormat.APP_OPEN,
-            adUnitId = config.ids.appOpenId,
-            bufferSize = config.preload.appOpen,
-        )
-        preloadDescriptors[PRELOAD_INTERSTITIAL] = PreloadDescriptor(
-            format = AdMobFormat.INTERSTITIAL,
-            adUnitId = config.ids.interstitialId,
-            bufferSize = config.preload.interstitial,
-        )
-        preloadDescriptors[PRELOAD_REWARDED] = PreloadDescriptor(
-            format = AdMobFormat.REWARDED,
-            adUnitId = config.ids.rewardedId,
-            bufferSize = config.preload.rewarded,
-        )
-        preloadDescriptors.keys.forEach(::beginPreloadCycle)
-        preloadStartedAt[PRELOAD_APP_OPEN] = SystemClock.elapsedRealtime()
-        AppOpenAdPreloader.start(
-            PRELOAD_APP_OPEN,
-            preloadConfiguration(config.ids.appOpenId, config.preload.appOpen),
-            preloadCallback,
-        )
-        preloadStartedAt[PRELOAD_INTERSTITIAL] = SystemClock.elapsedRealtime()
-        InterstitialAdPreloader.start(
-            PRELOAD_INTERSTITIAL,
-            preloadConfiguration(config.ids.interstitialId, config.preload.interstitial),
-            preloadCallback,
-        )
-        preloadStartedAt[PRELOAD_REWARDED] = SystemClock.elapsedRealtime()
-        RewardedAdPreloader.start(
-            PRELOAD_REWARDED,
-            preloadConfiguration(config.ids.rewardedId, config.preload.rewarded),
-            preloadCallback,
-        )
+        AdMobFormat.entries.filter { it != AdMobFormat.BANNER && isFormatEnabled(it) }.forEach { format ->
+            val preloadId = format.preloadId()
+            val descriptor = PreloadDescriptor(format, config.ids.adUnitId(format), config.preload.bufferSize(format))
+            preloadDescriptors[preloadId] = descriptor
+            beginPreloadCycle(preloadId)
+            preloadStartedAt[preloadId] = SystemClock.elapsedRealtime()
+            val configuration = preloadConfiguration(descriptor.adUnitId, descriptor.bufferSize)
+            when (format) {
+                AdMobFormat.APP_OPEN -> AppOpenAdPreloader.start(preloadId, configuration, preloadCallback)
+                AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.start(preloadId, configuration, preloadCallback)
+                AdMobFormat.REWARDED -> RewardedAdPreloader.start(preloadId, configuration, preloadCallback)
+                AdMobFormat.BANNER -> Unit
+            }
+        }
         bannerPreloadDescriptors.values.forEach(::startBannerPreloading)
     }
 
@@ -417,7 +415,7 @@ object AdMobAds {
     )
 
     internal fun bidPrice(format: AdMobFormat): Double? {
-        if (format == AdMobFormat.BANNER) return null
+        if (format == AdMobFormat.BANNER || !isFormatEnabled(format)) return null
         pendingAd(format)?.let { return it.priceUsd }
         if (!isReady(format)) return null
         return AdMobNextGenBidPrice.peek(format, format.preloadId())
@@ -478,13 +476,6 @@ object AdMobAds {
         AdMobFormat.APP_OPEN -> PRELOAD_APP_OPEN
         AdMobFormat.INTERSTITIAL -> PRELOAD_INTERSTITIAL
         AdMobFormat.REWARDED -> PRELOAD_REWARDED
-    }
-
-    private fun AdMobIds.adUnitId(format: AdMobFormat): String = when (format) {
-        AdMobFormat.BANNER -> error("Banner requires an explicit ad unit ID")
-        AdMobFormat.APP_OPEN -> appOpenId
-        AdMobFormat.INTERSTITIAL -> interstitialId
-        AdMobFormat.REWARDED -> rewardedId
     }
 
     private fun showAppOpenOnMain(
@@ -613,6 +604,10 @@ object AdMobAds {
         session: AdShowSession,
         onResult: (AdMobShowResult) -> Unit,
     ): Boolean {
+        if (!isFormatEnabled(session.format)) {
+            failBeforeShow(session, "ad_format_disabled", onResult)
+            return false
+        }
         val reason = FullScreenShowGate.tryAcquire(
             activity = activity,
             providerFailureReason = state.takeUnless { it == AdMobState.READY }?.showFailureReason(),

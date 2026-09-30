@@ -19,7 +19,18 @@ typealias AdMobEventListener = com.cashcraft.ads.mediation.AdEventListener
 typealias AdMobShowResult = com.cashcraft.ads.mediation.AdShowResult
 typealias AdMobRewardResult = com.cashcraft.ads.mediation.AdRewardResult
 
-/** Legacy AdMob-only configuration consumed by the provider implementation. */
+/**
+ * Legacy AdMob-only configuration retained only for existing integrations.
+ * New integrations should use `com.cashcraft.ads.mediation.AdsConfig` with
+ * `com.cashcraft.ads.mediation.Ads`. Do not mix the legacy entry point with `Ads`;
+ * the legacy entry point does not provide the unified gates.
+ */
+@Deprecated(
+    message = "Retained for existing integrations only. Use com.cashcraft.ads.mediation.AdsConfig " +
+        "with com.cashcraft.ads.mediation.Ads for new integrations. Do not mix the legacy entry " +
+        "point with Ads; the legacy entry point does not provide the unified gates.",
+    level = DeprecationLevel.WARNING,
+)
 data class AdMobConfig(
     val ids: AdMobIds,
     val preload: AdMobPreloadConfig = AdMobPreloadConfig(),

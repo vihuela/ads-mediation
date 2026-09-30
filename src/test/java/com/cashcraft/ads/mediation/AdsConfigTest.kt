@@ -1,7 +1,9 @@
 package com.cashcraft.ads.mediation
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AdsConfigTest {
@@ -82,8 +84,51 @@ class AdsConfigTest {
 
     @Test
     fun `invalid buffer sizes are rejected at configuration time`() {
-        assertThrows(IllegalArgumentException::class.java) { AdMobPreloadConfig(rewarded = 0) }
+        assertThrows(IllegalArgumentException::class.java) { AdMobPreloadConfig(rewarded = -1) }
         assertThrows(IllegalArgumentException::class.java) { AdMobPreloadConfig(interstitial = 16) }
+        assertThrows(IllegalArgumentException::class.java) { AdMobPreloadConfig(banner = -1) }
+    }
+
+    @Test
+    fun `omitted ids allow rewarded only and Banner only without changing full configurations`() {
+        val rewardedOnly = AdMobProviderConfig(AdMobIds("app-id", rewardedId = "rewarded-id"))
+        val bannerOnly = AdMobProviderConfig(AdMobIds("app-id"))
+        for (format in listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL, AdFormat.REWARDED)) {
+            assertTrue(AdMobProviderConfig(AdMobIds.TEST).isFormatEnabled(format))
+            assertTrue(testTopOnProvider().isFormatEnabled(format))
+            assertEquals(format == AdFormat.REWARDED, rewardedOnly.isFormatEnabled(format))
+            assertFalse(bannerOnly.isFormatEnabled(format))
+        }
+        assertTrue(bannerOnly.isFormatEnabled(AdFormat.BANNER))
+        assertThrows(IllegalArgumentException::class.java) { AdMobIds(" ") }
+        assertThrows(IllegalArgumentException::class.java) { AdMobIds("app-id", rewardedId = " ") }
+        assertThrows(IllegalArgumentException::class.java) { TopOnIds("app-id", " ") }
+        assertThrows(IllegalArgumentException::class.java) { TopOnIds("app-id", "key", appOpenPlacementId = " ") }
+    }
+
+    @Test
+    fun `zero buffers disable full screen formats but Banner requests remain usable`() {
+        val provider = AdMobProviderConfig(AdMobIds.TEST, AdMobPreloadConfig(0, 0, 0, 0))
+        AdFormat.entries.forEach { format ->
+            assertEquals(format == AdFormat.BANNER, provider.isFormatEnabled(format))
+        }
+        assertEquals(0, provider.preload.banner)
+    }
+
+    @Test
+    fun `bidding enables only the formats provided by each participant`() {
+        val admob = AdMobProviderConfig(AdMobIds("admob-app", rewardedId = "admob-reward"))
+        val topon = TopOnProviderConfig(TopOnIds("topon-app", "key", interstitialPlacementId = "topon-interstitial"))
+        val bidding = BiddingProviderConfig(admob, topon)
+        assertFalse(bidding.isFormatEnabled(AdFormat.APP_OPEN))
+        assertTrue(bidding.isFormatEnabled(AdFormat.INTERSTITIAL))
+        assertTrue(bidding.isFormatEnabled(AdFormat.REWARDED))
+        assertFalse(bidding.isFormatEnabled(AdPlatform.ADMOB, AdFormat.INTERSTITIAL))
+        assertTrue(bidding.isFormatEnabled(AdPlatform.TOPON, AdFormat.INTERSTITIAL))
+        assertTrue(bidding.isFormatEnabled(AdPlatform.ADMOB, AdFormat.REWARDED))
+        assertFalse(bidding.isFormatEnabled(AdPlatform.TOPON, AdFormat.REWARDED))
+        assertFalse(topon.isFormatEnabled(AdFormat.BANNER))
+        assertFalse(admob.isFormatEnabled(AdPlatform.TOPON, AdFormat.REWARDED))
     }
 
     @Test
