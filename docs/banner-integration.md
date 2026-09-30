@@ -1,7 +1,7 @@
 # Banner 接入（本次变更，尚未远程发布）
 
 正式入口支持 AdMob GMA Next-Gen 1.2.1。TopOn 请求返回
-`BannerState.Failed("topon_banner_not_supported")`，不会请求 TopOn 或回退 AdMob。
+`AdShowResult.Failed("topon_banner_not_supported")`，不会请求 TopOn 或回退 AdMob。
 TopOn 的尺寸、刷新身份反例保留在 [验证记录](../openspec/changes/archive/2026-09-29-add-banner-support/verification.md)，后续单独补齐。
 
 ## 依赖与初始化
@@ -12,6 +12,16 @@ TopOn 的尺寸、刷新身份反例保留在 [验证记录](../openspec/changes
 Compose 模块使用 Kotlin／Compose 编译插件 2.2.21、Compose UI 1.7.6、Lifecycle Compose 2.8.7。
 
 沿用 `Ads.initialize()`，配置 AdMob 或含 AdMob 的 Bidding provider。Banner 检查 AdMob 自身初始化结果与请求前 UMP 许可；整体 Bidding 初始化成功不能放行失败的 AdMob。
+仅使用 Banner 时，只需提供 AdMob 应用 ID，三种全屏广告位 ID 都可省略：
+
+```kotlin
+val config = AdsConfig(
+    provider = AdMobProviderConfig(ids = AdMobIds(applicationId = "AdMob App ID")),
+)
+```
+
+此配置不会启动全屏预加载或自动开屏。Banner 广告位 ID 仍通过 `BannerRequest` 提供。
+`AdMobPreloadConfig(banner = 0)` 只关闭 `Ads.preloadBanner()` 的预加载，不关闭 Banner View 本身的请求。
 测试宿主关闭 UMP 仅用于自动化，不应复制到生产隐私配置。
 
 ## View／Fragment
@@ -59,7 +69,11 @@ AdsBanner(
     active = pageOwnsBanner,
     visible = !sameWindowOverlay,
     modifier = Modifier.fillMaxWidth(),
-    onState = { state -> /* 使用最新回调 */ },
+    onState = { state ->
+        if (state is AdShowResult.Failed) {
+            // 与全屏广告共用失败处理逻辑，例如记录 state.reason。
+        }
+    },
 )
 ```
 
@@ -72,6 +86,11 @@ AdsBanner(
 页面独立持有的可运行示例见 [SmokeActivity.kt](../r8-smoke-app/src/main/java/com/cashcraft/ads/mediation/smoke/SmokeActivity.kt)。
 
 ## 尺寸、刷新与失败
+
+View 与 Compose 的 `onState` 仍接收 `BannerState`；失败值统一为 `AdShowResult.Failed`，
+它同时实现 `AdShowResult` 和 `BannerState`。其余状态仍为 `Inactive`、`Waiting`、`Loading`、
+`Ready`、`Destroyed`。Banner 的失败描述当前请求或配置问题，不代表此前没有曝光或收益；
+同一个 Banner 仍可能通过 SDK 刷新恢复为 `Ready`。
 
 `Standard320x50` 明确为 320×50 dp，内容宽度不足 320 dp 时失败。
 `StandardAnchoredAdaptive` 使用实际内容宽度调用 `getCurrentOrientationAnchoredAdaptiveBannerAdSize`，用于恢复普通锚定自适应的紧凑高度；HealthTracker 首页使用此选项。该 Google API 已弃用，本选项为历史尺寸兼容保留，升级底层 SDK 时需复核。
@@ -102,6 +121,8 @@ Google 文档说明自动刷新依赖广告可见，开启后也可处理加载�
 这不保证 SDK 在销毁后一定回调。AdMob 全屏内容关闭表示落地内容退出，**不映射为 Banner 本体 `ad_close`**；本版不提供 Banner 关闭按钮。
 
 新增 `AdFormat.BANNER`、`AdEventName.BANNER_REFRESH` 需要更新穷尽 `when` 与事件解析。
+原 `BannerState.Failed` 已移除，构造、类型判断及穷尽 `when` 分支统一改为 `AdShowResult.Failed`，
+并重新编译使用 Banner 的宿主与依赖模块；`onState` 参数类型和 `reason: String` 保持不变。
 `AdEvent` 增加 `slotId` 后构造及 `copy` 的 JVM 签名改变，宿主及依赖它的二进制模块必须重新编译；不能把默认参数视为二进制兼容保证。
 原全屏入口明确拒绝 BANNER，Banner 不参与全屏缓存竞价或展示锁。
 

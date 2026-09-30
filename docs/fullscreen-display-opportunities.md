@@ -61,6 +61,7 @@ object Ads {
 
 | 原因 | 含义 |
 | --- | --- |
+| `ad_format_disabled` | 该格式没有配置 ID，或 AdMob 对应全屏缓存数量为零；直接结束，不启动加载 |
 | `wait_timeout` | 截止决策时无可用广告或展示条件仍不满足 |
 | `ad_load_failed` | 所有参与平台均明确加载失败，提前结束等待 |
 | `opportunity_cancelled` | 宿主主动取消 |
@@ -315,7 +316,7 @@ fun LevelScreen(
 - 开屏按响应 ID 匹配预加载记录，使用对应 Preloader 启动时间作为加载时间的保守下界，并遵守官方四小时上限；可能提前丢弃，不会以取消时间重新计龄。价格无法与该响应可靠关联时按未知价格处理。
 - Next-Gen 1.2.1 的插屏和激励没有公开可验证的离队对象有效期；未匹配到加载记录的开屏也无法确认有效性。这些已取出对象解绑回调后销毁，后续机会继续使用 SDK 队列或在途加载。
 
-上述极窄的交接中止窗口不能保证复用同一已取出对象；OpenSpec 任务 2.4 的完整复用验收仍待有效期依据确认。[官方开屏有效期](https://developers.google.com/admob/android/next-gen/app-open)、[插屏预加载说明](https://developers.google.com/admob/android/next-gen/interstitial)、[激励预加载说明](https://developers.google.com/admob/android/next-gen/rewarded)。
+上述极窄的交接中止窗口不能保证复用同一已取出对象。2026-09-30 已批准此保守策略：任务 2.4 不再要求复用有效性未知的离队对象，真实 SDK 展示验收仍单独跟踪。[官方开屏有效期](https://developers.google.com/admob/android/next-gen/app-open)、[插屏预加载说明](https://developers.google.com/admob/android/next-gen/interstitial)、[激励预加载说明](https://developers.google.com/admob/android/next-gen/rewarded)。
 
 ## 业务 loading 与后台恢复
 
@@ -325,7 +326,7 @@ loading 使用当前 Activity 页面内的 View/Compose 覆盖层，避免独立
 
 `onResult` 在等待失败或广告最终关闭/失败时交付；当前没有新增展示交接回调。页面内 loading 可由全屏广告覆盖，最终结果时清理。交给 SDK 后等待计时停止，不限制广告播放时长。
 
-每次机会只主动确保加载一次；明确失败来自平台整体加载失败或初始化失败，而不是聚合平台内部单个广告源失败。本次机会开始前的加载失败记录不会直接导致新机会失败。TopOn 新机会仍可按需发起加载，AdMob 仍依赖持续预加载；本层不增加循环重试。主线程调度可能使截止检查稍晚执行，最终决策使用该次检查时的有效缓存，不再开启新的等待窗口。
+每次机会只主动确保加载一次；明确失败来自平台整体加载失败或初始化失败，而不是聚合平台内部单个广告源失败。本次机会开始前的加载失败记录不会直接导致新机会失败。TopOn 新机会仍可按需发起加载，AdMob 仍依赖持续预加载；本层不增加循环重试。竞价仅等待已启用当前格式的平台，已关闭的参与方不占等待时间。主线程调度可能使截止检查稍晚执行，最终决策使用该次检查时的有效缓存，不再开启新的等待窗口。
 
 
 等待期限限制的是等待平台结果的阶段。若在截止前已满足决策条件并选出候选，随后展示准备跨过截止时间，不会仅因此返回超时；截止时选出的兜底候选也遵循同一规则。选定候选不等于交给 SDK：交接前取消、场景失效、许可撤销、宿主不可展示或广告失效仍会阻止展示。

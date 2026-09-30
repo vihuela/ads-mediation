@@ -204,9 +204,27 @@ when (Ads.state) {
     AdsState.FAILED -> Unit
 }
 
-// 固定 provider 时返回 ADMOB/TOPON；竞价模式没有固定平台，因此返回 null。
+// 接入模式：未初始化时为 null；初始化后为 ADMOB、TOPON 或 BIDDING。
+val mode: AdMediationMode? = Ads.mediationMode
+
+// 固定 provider 时返回 ADMOB/TOPON；未初始化或竞价模式返回 null，不代表本次广告来源。
 val fixedPlatform: AdPlatform? = Ads.platform
 ```
+
+初始化会固定本进程的配置。使用同一个 Application 和相等的 `AdsConfig` 重复调用，只订阅原来的
+初始化结果，不会重启或重新配置 SDK。建议复用首次创建的配置对象；事件、收益监听器也是配置的一部分，
+新建的监听器实例视为配置变化。`onInitialized` 不属于固定配置，每次调用可以传入新的结果回调。
+更换接入模式、广告 ID、许可设置、监听器或其他配置，以及更换 Application，都会同步抛出
+`IllegalArgumentException`，不会返回成功或应用部分新配置。SDK 自身的初始化失败仍通过回调报告。
+
+已创建的 Provider 配置可通过 `provider.mediationMode` 查询模式。`provider.platform` 保留旧事件
+归属语义，竞价配置仍以 AdMob 作为回退值，不用于判断接入模式或竞价胜出方；`BiddingProviderConfig.platform`
+已标记弃用。某次实际广告的平台应读取对应的 `AdEvent.platform` / `AdRevenuePayload.platform`，竞价结果
+读取 `winnerPlatform`。
+
+新接入统一使用 `com.cashcraft.ads.mediation.Ads` 与 `AdsConfig`。旧的 `admob.AdMobAds` 和
+`admob.AdMobConfig` 已标记为 WARNING 级弃用，仅为已有宿主保留签名与行为。旧入口不经过 `Ads` 的统一
+UMP 门禁，不要在同一进程混用两套初始化入口；弃用提示不会自动迁移或改变既有接入。
 
 竞价模式只要 AdMob 或 TopOn 任意一方初始化成功，整体初始化就视为成功。初始化失败不会抛出
 SDK 崩溃；展示回调会返回 `Failed("sdk_initialization_failed")`。如果在 `Ads.initialize()` 之前
@@ -223,7 +241,7 @@ SDK 崩溃；展示回调会返回 `Failed("sdk_initialization_failed")`。如�
 | `revenueListener` | `AdRevenueListener` | 空实现 | 接收 AdMob/TopOn 原生展示级收益对象，专门用于 Tenjin 等 ILRD 接口 |
 | `loggingEnabled` | `Boolean` | SDK Debug 包为 `true` | 控制模块 Logcat 和平台调试日志 |
 | `logTag` | `String` | `AdsMediation` | 模块 Logcat tag，不允许为空 |
-| `autoShowAppOpen` | `Boolean` | `true` | App 进入前台时自动尝试展示开屏广告 |
+| `autoShowAppOpen` | `Boolean` | `true` | 已启用开屏格式时，App 进入前台自动尝试展示 |
 | `appOpenPosition` | `String` | `app_foreground` | 自动开屏对应的业务场景名 |
 
 ### 2.2 Provider 参数
@@ -246,8 +264,36 @@ val provider = AdMobProviderConfig(
 )
 ```
 
-`AdMobPreloadConfig` 表示 GMA Next-Gen 每种广告持续补充的缓存上限，取值范围为 `1..15`，
-默认都是 `2`。开发和自动化测试可使用 `AdMobIds.TEST`，生产包必须注入真实 ID。
+`AdMobPreloadConfig` 表示 GMA Next-Gen 每种广告持续补充的缓存上限，取值范围为 `0..15`，
+三种全屏格式默认各 `2`，Banner 默认 `1`。全屏格式设为 `0` 会关闭该格式；`banner = 0`
+只关闭显式 Banner 预加载，Banner View 仍可按自己的请求加载。开发和自动化测试可使用
+`AdMobIds.TEST`，生产包必须注入真实 ID。
+
+**按格式启用（本工作树新增，尚未远程发布）：** 全屏广告 ID 可省略，默认空字符串表示关闭；
+应用 ID／TopOn App Key 仍必填，纯空白字符串仍会被拒绝。已有全量 ID 和默认缓存配置的行为保持不变。
+
+```kotlin
+// 只用 AdMob 激励：不需要开屏、插屏 ID，也不会预加载这两种广告。
+val rewardedOnly = AdMobProviderConfig(
+    ids = AdMobIds(applicationId = "AdMob App ID", rewardedId = "Rewarded Ad Unit ID"),
+)
+
+// 只用 Banner：广告位 ID 由 BannerRequest 提供。
+val bannerOnly = AdMobProviderConfig(ids = AdMobIds(applicationId = "AdMob App ID"))
+
+// 只用 TopOn 激励：同样省略其他 placement ID。
+val topOnRewardedOnly = TopOnProviderConfig(
+    ids = TopOnIds("TopOn App ID", "TopOn App Key", rewardedPlacementId = "Rewarded Placement ID"),
+)
+
+val enabled = rewardedOnly.isFormatEnabled(AdFormat.REWARDED) // true
+```
+
+选择需要的 provider 传给 `AdsConfig`。未启用的格式不创建 SDK 广告对象、不预加载或补充加载，
+`Ads.isReady(format)` 返回 `false`；调用立即展示或等待展示都会直接得到
+`AdShowResult.Failed("ad_format_disabled")`。激励结果中的 `rewardEarned` 为 `false`。
+未启用开屏时，即使 `autoShowAppOpen = true` 也不会启动自动开屏机会。
+Banner 仍由每个 `BannerRequest` 和页面的 `active` 控制，TopOn Banner 仍不支持。
 
 TopOn：
 
@@ -296,8 +342,8 @@ val provider = BiddingProviderConfig(
 
 | 参数 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `admob` | `AdMobProviderConfig` | 必填 | AdMob App ID、三种 ad unit ID，以及三种格式各自的预加载缓存数量 |
-| `topon` | `TopOnProviderConfig` | 必填 | TopOn App ID、App Key，以及三种格式各自的 placement ID |
+| `admob` | `AdMobProviderConfig` | 必填 | AdMob App ID、按需填写的 ad unit ID，以及各格式缓存数量 |
+| `topon` | `TopOnProviderConfig` | 必填 | TopOn App ID、App Key，以及按需填写的 placement ID |
 
 竞价模式没有额外的价格系数、底价或手动超时参数。价格统一换算为 USD 单次展示收益，候选选择
 规则由 SDK 固定实现。UMP、事件回调、收益回调、日志、自动开屏开关和自动开屏 `position` 仍然
@@ -319,7 +365,7 @@ AdsConfig(
 )
 ```
 
-其中 `admob.preload` 只控制 AdMob GMA Next-Gen 的持续缓存数量。TopOn 的加载和缓存策略由
+其中 `admob.preload` 控制 AdMob GMA Next-Gen 的持续缓存数量，零值关闭对应全屏格式。TopOn 的加载和缓存策略由
 TopOn SDK 管理，目前没有在 `BiddingProviderConfig` 暴露缓存数量。手动插屏和激励展示不会等待
 新广告加载，只比较调用瞬间已经缓存的候选；自动开屏最多等待 7 秒，这个时长当前也不是公开
 配置项。
@@ -371,8 +417,10 @@ Ads.showAppOpen(
 }
 ```
 
-`AdShowResult.Dismissed` 表示广告产生展示并最终关闭；`AdShowResult.Failed.reason` 是适合日志和
-埋点的稳定失败原因。`AdRewardResult` 包含：
+`AdShowResult.Dismissed` 表示全屏广告产生展示并最终关闭。全屏与 Banner 失败共用
+`AdShowResult.Failed`，业务统一通过 `is AdShowResult.Failed` 处理 `reason`；Banner 的
+`onState` 仍接收 `BannerState`，其失败不代表此前没有曝光或收益。Banner 接入与迁移见
+[Banner 接入说明](docs/banner-integration.md)。
 
 手动展示只接受当前位于前台、处于 Resumed 状态且 Window 已附着并获得焦点的 Activity。
 不满足条件时不会消费预加载广告，而是通过 `AdShowResult.Failed` 和 `ad_show_fail` 收口；稳定
@@ -387,6 +435,8 @@ TopOn 开屏会优先使用调用方传入的 `hostContainer`，否则依次尝�
 `android.R.id.content` 和 Window DecorView。容器不存在、未附着、不可见、挂载失败或
 `show()` 抛异常时不会导致宿主崩溃，而是发送 `ad_show_fail`；开启 `loggingEnabled` 时同一失败
 会写入 Logcat，异常路径还会保留 throwable 堆栈。
+
+`AdRewardResult` 包含：
 
 | 属性 | 说明 |
 | --- | --- |
@@ -556,7 +606,8 @@ AdMob 保留官方回调的币种；只接受美元的宿主接口必须检查 `
 
 ## 7. 竞价逻辑和兼容范围
 
-端内缓存竞价模式会同时预加载 AdMob 和 TopOn 的同种广告。每次手动展示只比较调用当下已缓存的候选，
+端内缓存竞价只创建和预加载各平台已启用的格式，两家可以启用不同格式；等待展示不会等待已关闭格式的平台。
+每次手动展示只比较调用当下已缓存的候选，
 不会为了等待网络加载而阻塞业务：
 
 1. 只有一个平台有缓存时，直接选择该平台，即使价格为零。
