@@ -4,8 +4,12 @@ sealed interface AdShowResult {
     /** The full-screen ad was displayed and then dismissed by the user. */
     data object Dismissed : AdShowResult
 
-    /** No impression occurred. [reason] is stable enough for logs and telemetry. */
-    data class Failed(val reason: String) : AdShowResult
+    /**
+     * A full-screen show attempt or Banner request failed; [reason] describes it for diagnostics.
+     * Full-screen failures mean no impression occurred for that attempt. A Banner failure does not
+     * negate earlier impressions or revenue, and SDK refresh may recover the same Banner.
+     */
+    data class Failed(val reason: String) : AdShowResult, BannerState
 }
 
 data class AdRewardResult(

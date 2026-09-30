@@ -270,7 +270,7 @@ class BannerContractInstrumentation : Instrumentation() {
         }
         var failed = false
         main {
-            view.onState = { if (it == BannerState.Failed("banner_callback_configuration_failed")) failed = true }
+            view.onState = { if (it == AdShowResult.Failed("banner_callback_configuration_failed")) failed = true }
             ownLoadCallback(view).onAdLoaded(fake.ad)
         }
         await("configuration failure cleanup") { failed && fake.destroyCount == 1 }

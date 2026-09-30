@@ -192,11 +192,11 @@ class AdsBannerView(
 
     private fun evaluateOnce() {
         if (!businessActive) { updateState(BannerState.Inactive); return }
-        request.supportError()?.let { updateState(BannerState.Failed(it)); return }
+        request.supportError()?.let { updateState(AdShowResult.Failed(it)); return }
         val readiness = Ads.bannerReadiness(request.platform)
         if (readiness == BannerReadiness.NOT_CONFIGURED || readiness == BannerReadiness.FAILED) {
             adView?.visibility = INVISIBLE
-            updateState(BannerState.Failed("provider_${readiness.name.lowercase()}"))
+            updateState(AdShowResult.Failed("provider_${readiness.name.lowercase()}"))
             return
         }
         if (slot == null) {
@@ -214,7 +214,7 @@ class AdsBannerView(
         if (widthDp <= 0) { updateState(BannerState.Waiting); return }
         request.sizeError(widthDp)?.let {
             releaseAd()
-            updateState(BannerState.Failed(it))
+            updateState(AdShowResult.Failed(it))
             return
         }
         val size = requestedAdSize(widthDp)
@@ -293,7 +293,7 @@ class AdsBannerView(
                             // Keep the failed size so layout/visibility cannot act as a retry loop.
                             requestedSize = currentSize
                             failed = true
-                            updateState(BannerState.Failed("load_exception"))
+                            updateState(AdShowResult.Failed("load_exception"))
                         }
                     }
                 }
@@ -305,7 +305,7 @@ class AdsBannerView(
             releaseAd()
             requestedSize = currentSize
             failed = true
-            updateState(BannerState.Failed("banner_configuration_failed: ${error.message}"))
+            updateState(AdShowResult.Failed("banner_configuration_failed: ${error.message}"))
         }
     }
 
@@ -320,7 +320,7 @@ class AdsBannerView(
     private fun onFailed(generation: Long, reason: String) {
         if (!isCurrent(generation)) return
         failed = true
-        updateState(BannerState.Failed(reason))
+        updateState(AdShowResult.Failed(reason))
         // An empty failed AdView remains in the legal placeholder so SDK-configured refresh can
         // recover. Its later successful callback still installs revenue listeners before use.
         if (isCurrent(generation)) showIfEligible()
@@ -332,7 +332,7 @@ class AdsBannerView(
         releaseAd()
         requestedSize = size
         failed = true
-        updateState(BannerState.Failed("banner_callback_configuration_failed"))
+        updateState(AdShowResult.Failed("banner_callback_configuration_failed"))
     }
 
     private fun showIfEligible() {

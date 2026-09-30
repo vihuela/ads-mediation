@@ -50,13 +50,18 @@ class AdsBannerViewTest {
     }
 
     @Test
-    fun `unsupported TopOn reports a failure without creating any SDK children`() {
+    fun `unsupported TopOn reports the shared show failure without creating any SDK children`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val owner = PageOwner()
         val states = mutableListOf<BannerState>()
-        val view = AdsBannerView(activity, owner, request().copy(platform = AdPlatform.TOPON), onState = states::add)
+        val failures = mutableListOf<AdShowResult>()
+        val view = AdsBannerView(activity, owner, request().copy(platform = AdPlatform.TOPON)) { state ->
+            states += state
+            if (state is AdShowResult.Failed) failures += state
+        }
         activity.setContentView(view)
-        assertEquals(BannerState.Failed("topon_banner_not_supported"), states.last())
+        assertEquals(AdShowResult.Failed("topon_banner_not_supported"), states.last())
+        assertSame(states.last(), failures.single())
         assertEquals(0, view.childCount)
         view.destroy()
     }
