@@ -18,7 +18,7 @@ class BannerEventTest {
             listener = AdEventListener(events::add),
             platform = AdPlatform.TOPON,
             mediationMode = AdMediationMode.TOPON,
-            position = "home".withAdType(AdFormat.BANNER),
+            position = "BA_Home_bottom".normalizedAdPosition(),
             adUnitId = "banner-unit",
             slotId = "slot-1",
             number = 4L,
@@ -38,7 +38,7 @@ class BannerEventTest {
         assertEquals(listOf("slot-1", first.sessionId, second.sessionId, second.sessionId), events.map(AdEvent::sessionId))
         assertEquals(listOf("slot-1", "slot-1", "slot-1", "slot-1"), events.map(AdEvent::slotId))
         assertEquals(listOf(4L, 4L, 4L, 4L), events.map(AdEvent::number))
-        assertEquals("home_banner", events.last().position)
+        assertEquals("BA_Home_bottom", events.last().position)
         assertEquals("request-1", events[1].requestId)
         assertEquals(null, events.last().requestId)
     }

@@ -317,7 +317,7 @@ class NativeAuctionTest {
         google.listener!!.impression("cached-google", "original-response")
         google.listener!!.paid(NativeRevenue(0, "USD", "cached-google", "original-response", "exact"))
         assertFalse(first.events.any { it.name == AdEventName.IMPRESSION })
-        assertEquals("second_native", second.events.single { it.name == AdEventName.IMPRESSION }.position)
+        assertEquals("second", second.events.single { it.name == AdEventName.IMPRESSION }.position)
         assertEquals(1, second.revenues.size)
         second.controller.destroy()
         simultaneous.controller.destroy()

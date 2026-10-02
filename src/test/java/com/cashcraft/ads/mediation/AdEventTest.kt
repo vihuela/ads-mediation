@@ -1,10 +1,42 @@
 package com.cashcraft.ads.mediation
 
+import com.cashcraft.ads.mediation.internal.formatAdEventLogMessage
+import com.cashcraft.ads.mediation.internal.formatNativeDebugLogMessage
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class AdEventTest {
+    @Test
+    fun `loading omits position from analytics and every log format while display keeps it`() {
+        for (format in AdFormat.entries) {
+            for (name in AdEventName.entries) {
+                val event = AdEvent(name, AdPlatform.TOPON, format, "business-position",
+                    "load-session", "unit", 1L, requestId = "load-request")
+                val loading = name == AdEventName.LOAD_REQUEST || name == AdEventName.LOAD_RESULT
+                val parameters = event.analyticsParameters()
+                assertEquals(!loading, parameters.containsKey("position"))
+                assertFalse(parameters.containsKey("position_id"))
+                assertEquals("load-request", parameters["request_id"])
+                assertEquals(format.analyticsValue, parameters["ad_type"])
+                val log = when (format) {
+                    AdFormat.APP_OPEN -> event.appOpenLogLines().joinToString("\n")
+                    AdFormat.NATIVE -> formatNativeDebugLogMessage(event)
+                    else -> formatAdEventLogMessage(event)
+                }
+                assertEquals(!loading, log.contains("business-position"))
+                if (loading) {
+                    assertFalse(log.contains("position="))
+                    assertFalse(log.contains("pos="))
+                    assertTrue(log.contains("load-request"))
+                } else {
+                    assertEquals("business-position", parameters["position"])
+                }
+            }
+        }
+    }
+
     @Test
     fun `banner event exposes slot identity without changing legacy event shape`() {
         val banner = AdEvent(

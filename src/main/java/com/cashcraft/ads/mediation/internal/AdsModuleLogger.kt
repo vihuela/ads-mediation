@@ -5,6 +5,7 @@ import com.cashcraft.ads.mediation.AdConsentSnapshot
 import com.cashcraft.ads.mediation.AdEvent
 import com.cashcraft.ads.mediation.AdEventName
 import com.cashcraft.ads.mediation.AdFormat
+import com.cashcraft.ads.mediation.appOpenLogLines
 import java.math.BigDecimal
 import java.math.RoundingMode
 
@@ -15,6 +16,16 @@ internal class AdsModuleLogger(
 ) {
     fun event(event: AdEvent) {
         if (!enabled) return
+        if (event.format == AdFormat.APP_OPEN) {
+            event.appOpenLogLines().forEachIndexed { index, message ->
+                if (index > 0) Log.d(tag, message)
+                else if (event.name == AdEventName.SHOW_FAIL ||
+                    (event.name == AdEventName.LOAD_RESULT && event.result != "filled")) {
+                    Log.w(tag, message)
+                } else Log.i(tag, message)
+            }
+            return
+        }
         if (event.format == AdFormat.NATIVE) {
             formatNativeEventLogMessage(event)?.let { message ->
                 if (event.name == AdEventName.SHOW_FAIL) Log.w(tag, message) else Log.i(tag, message)
@@ -63,7 +74,7 @@ internal class AdsModuleLogger(
     fun eventDispatchFailed(event: AdEvent, error: Throwable) {
         if (!enabled) return
         if (event.format == AdFormat.NATIVE) {
-            native(event.slotId ?: event.position.removeSuffix("_native"), error = error) {
+            native(if (event.isLoadEvent) "加载" else event.slotId ?: event.position, error = error) {
                 "业务事件回调异常，平台交付继续"
             }
             return
@@ -123,7 +134,7 @@ internal fun formatAdEventLogMessage(event: AdEvent): String = buildString {
     append(" ad_platform=").append(event.platform.analyticsValue)
     append(" mediation_mode=").append(event.mediationMode.analyticsValue)
     append(" ad_type=").append(event.format.analyticsValue)
-    append(" position=").append(event.position.oneLine())
+    if (!event.isLoadEvent) append(" position=").append(event.position.oneLine())
     append(" session_id=").append(event.sessionId)
     append(" number=").append(event.number)
     event.slotId?.let { append(" slot_id=").append(it) }
@@ -194,8 +205,9 @@ internal fun formatNativeEventLogMessage(event: AdEvent): String? {
 }
 
 internal fun formatNativeDebugLogMessage(event: AdEvent): String = buildString {
-    append("[原生广告][调试][")
-        .append((event.slotId ?: event.position.removeSuffix("_native")).nativeLogText()).append("] ")
+    append("[原生广告][调试]")
+    if (!event.isLoadEvent) append("[").append((event.slotId ?: event.position).nativeLogText()).append("]")
+    append(" ")
     append(when (event.name) {
         AdEventName.LOAD_REQUEST -> "开始本层获取"
         AdEventName.LOAD_RESULT -> when (event.result) {

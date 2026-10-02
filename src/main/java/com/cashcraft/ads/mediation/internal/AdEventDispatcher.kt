@@ -56,14 +56,13 @@ internal class AdEventDispatcher(
         onCreated: (AdShowSession) -> Unit = {},
     ): AdShowSession {
         require(format != AdFormat.BANNER) { "Banner requires beginBannerSlot" }
-        val typedPosition = position.withAdType(format)
         val number = nextNumber(format, "position")
         return AdShowSession(
             listener = listener,
             platform = platform,
             mediationMode = mediationMode,
             format = format,
-            position = typedPosition,
+            position = position.normalizedAdPosition(),
             adUnitId = adUnitId,
             sessionId = UUID.randomUUID().toString(),
             number = number,
@@ -102,7 +101,7 @@ internal class AdEventDispatcher(
         listener = listener,
         platform = platform,
         mediationMode = mediationMode,
-        position = position.withAdType(AdFormat.BANNER),
+        position = position.normalizedAdPosition(),
         adUnitId = adUnitId,
         slotId = UUID.randomUUID().toString(),
         number = nextNumber(AdFormat.BANNER, "position"),
@@ -139,12 +138,8 @@ internal class AdEventDispatcher(
     }
 }
 
-/** Analytics positions always use the stable `<business_scene>_<ad_type>` convention. */
-internal fun String.withAdType(format: AdFormat): String {
-    val scene = trim().ifEmpty { "unknown" }
-    val suffix = "_${format.analyticsValue}"
-    return if (scene.endsWith(suffix, ignoreCase = true)) scene else scene + suffix
-}
+/** Keep the business ID intact; ad_type already identifies the format. */
+internal fun String.normalizedAdPosition(): String = trim().ifEmpty { "unknown" }
 
 internal fun interface AdLoadClock {
     fun nowMillis(): Long

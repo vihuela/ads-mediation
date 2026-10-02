@@ -44,6 +44,10 @@ object Ads {
     private val providerInitializationStarted = AtomicBoolean(false)
     private val bannerProviders = BannerProviderReadiness()
 
+    /** True from SDK handoff until the full-screen ad finishes; waiting alone is not showing. */
+    val isFullScreenAdShowing: Boolean
+        get() = FullScreenShowGate.isAnyAdShowing
+
     /** Configured mode, or null before initialization. An individual ad's platform is in its event. */
     @Volatile
     var mediationMode: AdMediationMode? = null

@@ -60,12 +60,15 @@ data class AdEvent(
     },
     val slotId: String? = null,
 ) {
-    /** Field names intentionally retain the existing analytics contract. */
+    internal val isLoadEvent: Boolean
+        get() = name == AdEventName.LOAD_REQUEST || name == AdEventName.LOAD_RESULT
+
+    /** Loading is correlated by request/session, not by a display position. */
     fun analyticsParameters(): Map<String, Any> = buildMap {
         put("ad_type", format.analyticsValue)
         put("ad_platform", platform.analyticsValue)
         put("mediation_mode", mediationMode.analyticsValue)
-        put("position", position)
+        if (!isLoadEvent) put("position", position)
         put("session_id", sessionId)
         put("ad_unit_id", adUnitId)
         put("number", number)

@@ -258,6 +258,17 @@ SDK 崩溃；展示回调会返回 `Failed("sdk_initialization_failed")`。如�
 | `autoShowAppOpen` | `Boolean` | `true` | 已启用开屏格式时，App 进入前台自动尝试展示 |
 | `appOpenPosition` | `String` | `app_foreground` | 自动开屏对应的业务场景名 |
 
+开屏日志沿用原生广告的两层结构，由现有 `loggingEnabled` 控制：
+
+- INFO/WARN：`[开屏广告][业务位置] 中文业务结果`，说明加载结果、双方报价及胜出平台、实际广告来源、曝光/关闭和失败原因，不混入完整会话或广告位 ID。
+- DEBUG：`[开屏广告][调试][业务位置] 阶段 | key=value`，保留 `event/platform/sid/pos`；请求标识、竞价候选与错误详情分行，每行均有完整 `sid`。
+- `platform` 是外层聚合渠道，`source` 是实际广告网络，例如 TopOn 渠道的 `source=AdMob`；未知来源不会推断为聚合渠道本身。
+- `ready` 表示候选可用，`priced` 表示取得报价；`usd/winUsd` 是美元/次展示，未知不等于 0。收益回调优先用 `valueMicros` 显示准确金额，不表示已经到账。
+- `unit/req/resp` 是广告位/请求/响应标识，`load=150ms` 是加载耗时，`buffer` 是加载事件携带的预加载容量。加载与展示的 `sid` 独立，SDK 的加载响应 ID 与展示 ID 也不保证相同。
+
+`adb logcat -v threadtime AdsMediation:I '*:S'` 可只看业务结果；改为 `AdsMediation:D` 查看完整明细。
+宿主可复用纯格式化函数 `AdEvent.appOpenLogLines()`：首行为业务说明，其余为调试明细，函数本身不打印。发布宿主应将 `loggingEnabled` 设为 `BuildConfig.DEBUG`。
+
 ### 2.2 Provider 参数
 
 AdMob 直连：
@@ -388,8 +399,9 @@ TopOn SDK 管理，目前没有在 `BiddingProviderConfig` 暴露缓存数量。
 
 需要等待广告就绪、并让展示资格绑定到页面或业务场景时，请使用[全屏展示机会接入说明](docs/fullscreen-display-opportunities.md)。其中包含开屏、插屏、激励的新 API、取消和超时结果、Activity/Navigation/Compose 生命周期接入，以及关闭旧自动开屏的迁移方式。
 
-`position` 是业务场景，例如关卡结束、刷新道具或手动开屏。SDK 会自动拼接广告类型后缀，
-形成 `<业务场景>_<广告类型>`；已存在相同后缀时不会重复添加。
+`position` 保留接入方传入的业务场景 ID（去除首尾空白，空值使用 `unknown`），不追加广告类型后缀。
+展示相关日志和事件上报使用同一个 ID，广告类型由独立的 `ad_type` 字段表示。
+加载事件（`ad_load_request` / `ad_load_result`）不输出或上报 `position`，以 `request_id` / `session_id` 关联加载过程。
 
 ```kotlin
 val ready = Ads.isReady(AdFormat.INTERSTITIAL)
@@ -520,7 +532,7 @@ ad_position = ad_impression + ad_show_fail
 | `platform` / `ad_platform` | 事件所属平台：`admob` 或 `topon` |
 | `mediationMode` / `mediation_mode` | 初始化模式：`admob`、`topon` 或 `bidding` |
 | `format` / `ad_type` | `app_open`、`interstitial` 或 `rewarded` |
-| `position` | 已追加广告类型的业务场景 |
+| `position` | 非加载事件的原始业务场景 ID；`ad_load_request` / `ad_load_result` 不携带此字段 |
 | `sessionId` / `session_id` | 串联同一次展示机会内的全部事件 |
 | `adUnitId` / `ad_unit_id` | AdMob ad unit ID 或 TopOn placement ID |
 | `number` | 当前进程内同类事件的递增序号 |

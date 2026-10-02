@@ -183,7 +183,7 @@ class NativeCardControllerTest {
         assertEquals(2, h.events.count { it.name == AdEventName.CLICK })
         assertEquals(0, h.events.count { it.name == AdEventName.DISMISS || it.name == AdEventName.SHOW_FAIL })
         assertTrue(h.events.all { it.mediationMode == AdMediationMode.ADMOB })
-        assertTrue(h.events.all { it.position == "home_native" })
+        assertTrue(h.events.all { it.position == "home" })
     }
 
     @Test fun `independent slots do not release or complete each other`() {

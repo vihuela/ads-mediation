@@ -64,7 +64,7 @@ class AdShowSessionTest {
             events.map(AdEvent::name),
         )
         assertEquals(events.first().sessionId, events.last().sessionId)
-        assertEquals("game_tool_refresh_rewarded", events.last().position)
+        assertEquals("game_tool_refresh", events.last().position)
     }
 
     @Test
@@ -131,7 +131,7 @@ class AdShowSessionTest {
             listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL),
             events.map(AdEvent::name),
         )
-        assertEquals("launcher_minus_one_app_open", events.last().position)
+        assertEquals("launcher_minus_one", events.last().position)
         assertEquals("app_open_container_unavailable", events.last().reason)
         assertEquals("container_not_found", events.last().errorCode)
     }
@@ -300,7 +300,7 @@ class AdShowSessionTest {
         platform = platform,
         mediationMode = mediationMode,
         format = format,
-        position = position.withAdType(format),
+        position = position.normalizedAdPosition(),
         adUnitId = "test-unit",
         sessionId = "session-1",
         number = 7L,

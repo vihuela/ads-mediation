@@ -13,7 +13,7 @@ import com.cashcraft.ads.mediation.TopOnRevenuePayload
 import com.cashcraft.ads.mediation.internal.BidDecision
 import com.cashcraft.ads.mediation.internal.AdLoadClock
 import com.cashcraft.ads.mediation.internal.AdLoadSession
-import com.cashcraft.ads.mediation.internal.withAdType
+import com.cashcraft.ads.mediation.internal.normalizedAdPosition
 import com.cashcraft.ads.mediation.revenueEventId
 import java.util.UUID
 
@@ -26,7 +26,7 @@ internal class NativeSlot(
     private val revenueListener: AdRevenueListener,
     val id: String = request.position,
 ) {
-    private val position = request.position.withAdType(AdFormat.NATIVE)
+    private val position = request.position.normalizedAdPosition()
     private val primary = request.candidates().first()
     private val platform = requireNotNull(primary.platform)
     private val mode = if (request.isBidding) AdMediationMode.BIDDING
