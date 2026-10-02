@@ -3,6 +3,7 @@ import java.util.Properties
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
     `maven-publish`
 }
 
@@ -62,8 +63,12 @@ configurations.configureEach {
 }
 
 dependencies {
-    // LifecycleOwner is part of the public View API; Compose remains an optional module.
+    // Lifecycle and Compose types are exposed by the public View and Composable APIs.
     api(libs.androidx.lifecycle.runtime)
+    api(libs.androidx.compose.ui)
+    api(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.compose.foundation)
+    implementation(libs.androidx.compose.ui.tooling.preview)
     androidTestCompileOnly(files(
         "${android.sdkDirectory}/platforms/android-${android.compileSdk}/optional/android.test.base.jar",
         "${android.sdkDirectory}/platforms/android-${android.compileSdk}/optional/android.test.runner.jar",

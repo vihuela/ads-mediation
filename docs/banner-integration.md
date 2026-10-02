@@ -6,10 +6,8 @@ TopOn 的尺寸、刷新身份反例保留在 [验证记录](../openspec/changes
 
 ## 依赖与初始化
 
-本地构建使用 `com.cashcraft:ads-mediation:1.0.0-SNAPSHOT`。Compose 可选坐标是
-`com.cashcraft:ads-mediation-compose:1.0.0-SNAPSHOT`；稳定版 `1.0.5` 不包含这些新入口。
-普通 View 宿主只依赖核心，核心没有 Compose／Navigation 依赖。两模块均为 minSdk 26、compileSdk 36、JVM 17。
-Compose 模块使用 Kotlin／Compose 编译插件 2.2.21、Compose UI 1.7.6、Lifecycle Compose 2.8.7。
+本地构建只需依赖 `com.cashcraft:ads-mediation:1.0.0-SNAPSHOT`；同一库包含 View 与 Compose 入口。
+稳定版 `1.0.5` 尚不包含这些新入口。库为 minSdk 26、compileSdk 36、JVM 17；Compose 使用 Kotlin／Compose 编译插件 2.2.21、Compose UI 1.7.6、Lifecycle Compose 2.8.7。
 
 沿用 `Ads.initialize()`，配置 AdMob 或含 AdMob 的 Bidding provider。Banner 检查 AdMob 自身初始化结果与请求前 UMP 许可；整体 Bidding 初始化成功不能放行失败的 AdMob。
 仅使用 Banner 时，只需提供 AdMob 应用 ID，三种全屏广告位 ID 都可省略：

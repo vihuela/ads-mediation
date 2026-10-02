@@ -506,13 +506,15 @@ TopOn 普通 Banner 文档同时列出 AT 与 TU 示例，说明了可见性、�
 | 临时隐藏与前后台期间的 SDK 请求 | 正式路径已验证 Dialog／真实落地网页返回／后台暂停恢复及多原因交错设备契约；平台请求计数以各场景记录为准 | 采用保留实例并隐藏自有 SDK View 的路径；按场景区分本层调用、平台新请求和旧在途结果 |
 | active／visible 与迟到回调契约 | 正式 View／Compose 已实现，事件层受控测试覆盖已知旧收益和未知身份诊断 | 页面归属与临时显示分开；UI 隔离不丢弃已确认身份的原展示收益 |
 | 运行期间隐私状态变化 | 用户明确不纳入本次范围 | 只保留现有初始化和本层请求前的 UMP 门禁，不增加变化监听或联动销毁 |
-| Compose 模块坐标与最低依赖版本 | 可选 `com.cashcraft:ads-mediation-compose:1.0.0-SNAPSHOT` 已实现并本地发布 | Kotlin／Compose 插件 2.2.21、Compose UI 1.7.6、Lifecycle 2.8.7；核心不引入 Compose／Navigation |
+| Compose 入口与最低依赖版本 | 2026-10-02 按用户决定并入 `ads-mediation` | Kotlin／Compose 插件 2.2.21、Compose UI 1.7.6、Lifecycle 2.8.7；主库包含两个 Compose 包装器，不依赖 Navigation |
 
 2026-09-29 用户已批准首版先交付 AdMob，TopOn 后续补齐。`add-banner-support` 已实现正式 `AdsBannerView`、可选 `AdsBanner` Compose 组件、逐展示事件／收益归因、页面独立及公共底部 Navigation 示例、传统 Fragment 示例。最终尺寸与零宽恢复修正版 100 项测试通过，完整 CI、Release R8 与两个模块本地发布成功；具体设备覆盖以 [OpenSpec 实施记录](../openspec/changes/archive/2026-09-29-add-banner-support/verification.md) 为准。正式 AdMob 已记录加载、曝光、零收益、连续刷新、测试点击与返回、Fragment 重建、首次断网恢复及刷新失败保留旧广告；修正不可见预挂载、原生布局及分数像素取整后，R8 横屏首次展示已连续两次通过。不把部分设备路径等同于第 13 节全部验收。
 
 TopOn 正式请求在 SDK 加载前返回 `topon_banner_not_supported`，不自动回退 AdMob。旧探针在用户配置和锁定 AdMob 测试来源下仍有尺寸偏差、showId 复用及刷新来源不明的反例；原双平台方案中的 TopOn 能力与各来源验收保留为后续门槛。稳定版 1.0.5 不包含本次接口，未执行远程发布；新增枚举和 AdEvent JVM 签名要求宿主及相关二进制模块重新编译，详见 [接入说明](banner-integration.md)。
 
 2026-09-29 用户批准将1.5／6.4剩余验证作为技术债务 [BANNER-REFRESH-01](../openspec/changes/archive/2026-09-29-add-banner-support/tasks.md#已批准延期的技术债务)，待正式广告位接入后补验；当前33项完成、2项批准延期，不阻塞本轮实施收尾，未宣称全部验收通过。
+
+2026-10-02 架构后续：将 `AdsBanner` 与 `AdsNative` 移入主库，删除独立 Compose library；调用方只需依赖 `com.cashcraft:ads-mediation`。这覆盖并替代前文“可选 Compose 模块”的交付选择；稳定版 1.0.5 未改，未执行远程发布。
 
 后续阅读顺序：先看第 1、5、6 节确定场景与生命周期，再看第 10、14 节确认事件和待验证边界，最后按第 12、13 节实施验收。
 

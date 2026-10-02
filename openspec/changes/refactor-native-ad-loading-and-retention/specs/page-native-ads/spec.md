@@ -209,7 +209,7 @@
 
 ### Requirement: Compose 分离组合容器与展示所有权
 
-系统 SHALL 通过可选 Compose 模块复用 View 核心，不强制核心依赖 Compose/Navigation。保留模式在同一 Activity 且有持续的页级最终销毁信号时，组合退出 SHALL 仅分离外层容器和旧 UI 回调，按 position 保留广告、平台子 View 及事件身份；返回创建新外层容器并接上当前回调。只有 Activity owner 且组件离开组合时 SHALL 默认结束卡片作用域并销毁；持续留在组合中的 Tab 可用 active/visible 暂停恢复。广告和 View SHALL 不进入 saveable 状态或跨配置保存。
+系统 SHALL 在 `ads-mediation` 库中提供 Compose 包装器并复用 View 核心，不要求单独添加 Compose 扩展模块，也不依赖 Navigation。保留模式在同一 Activity 且有持续的页级最终销毁信号时，组合退出 SHALL 仅分离外层容器和旧 UI 回调，按 position 保留广告、平台子 View 及事件身份；返回创建新外层容器并接上当前回调。只有 Activity owner 且组件离开组合时 SHALL 默认结束卡片作用域并销毁；持续留在组合中的 Tab 可用 active/visible 暂停恢复。广告和 View SHALL 不进入 saveable 状态或跨配置保存。
 
 #### Scenario: 导航组合退出但页面仍在返回栈
 

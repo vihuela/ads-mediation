@@ -204,7 +204,9 @@ class AdsConfigTest {
         assertThrows(IllegalArgumentException::class.java) { google.ids.copy(nativeId = " ") }
         assertThrows(IllegalArgumentException::class.java) { topOn.ids.copy(nativePlacementId = " ") }
         assertEquals(listOf("position", "topOnTemplateAspectRatio", "bidTimeoutMillis"),
-            NativeRequest::class.java.declaredFields.filterNot { it.isSynthetic }.map { it.name })
+            NativeRequest::class.java.declaredFields
+                .filterNot { it.isSynthetic || java.lang.reflect.Modifier.isStatic(it.modifiers) }
+                .map { it.name })
     }
 
     private fun testTopOnProvider() = TopOnProviderConfig(

@@ -243,3 +243,9 @@ Google默认布局大字真实素材/长文案/CTA披露完整；系统night=yes
 - [ ] 新接口真实设备加载验收（未执行）。
 
 追加需求不改变前述原任务状态。按用户本次明确要求取消旧 NativeRequest 源码兼容承诺，宿主须将 ID 移到初始化。
+
+## 2026-10-02 用户追加：合并 Compose 包装器
+
+- [x] 将 `AdsBanner`、`AdsNative` 移入 `ads-mediation` 主库，保留公开包名；移除单独 Compose 子工程、smoke app 双重依赖及 HealthTracker 旧坐标映射。
+- [x] 验证主库 204 项 JVM 测试、Release AAR、smoke app Release/R8 和 HealthTracker `:app:compileDebugKotlin`；AAR 类列表含两个 Compose 入口，发布 POM 声明 Compose 传递依赖。
+- 构建会令 Compose 成为主库传递依赖；未发布 SDK、未提升版本号、未做设备验收。

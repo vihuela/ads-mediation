@@ -1,6 +1,6 @@
 # 页面 Native 卡片接入
 
-此入口属于当前工作树，尚未发布到 README 的稳定版 1.0.5。继续使用现有 `Ads.initialize` 和 UMP 配置，Native 广告位 ID 在初始化配置中传入；当前仍要求既有全屏 ID，尚不支持只填 Native ID 初始化。核心不依赖 Compose/Navigation；Compose 入口在可选 `:ads-compose` 模块。
+此入口属于当前工作树，尚未发布到 README 的稳定版 1.0.5。继续使用现有 `Ads.initialize` 和 UMP 配置，Native 广告位 ID 在初始化配置中传入；当前仍要求既有全屏 ID，尚不支持只填 Native ID 初始化。Compose 与 View 入口都包含在 `ads-mediation` 中。
 
 ## 双平台比价：业务只持有一个卡片
 
@@ -162,7 +162,7 @@ TopOn 自渲染默认卡片在 SDK 返回有效大图宽高时，按媒体区实
 
 ## Compose
 
-添加独立模块依赖，见 [Compose 模块说明](../ads-compose/README.md)：
+依赖 `ads-mediation` 后即可使用 Compose 入口：
 
 ```kotlin
 val layout = remember { NativeLayout.Custom { context -> createCardBinding(context) } }

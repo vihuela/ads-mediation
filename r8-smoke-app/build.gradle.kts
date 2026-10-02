@@ -117,7 +117,6 @@ dependencies {
         "${android.sdkDirectory}/platforms/android-${android.compileSdk}/optional/android.test.runner.jar",
     ))
     implementation(project(":"))
-    implementation(project(":ads-mediation-compose"))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.navigation.compose)
