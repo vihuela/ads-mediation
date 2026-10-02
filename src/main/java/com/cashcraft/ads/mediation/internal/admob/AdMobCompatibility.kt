@@ -1,23 +1,32 @@
 @file:Suppress("DEPRECATION")
 
-package com.cashcraft.ads.mediation.admob
+package com.cashcraft.ads.mediation.internal.admob
 
+import com.cashcraft.ads.mediation.AdConsentSnapshot
+import com.cashcraft.ads.mediation.AdConsentStatus
+import com.cashcraft.ads.mediation.AdEvent
 import com.cashcraft.ads.mediation.AdEventListener
+import com.cashcraft.ads.mediation.AdEventName
+import com.cashcraft.ads.mediation.AdFormat
 import com.cashcraft.ads.mediation.AdMediationMode
+import com.cashcraft.ads.mediation.AdMobConsentConfig
 import com.cashcraft.ads.mediation.AdRevenueListener
+import com.cashcraft.ads.mediation.AdRewardResult
+import com.cashcraft.ads.mediation.AdShowResult
+import com.cashcraft.ads.mediation.BuildConfig
 
 /** Source-compatible provider API retained for existing hosts. New code should use `Ads`. */
 typealias AdMobIds = com.cashcraft.ads.mediation.AdMobIds
 typealias AdMobPreloadConfig = com.cashcraft.ads.mediation.AdMobPreloadConfig
-typealias AdMobConsentConfig = com.cashcraft.ads.mediation.AdMobConsentConfig
-typealias AdMobConsentStatus = com.cashcraft.ads.mediation.AdConsentStatus
-typealias AdMobConsentSnapshot = com.cashcraft.ads.mediation.AdConsentSnapshot
-typealias AdMobFormat = com.cashcraft.ads.mediation.AdFormat
-typealias AdMobEventName = com.cashcraft.ads.mediation.AdEventName
-typealias AdMobEvent = com.cashcraft.ads.mediation.AdEvent
-typealias AdMobEventListener = com.cashcraft.ads.mediation.AdEventListener
-typealias AdMobShowResult = com.cashcraft.ads.mediation.AdShowResult
-typealias AdMobRewardResult = com.cashcraft.ads.mediation.AdRewardResult
+typealias AdMobConsentConfig = AdMobConsentConfig
+typealias AdMobConsentStatus = AdConsentStatus
+typealias AdMobConsentSnapshot = AdConsentSnapshot
+typealias AdMobFormat = AdFormat
+typealias AdMobEventName = AdEventName
+typealias AdMobEvent = AdEvent
+typealias AdMobEventListener = AdEventListener
+typealias AdMobShowResult = AdShowResult
+typealias AdMobRewardResult = AdRewardResult
 
 /**
  * Legacy AdMob-only configuration retained only for existing integrations.
@@ -35,7 +44,7 @@ data class AdMobConfig(
     val ids: AdMobIds,
     val preload: AdMobPreloadConfig = AdMobPreloadConfig(),
     val eventListener: AdEventListener = AdEventListener.NONE,
-    val loggingEnabled: Boolean = com.cashcraft.ads.mediation.BuildConfig.DEBUG,
+    val loggingEnabled: Boolean = BuildConfig.DEBUG,
     val logTag: String = "AdsMediation",
     val autoShowAppOpen: Boolean = true,
     val appOpenPosition: String = "app_foreground",

@@ -157,7 +157,7 @@ class DisplayOpportunityControllerTest {
         assertEquals(1, revoked.ensures)
     }
 
-    @Test fun `first resume and window can wait but a paused host cannot revive`() {
+    @Test fun `first resume and window can wait but a cancelled host cannot revive`() {
         val h = harness()
         h.hostFailure = "activity_awaiting_first_resume"
         h.ready = true
@@ -182,6 +182,219 @@ class DisplayOpportunityControllerTest {
             assertEquals(reason, old.reason)
             assertEquals(0, old.shows)
         }
+    }
+
+    @Test fun `pause unschedules waiting without cleanup callback or aborting shared load`() {
+        val h = harness(timeout = 15_000)
+        var loading = false
+        var aborted = false
+        h.ensure = { loading = true }
+        h.controller.attempt.onAborted = { aborted = true }
+        h.controller.start()
+        val queuedTick = h.scheduled!!
+        h.now = 3_000
+        h.controller.pause()
+        assertNull(h.scheduled)
+        assertEquals(0, h.cleanups)
+        assertTrue(h.results.isEmpty())
+        assertTrue(loading)
+        assertFalse(aborted)
+        h.now = 103_000
+        h.ready = true
+        queuedTick.run()
+        assertEquals(0, h.shows)
+        assertNull(h.scheduled)
+        assertEquals(1, h.ensures)
+        assertEquals(0, h.cleanups)
+        assertTrue(h.results.isEmpty())
+        assertFalse(aborted)
+
+        val other = harness()
+        other.controller.start()
+        assertEquals("request_in_progress", other.reason)
+        assertEquals(0, other.ensures)
+    }
+
+    @Test fun `fifteen second budget retains twelve seconds after long background pause`() {
+        val h = harness(timeout = 15_000)
+        h.controller.start()
+        h.now = 3_000
+        h.controller.pause()
+        h.now = 103_000
+        h.controller.resume()
+        assertTrue(h.results.isEmpty())
+        assertNotNull(h.scheduled)
+        assertEquals(1, h.ensures)
+        h.now = 114_999
+        h.tick()
+        assertTrue(h.results.isEmpty())
+        assertEquals(1L, h.scheduledDelay)
+        h.now = 115_000
+        h.tick()
+        assertEquals("wait_timeout", h.reason)
+        assertEquals(1, h.cleanups)
+        assertEquals(1, h.results.size)
+    }
+
+    @Test fun `resume immediately shows background ready cache while another bidder is pending`() {
+        val h = harness(timeout = 15_000)
+        h.settled = false
+        h.controller.start()
+        h.now = 3_000
+        h.controller.pause()
+        h.now = 103_000
+        h.ready = true
+        assertEquals(0, h.sdkCalls)
+        h.controller.resume()
+        assertEquals(1, h.sdkCalls)
+        assertEquals(1, h.ensures)
+        assertNull(h.scheduled)
+        assertTrue(h.results.isEmpty())
+        h.finishSdk()
+    }
+
+    @Test fun `repeated pause and resume preserve cumulative foreground budget`() {
+        val h = harness(timeout = 15_000)
+        h.controller.start()
+        h.now = 3_000
+        h.controller.pause()
+        h.now = 4_000
+        h.controller.pause()
+        h.now = 103_000
+        h.controller.resume()
+        h.now = 104_000
+        h.controller.resume()
+        h.now = 107_000
+        h.controller.pause()
+        h.now = 108_000
+        h.controller.pause()
+        h.now = 207_000
+        h.controller.resume()
+        h.now = 208_000
+        h.controller.resume()
+        h.now = 214_999
+        h.tick()
+        assertTrue(h.results.isEmpty())
+        assertEquals(1L, h.scheduledDelay)
+        assertEquals(1, h.ensures)
+        h.now = 215_000
+        h.tick()
+        assertEquals("wait_timeout", h.reason)
+        assertEquals(1, h.results.size)
+    }
+
+    @Test fun `resume without pause cannot bypass pending bidder or reset deadline`() {
+        val h = harness()
+        h.ready = true
+        h.settled = false
+        h.controller.resume()
+        assertEquals(0, h.ensures)
+        assertEquals(0, h.sdkCalls)
+        h.controller.start()
+        h.now = 400
+        h.controller.resume()
+        assertEquals(0, h.sdkCalls)
+        h.now = 500
+        h.tick()
+        assertEquals(1, h.sdkCalls)
+        assertEquals(1, h.ensures)
+        h.finishSdk()
+    }
+
+    @Test fun `cancel including host destruction while paused cleans up and cannot resume`() {
+        for (reason in listOf("opportunity_cancelled", "activity_not_available")) {
+            val h = harness(timeout = 15_000)
+            var aborts = 0
+            h.controller.attempt.onAborted = { aborts++ }
+            h.controller.start()
+            h.now = 3_000
+            h.controller.pause()
+            h.controller.cancel(reason)
+            assertEquals(reason, h.reason)
+            assertEquals(1, h.cleanups)
+            assertEquals(1, aborts)
+            h.now = 103_000
+            h.ready = true
+            h.controller.resume()
+            h.controller.pause()
+            h.controller.resume()
+            h.controller.start()
+            h.controller.cancel()
+            h.tick()
+            assertEquals(0, h.sdkCalls)
+            assertEquals(1, h.ensures)
+            assertEquals(1, h.results.size)
+            assertEquals(1, h.cleanups)
+            assertEquals(1, aborts)
+            assertNull(h.scheduled)
+        }
+        val next = harness()
+        next.controller.start()
+        assertEquals(1, next.ensures)
+    }
+
+    @Test fun `pause before start still validates and reserves but waits for resume to check`() {
+        for (timeout in listOf(0L, -1L)) {
+            val invalid = harness(timeout)
+            invalid.controller.pause()
+            invalid.controller.start()
+            assertEquals("invalid_timeout", invalid.reason)
+            assertEquals(0, invalid.ensures)
+            invalid.controller.resume()
+            assertEquals(1, invalid.results.size)
+        }
+        val h = harness(timeout = 15_000)
+        var snapshots = 0
+        h.readReady = { snapshots++; h.ready }
+        h.controller.pause()
+        h.now = 100_000
+        h.controller.start()
+        assertEquals(0, snapshots)
+        assertEquals(0, h.ensures)
+        assertEquals(0, h.cleanups)
+        assertNull(h.scheduled)
+        assertTrue(h.results.isEmpty())
+        val other = harness()
+        other.controller.start()
+        assertEquals("request_in_progress", other.reason)
+        assertEquals(0, other.ensures)
+        h.now = 200_000
+        h.controller.resume()
+        assertTrue(snapshots > 0)
+        assertEquals(1, h.ensures)
+        assertNotNull(h.scheduled)
+        h.now = 214_999
+        h.tick()
+        assertTrue(h.results.isEmpty())
+        assertEquals(1L, h.scheduledDelay)
+        h.now = 215_000
+        h.tick()
+        assertEquals("wait_timeout", h.reason)
+    }
+
+    @Test fun `expired background cache keeps waiting with remaining foreground budget`() {
+        val h = harness(timeout = 15_000)
+        h.ready = true
+        h.settled = false
+        h.controller.start()
+        assertEquals(0, h.sdkCalls)
+        h.now = 3_000
+        h.controller.pause()
+        h.now = 103_000
+        h.ready = false // The retained cache expired while the host was in the background.
+        h.controller.resume()
+        assertEquals(0, h.sdkCalls)
+        assertTrue(h.results.isEmpty())
+        assertNotNull(h.scheduled)
+        assertEquals(1, h.ensures)
+        h.now = 114_999
+        h.tick()
+        assertTrue(h.results.isEmpty())
+        assertEquals(1L, h.scheduledDelay)
+        h.now = 115_000
+        h.tick()
+        assertEquals("wait_timeout", h.reason)
+        assertEquals(0, h.sdkCalls)
     }
 
     @Test fun `A timeout leaves shared load alive and B joins without starting L2`() {
@@ -324,11 +537,19 @@ class DisplayOpportunityControllerTest {
         assertNull(h.scheduled)
         assertEquals(1, h.cleanups)
         h.now = 10000
+        h.controller.pause()
+        h.controller.resume()
+        h.controller.pause()
+        h.controller.resume()
         h.controller.cancel("activity_not_resumed")
         h.controller.cancel()
         h.tick()
         assertTrue(h.results.isEmpty())
         assertTrue(FullScreenShowGate.isAnyAdShowing)
+        assertEquals(1, h.sdkCalls)
+        assertEquals(1, h.ensures)
+        assertEquals(1, h.cleanups)
+        assertNull(h.scheduled)
         h.finishSdk(reward = true)
         h.finishSdk()
         assertEquals(listOf(AdRewardResult(true, AdShowResult.Dismissed, "show-session")), h.results)

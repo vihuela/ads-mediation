@@ -212,7 +212,22 @@ val fixedPlatform: AdPlatform? = Ads.platform
 
 初始化会固定本进程的配置。使用同一个 Application 和相等的 `AdsConfig` 重复调用，只订阅原来的
 初始化结果，不会重启或重新配置 SDK。建议复用首次创建的配置对象；事件、收益监听器也是配置的一部分，
-新建的监听器实例视为配置变化。`onInitialized` 不属于固定配置，每次调用可以传入新的结果回调。
+新建的监听器实例视为配置变化。`onInitialized` 不属于固定配置；广告库只保留一个等待中的初始化回调，
+传入新回调会替换旧回调，省略回调不会清除已有等待者。通知前先清空引用，回调在主线程执行。
+
+启动页无需轮询状态，可在主线程登记一次性回调：
+
+```kotlin
+val stopObserving = Ads.observeInitialization { success ->
+    // 已完成时立即通知；success 表示至少一个平台可用，不代表广告已加载。
+}
+// 启动页等待超时或销毁时调用；仅解除本次监听，不取消 SDK 初始化。
+stopObserving()
+```
+
+返回的取消函数不会清除后来登记的新回调。协程等待可用 `suspendCancellableCoroutine` 桥接，
+通过 `invokeOnCancellation { stopObserving() }` 在超时或生命周期取消时解绑。
+
 更换接入模式、广告 ID、许可设置、监听器或其他配置，以及更换 Application，都会同步抛出
 `IllegalArgumentException`，不会返回成功或应用部分新配置。SDK 自身的初始化失败仍通过回调报告。
 
@@ -406,14 +421,6 @@ Ads.showAppOpen(
     // Dismissed 或 Failed 都表示本次调用已经结束。
 }
 
-// Launcher、Compose 宿主等非标准 Activity 可显式提供已附着且可见的全屏宿主容器。
-Ads.showAppOpen(
-    activity = this,
-    hostContainer = splashHost,
-    position = "launcher_minus_one",
-) { result ->
-    // SDK 会创建并清理自己的广告子容器，不会移除宿主传入的 splashHost。
-}
 ```
 
 `AdShowResult.Dismissed` 表示全屏广告产生展示并最终关闭。全屏与 Banner 失败共用
@@ -430,7 +437,7 @@ AdMob、TopOn 与竞价模式共用同一套宿主生命周期状态和自动开
 最多等待 7 秒，Activity 可交互且广告可用时展示；进入后台或等待超时则以 `ad_show_fail`
 结束本次机会。各平台的初始化、加载、缓存补充、收益和 SDK 回调仍分别由各自实现负责。
 
-TopOn 开屏会优先使用调用方传入的 `hostContainer`，否则依次尝试 Activity 的
+TopOn 开屏由库内部依次尝试 Activity 的
 `android.R.id.content` 和 Window DecorView。容器不存在、未附着、不可见、挂载失败或
 `show()` 抛异常时不会导致宿主崩溃，而是发送 `ad_show_fail`；开启 `loggingEnabled` 时同一失败
 会写入 Logcat，异常路径还会保留 throwable 堆栈。

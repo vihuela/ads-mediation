@@ -26,6 +26,9 @@ internal class DisplayOpportunityController(
     private var started = false
     private var loadEnsured = false
     private var attempting = false
+    private var pausedAtMillis: Long? = null
+    private var pausedMillis = 0L
+    private var preferAvailableOnResume = false
     private var sessionId: String? = null
     val attempt = FullScreenShowAttempt(isWaitingOpportunity = true)
     private val check = Runnable { check() }
@@ -54,6 +57,25 @@ internal class DisplayOpportunityController(
 
     fun cancel(reason: String = "opportunity_cancelled") = fail(reason)
 
+    /** Pause the opportunity, not the shared SDK load or cache. Main thread only. */
+    fun pause() {
+        if (state != State.WAITING || pausedAtMillis != null) return
+        pausedAtMillis = nowMillis()
+        unschedule(check)
+    }
+
+    fun resume() {
+        if (state != State.WAITING) return
+        val pausedAt = pausedAtMillis ?: return
+        pausedMillis += nowMillis() - pausedAt
+        pausedAtMillis = null
+        preferAvailableOnResume = true
+        if (started) check()
+    }
+
+    private fun elapsedMillis(): Long =
+        (pausedAtMillis ?: nowMillis()) - startedAtMillis - pausedMillis
+
     private fun environmentFailure(): String? {
         precondition?.invoke()?.takeUnless { it == "sdk_initializing" }?.let { return it }
         val valid = try { sceneValid?.invoke() == true } catch (_: Exception) {
@@ -66,32 +88,35 @@ internal class DisplayOpportunityController(
 
     private fun finalFailure(): String? {
         if (state != State.WAITING) return "opportunity_cancelled"
+        if (pausedAtMillis != null) return "activity_not_resumed"
         return environmentFailure()
     }
 
     private fun check() {
-        if (state != State.WAITING) return
+        if (state != State.WAITING || pausedAtMillis != null) return
         val reason = environmentFailure()
-        if (state != State.WAITING) return
+        if (state != State.WAITING || pausedAtMillis != null) return
         if (reason != null && reason !in TRANSIENT_REASONS) return fail(reason)
-        if (!loadEnsured && nowMillis() - startedAtMillis < timeoutMillis && precondition?.invoke() == null) {
+        if (!loadEnsured && elapsedMillis() < timeoutMillis && precondition?.invoke() == null) {
             loadEnsured = true
             ensureLoaded?.invoke()
         }
-        if (state != State.WAITING) return
-        val expired = nowMillis() - startedAtMillis >= timeoutMillis
+        if (state != State.WAITING || pausedAtMillis != null) return
+        val expired = elapsedMillis() >= timeoutMillis
         val (ready, settled) = loadSnapshot?.invoke() ?: return
-        if (!attempting && reason == null && ready && (settled || expired)) {
+        val useAvailable = preferAvailableOnResume
+        if (reason == null) preferAvailableOnResume = false
+        if (!attempting && reason == null && ready && (settled || expired || useAvailable)) {
             if (state != State.WAITING) return
             // The deadline limits waiting for bidders, not preparation of the selected ad.
             // Provider guards still recheck cancellation, scene, host, consent and ad validity.
             attempting = true
             show?.invoke(attempt) { finish(it) }
         }
-        if (state != State.WAITING) return
+        if (state != State.WAITING || pausedAtMillis != null) return
         if (expired) return fail("wait_timeout")
         if (settled && !ready) return fail("ad_load_failed")
-        val remaining = timeoutMillis - (nowMillis() - startedAtMillis)
+        val remaining = timeoutMillis - elapsedMillis()
         if (remaining <= 0) return fail("wait_timeout")
         schedule(check, minOf(100L, remaining))
     }

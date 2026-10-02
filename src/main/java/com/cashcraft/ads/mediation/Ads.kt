@@ -5,9 +5,8 @@ import android.app.Application
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.view.ViewGroup
 import com.cashcraft.ads.mediation.admob.AdMobAds
-import com.cashcraft.ads.mediation.admob.AdMobConfig
+import com.cashcraft.ads.mediation.internal.admob.AdMobConfig
 import com.cashcraft.ads.mediation.admob.AdMobState
 import com.cashcraft.ads.mediation.internal.AdBiddingCoordinator
 import com.cashcraft.ads.mediation.internal.AdBidEventData
@@ -40,7 +39,7 @@ enum class AdsState {
 /** SDK-neutral facade for app-open, interstitial, and rewarded ads. */
 object Ads {
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
+    private var initializationCallback: ((Boolean) -> Unit)? = null
     private val nativeReadinessListeners = CopyOnWriteArrayList<() -> Unit>()
     private val providerInitializationStarted = AtomicBoolean(false)
     private val bannerProviders = BannerProviderReadiness()
@@ -100,12 +99,13 @@ object Ads {
      * Fixes the configuration for this process. Repeated calls with the same Application and an
      * equal AdsConfig only observe the original initialization result; they do not reconfigure it.
      * Reuse the config's listener instances as well as its values.
+     * A supplied callback replaces the single pending initialization observer; omitting it does not.
      * @throws IllegalArgumentException if a subsequent call changes the Application or AdsConfig.
      */
     fun initialize(
         application: Application,
         config: AdsConfig,
-        onInitialized: (Boolean) -> Unit = {},
+        onInitialized: ((Boolean) -> Unit)? = null,
     ) {
         var isFirstInitialization = false
         synchronized(this) {
@@ -116,13 +116,7 @@ object Ads {
                 require(this.config == config) {
                     "Ads is already initialized with a different AdsConfig; reuse the original configuration"
                 }
-                when (state) {
-                    AdsState.READY -> mainHandler.post { onInitialized(true) }
-                    AdsState.FAILED -> mainHandler.post { onInitialized(false) }
-                    AdsState.NOT_INITIALIZED,
-                    AdsState.INITIALIZING,
-                    -> initializationListeners += onInitialized
-                }
+                onInitialized?.let { callback -> onMain { observeInitialization(callback) } }
                 return
             }
             this.application = application
@@ -158,8 +152,8 @@ object Ads {
                 fail = { _, reason -> failAutoBiddingAppOpenOpportunity(reason) },
                 noAdFailureReason = NO_BID_CANDIDATE,
             )
-            initializationListeners += onInitialized
             initializationStage = InitializationStage.WAITING_FOR_UMP
+            onInitialized?.let { callback -> onMain { observeInitialization(callback) } }
             isFirstInitialization = true
         }
 
@@ -174,6 +168,36 @@ object Ads {
                 startProviderInitialization()
             }
         }
+    }
+
+    /**
+     * Observes platform initialization once, on the main thread; true means at least one platform
+     * is usable, not that an ad is loaded. Replaces any previous pending observer.
+     * A terminal result is delivered immediately. Call the returned function on timeout or page
+     * destruction to release this observer without cancelling SDK initialization. An old observer's
+     * cancellation cannot clear a newer observer. Cancellation may be called from any thread.
+     */
+    fun observeInitialization(onInitialized: (Boolean) -> Unit): () -> Unit {
+        check(Looper.myLooper() == Looper.getMainLooper()) { "Initialization observation requires the main thread" }
+        // Each registration has its own identity even when the caller reuses a callback instance.
+        val callback: (Boolean) -> Unit = { onInitialized(it) }
+        initializationCallback = callback
+        when (state) {
+            AdsState.READY -> notifyInitialization(true)
+            AdsState.FAILED -> notifyInitialization(false)
+            AdsState.NOT_INITIALIZED, AdsState.INITIALIZING -> Unit
+        }
+        return {
+            onMain {
+                if (initializationCallback === callback) initializationCallback = null
+            }
+        }
+    }
+
+    private fun notifyInitialization(success: Boolean) {
+        val callback = initializationCallback
+        initializationCallback = null
+        callback?.let { runCatching { it(success) } }
     }
 
     private fun gatherConsentIfNeeded(activity: Activity) {
@@ -275,8 +299,7 @@ object Ads {
         initializationStage = if (success) InitializationStage.COMPLETE else InitializationStage.FAILED
         if (!success) bannerProviders.failedPending()
         notifyNativeReadiness()
-        initializationListeners.forEach { listener -> runCatching { listener(success) } }
-        initializationListeners.clear()
+        notifyInitialization(success)
         if (success && config.provider is BiddingProviderConfig) {
             autoBiddingAppOpenController.onProviderInitialized()
         }
@@ -290,8 +313,16 @@ object Ads {
             is BiddingProviderConfig -> AdMobAds.isReady(format) || TopOnAds.isReady(format)
         }
 
-    /** Starts the AdMob Banner preloader for this measured placement. */
-    fun preloadBanner(activity: Activity, request: BannerRequest, contentWidthDp: Int) = onMain {
+    /**
+     * Preloads the AdMob Banner for this measured placement.
+     * With autoRefill=false, loads at most one ad once; polling never replenishes it.
+     */
+    fun preloadBanner(
+        activity: Activity,
+        request: BannerRequest,
+        contentWidthDp: Int,
+        autoRefill: Boolean = true,
+    ) = onMain {
         if (!::config.isInitialized || request.platform != AdPlatform.ADMOB || contentWidthDp <= 0) {
             return@onMain
         }
@@ -305,6 +336,7 @@ object Ads {
             request = request,
             size = request.resolveAdSize(activity, contentWidthDp),
             bufferSize = provider.preload.banner,
+            autoRefill = autoRefill,
         )
     }
 
@@ -341,23 +373,10 @@ object Ads {
         activity: Activity,
         position: String = "manual",
         onResult: (AdShowResult) -> Unit = {},
-    ) = showAppOpenInternal(activity, null, position, onResult)
-
-    /**
-     * 指定开屏广告的挂载位置；不需要指定时使用不带 hostContainer 的重载。
-     * @param hostContainer TopOn TUSplashAd 的广告挂载父容器，须位于当前 Activity 窗口内且可见。
-     * 这不是业务 loading 容器；AdMob 不使用此参数，插屏和激励接口也不需要此参数。
-     */
-    fun showAppOpen(
-        activity: Activity,
-        hostContainer: ViewGroup,
-        position: String = "manual",
-        onResult: (AdShowResult) -> Unit = {},
-    ) = showAppOpenInternal(activity, hostContainer, position, onResult)
+    ) = showAppOpenInternal(activity, position, onResult)
 
     private fun showAppOpenInternal(
         activity: Activity,
-        hostContainer: ViewGroup?,
         position: String,
         onResult: (AdShowResult) -> Unit,
     ) = onMain {
@@ -372,14 +391,12 @@ object Ads {
                 activity = activity,
                 position = position,
                 onResult = onResult,
-                hostContainer = hostContainer,
             )
             is BiddingProviderConfig -> bidAndShow(
                 format = AdFormat.APP_OPEN,
                 activity = activity,
                 position = position,
                 onResult = { onResult(it.showResult) },
-                appOpenHostContainer = hostContainer,
             )
         }
     }
@@ -425,6 +442,8 @@ object Ads {
 
     /**
      * 等待平台结果，截止时使用可用缓存兜底；取消机会不停止底层加载。
+     * 开屏等待在宿主暂停时冻结计时，加载继续；恢复后优先展示有效缓存，否则继续剩余等待。
+     * 销毁宿主、切换到其他 Activity 或主动 cancel() 仍会结束机会。
      * 无需业务提供容器：TopOn 默认挂载到 Activity 的 android.R.id.content，回退到 decorView。
      */
     fun showAppOpenWhenReady(
@@ -435,23 +454,6 @@ object Ads {
         onResult: (AdShowResult) -> Unit = {},
     ): AdDisplayOpportunity = createOpportunity(
         AdFormat.APP_OPEN, activity, position, timeoutMillis, isSceneValid,
-        onResult = { onResult(it.showResult) },
-    )
-
-    /**
-     * 等待规则与无容器重载相同，仅覆盖 TopOn 开屏广告的挂载位置。
-     * @param hostContainer 当前 Activity 窗口内可见的广告父容器，不是业务 loading 容器。
-     * AdMob 不使用此参数；不需要指定挂载位置时使用不带此参数的重载。
-     */
-    fun showAppOpenWhenReady(
-        activity: Activity,
-        hostContainer: ViewGroup,
-        position: String = "manual",
-        timeoutMillis: Long = 12_000L,
-        isSceneValid: () -> Boolean = { true },
-        onResult: (AdShowResult) -> Unit = {},
-    ): AdDisplayOpportunity = createOpportunity(
-        AdFormat.APP_OPEN, activity, position, timeoutMillis, isSceneValid, hostContainer,
         onResult = { onResult(it.showResult) },
     )
 
@@ -482,7 +484,6 @@ object Ads {
         position: String,
         timeoutMillis: Long,
         isSceneValid: () -> Boolean,
-        hostContainer: ViewGroup? = null,
         onResult: (AdRewardResult) -> Unit,
     ): AdDisplayOpportunity {
         require(format != AdFormat.BANNER) { "Banner does not use full-screen display opportunities" }
@@ -499,16 +500,21 @@ object Ads {
         val boundActivity = activity
         val listener = object : AdLifecycleMonitor.Listener {
             override fun onActivityPaused(activity: Activity) {
-                if (activity === boundActivity) controller.cancel("activity_not_resumed")
+                if (activity === boundActivity) {
+                    if (format == AdFormat.APP_OPEN) controller.pause()
+                    else controller.cancel("activity_not_resumed")
+                }
             }
             override fun onActivityDestroyed(activity: Activity) {
                 if (activity === boundActivity) controller.cancel("activity_not_available")
             }
             override fun onActivityResumed(activity: Activity) {
                 if (activity !== boundActivity) controller.cancel("activity_not_resumed")
+                else if (format == AdFormat.APP_OPEN) controller.resume()
             }
             override fun onAppEnteredBackground() {
-                controller.cancel("app_not_in_foreground")
+                if (format == AdFormat.APP_OPEN) controller.pause()
+                else controller.cancel("app_not_in_foreground")
             }
         }
         controller = DisplayOpportunityController(
@@ -555,7 +561,7 @@ object Ads {
                     controller.cancel(NO_BID_CANDIDATE)
                 } else {
                     showSelected(
-                        winner, format, activity, position, hostContainer, attempt,
+                        winner, format, activity, position, attempt,
                         onSessionCreated = controller::sessionStarted,
                         onSessionStarted = { session ->
                             decision?.let { session.bidResult(it.toEventData(format)) }
@@ -574,6 +580,9 @@ object Ads {
             admobFailureVersion = AdMobAds.loadFailureVersion(format)
             topOnFailureVersion = TopOnAds.loadFailureVersion(format)
             AdLifecycleMonitor.addListener(listener)
+            if (format == AdFormat.APP_OPEN && AdLifecycleMonitor.activityWaitFailureReason(activity) in
+                setOf("activity_not_resumed", "app_not_in_foreground")
+            ) controller.pause()
             controller.start()
         }
         return handle
@@ -594,7 +603,6 @@ object Ads {
         format: AdFormat,
         activity: Activity,
         position: String,
-        hostContainer: ViewGroup?,
         attempt: FullScreenShowAttempt,
         onSessionCreated: (AdShowSession) -> Unit = {},
         onSessionStarted: (AdShowSession) -> Unit,
@@ -624,7 +632,7 @@ object Ads {
                 AdFormat.BANNER -> error("Banner does not use full-screen display")
                 AdFormat.NATIVE -> onResult(AdRewardResult(false, AdShowResult.Failed("unsupported_ad_format")))
                 AdFormat.APP_OPEN -> TopOnAds.showBiddingAppOpen(
-                    activity, position, onSessionStarted, callback, hostContainer, attempt, created,
+                    activity, position, onSessionStarted, callback, attempt, created,
                 )
                 AdFormat.INTERSTITIAL -> TopOnAds.showBiddingInterstitial(
                     activity, position, onSessionStarted, callback, attempt, created,
@@ -652,7 +660,6 @@ object Ads {
         activity: Activity,
         position: String,
         onResult: (AdRewardResult) -> Unit,
-        appOpenHostContainer: ViewGroup? = null,
     ) {
         require(format != AdFormat.BANNER) { "Banner does not use full-screen bidding" }
         val attempt = FullScreenShowAttempt().apply { guard = { commonShowFailure(format) } }
@@ -672,7 +679,7 @@ object Ads {
             return
         }
         showSelected(
-            selection.winner, format, activity, position, appOpenHostContainer, attempt,
+            selection.winner, format, activity, position, attempt,
             onSessionStarted = { it.bidResult(decision.toEventData(format)) },
             onResult = onResult,
         )

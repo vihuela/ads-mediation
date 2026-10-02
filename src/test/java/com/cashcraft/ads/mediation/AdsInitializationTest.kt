@@ -2,11 +2,15 @@ package com.cashcraft.ads.mediation
 
 import android.app.Activity
 import android.app.Application
+import android.os.Looper
+import com.cashcraft.ads.mediation.admob.AdMobAds
+import com.cashcraft.ads.mediation.admob.AdMobState
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -14,6 +18,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.util.ReflectionHelpers
 
@@ -21,6 +26,7 @@ import org.robolectric.util.ReflectionHelpers
 @Config(sdk = [33], manifest = Config.NONE)
 class AdsInitializationTest {
     private val initialStage = ReflectionHelpers.getStaticField<Any>(Ads::class.java, "initializationStage")
+    private val initialAdMobState = AdMobAds.state
 
     @Before
     @After
@@ -40,7 +46,8 @@ class AdsInitializationTest {
         )
         installedApplication?.unregisterActivityLifecycleCallbacks(callbacks)
         ReflectionHelpers.setStaticField(AdLifecycleMonitor::class.java, "installedApplication", null)
-        ReflectionHelpers.getStaticField<MutableList<*>>(Ads::class.java, "initializationListeners").clear()
+        ReflectionHelpers.setStaticField(Ads::class.java, "initializationCallback", null)
+        ReflectionHelpers.setStaticField(AdMobAds::class.java, "state", initialAdMobState)
         val bannerProviders = ReflectionHelpers.getStaticField<Any>(Ads::class.java, "bannerProviders")
         ReflectionHelpers.getField<MutableMap<*, *>>(bannerProviders, "states").clear()
         listOf("application", "config", "mediationMode", "facadeEvents", "umpConsentManager", "autoBiddingAppOpenController")
@@ -148,6 +155,168 @@ class AdsInitializationTest {
             AdShowResult.Failed("ad_format_disabled"),
             AdShowResult.Failed("consent_not_obtained"),
         ), results)
+    }
+
+    @Test
+    fun `successful initialization notifies once`() = assertInitializationNotifiesOnce(true)
+
+    @Test
+    fun `failed initialization notifies once`() = assertInitializationNotifiesOnce(false)
+
+    @Test
+    fun `completion clears callback before invoking it`() {
+        initializePending()
+        val results = mutableListOf<Boolean>()
+        Ads.observeInitialization {
+            results += it
+            if (results.size == 1) finishInitialization(false)
+        }
+
+        finishInitialization(true)
+
+        assertEquals(listOf(true), results)
+    }
+
+    @Test
+    fun `cancellation from another thread prevents notification`() {
+        initializePending()
+        val results = mutableListOf<Boolean>()
+        val cancel = Ads.observeInitialization(results::add)
+        var error: Throwable? = null
+        Thread { error = runCatching { cancel(); cancel() }.exceptionOrNull() }
+            .apply { start(); join() }
+        shadowOf(Looper.getMainLooper()).idle()
+
+        finishInitialization(false)
+
+        assertNull(error)
+        assertTrue(results.isEmpty())
+    }
+
+    @Test
+    fun `replacement survives cancellation of the old listener`() {
+        initializePending()
+        val oldResults = mutableListOf<Boolean>()
+        val newResults = mutableListOf<Boolean>()
+        val cancelOld = Ads.observeInitialization(oldResults::add)
+        Ads.observeInitialization(newResults::add)
+
+        cancelOld()
+        finishInitialization(false)
+
+        assertTrue(oldResults.isEmpty())
+        assertEquals(listOf(false), newResults)
+    }
+
+    @Test
+    fun `terminal states notify synchronously on main and retain no callback`() {
+        initializePending()
+        ReflectionHelpers.setStaticField(AdMobAds::class.java, "state", AdMobState.READY)
+        for (success in listOf(true, false)) {
+            finishInitialization(success)
+            assertEquals(if (success) AdsState.READY else AdsState.FAILED, Ads.state)
+            val results = mutableListOf<Boolean>()
+            var callbackLooper: Looper? = null
+
+            val cancel = Ads.observeInitialization {
+                results += it
+                callbackLooper = Looper.myLooper()
+            }
+
+            assertEquals(listOf(success), results)
+            assertEquals(Looper.getMainLooper(), callbackLooper)
+            cancel()
+            finishInitialization(success)
+            assertEquals(listOf(success), results)
+        }
+    }
+
+    @Test
+    fun `throwing callback is not retained after completion`() {
+        initializePending()
+        var calls = 0
+        Ads.observeInitialization {
+            calls++
+            throw IllegalStateException("callback failure")
+        }
+
+        finishInitialization(false)
+        finishInitialization(false)
+
+        assertEquals(1, calls)
+        val results = mutableListOf<Boolean>()
+        Ads.observeInitialization(results::add)
+        assertEquals(listOf(false), results)
+    }
+
+    @Test
+    fun `default initialization callback preserves waiter before and during initialization`() {
+        val application = RuntimeEnvironment.getApplication()
+        val config = AdsConfig(AdMobProviderConfig(AdMobIds.TEST), loggingEnabled = false)
+        val results = mutableListOf<Boolean>()
+        Ads.observeInitialization(results::add)
+        assertTrue(results.isEmpty())
+
+        Ads.initialize(application, config)
+        Ads.initialize(application, config.copy())
+        assertTrue(results.isEmpty())
+        finishInitialization(false)
+
+        assertEquals(listOf(false), results)
+    }
+
+    @Test
+    fun `explicit initialize callback replaces the observer`() {
+        val config = initializePending()
+        val observerResults = mutableListOf<Boolean>()
+        val initializeResults = mutableListOf<Boolean>()
+        val cancelObserver = Ads.observeInitialization(observerResults::add)
+
+        Ads.initialize(RuntimeEnvironment.getApplication(), config, initializeResults::add)
+        cancelObserver()
+        finishInitialization(false)
+
+        assertTrue(observerResults.isEmpty())
+        assertEquals(listOf(false), initializeResults)
+    }
+
+    @Test
+    fun `registration outside main thread is rejected`() {
+        var error: Throwable? = null
+        var calls = 0
+        Thread {
+            error = runCatching { Ads.observeInitialization { calls++ } }.exceptionOrNull()
+        }.apply { start(); join() }
+
+        assertNotNull(error)
+        initializePending()
+        finishInitialization(false)
+        assertEquals(0, calls)
+    }
+
+    private fun assertInitializationNotifiesOnce(success: Boolean) {
+        initializePending()
+        val results = mutableListOf<Boolean>()
+        Ads.observeInitialization(results::add)
+        assertTrue(results.isEmpty())
+
+        finishInitialization(success)
+        finishInitialization(success)
+
+        assertEquals(listOf(success), results)
+    }
+
+    private fun initializePending(): AdsConfig {
+        val config = AdsConfig(AdMobProviderConfig(AdMobIds.TEST), loggingEnabled = false)
+        Ads.initialize(RuntimeEnvironment.getApplication(), config)
+        return config
+    }
+
+    private fun finishInitialization(success: Boolean) {
+        ReflectionHelpers.callInstanceMethod<Unit>(
+            Ads, "finishInitialization",
+            ReflectionHelpers.ClassParameter.from(Boolean::class.javaPrimitiveType!!, success),
+        )
     }
 
     private fun topOn() = TopOnProviderConfig(

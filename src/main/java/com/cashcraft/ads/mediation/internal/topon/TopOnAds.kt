@@ -257,12 +257,11 @@ internal object TopOnAds {
         activity: Activity,
         position: String,
         onResult: (AdShowResult) -> Unit,
-        hostContainer: ViewGroup? = null,
     ) = onMain {
         if (!::config.isInitialized) {
             onResult(AdShowResult.Failed("sdk_not_initialized"))
         } else {
-            showAppOpenOnMain(activity, position, onResult, hostContainer = hostContainer)
+            showAppOpenOnMain(activity, position, onResult)
         }
     }
 
@@ -300,7 +299,6 @@ internal object TopOnAds {
         position: String,
         onSessionStarted: (AdShowSession) -> Unit,
         onResult: (AdShowResult) -> Unit,
-        hostContainer: ViewGroup? = null,
         attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
         onSessionCreated: (AdShowSession) -> Unit = {},
     ) = onMain {
@@ -311,7 +309,7 @@ internal object TopOnAds {
         }
         val session = beginBiddingSession(AdFormat.APP_OPEN, position, attempt, onSessionCreated)
         onSessionStarted(session)
-        showAppOpenOnMain(activity, position, onResult, session, hostContainer)
+        showAppOpenOnMain(activity, position, onResult, session)
     }
 
     internal fun showBiddingInterstitial(
@@ -699,7 +697,6 @@ internal object TopOnAds {
             position,
             config.ids.appOpenPlacementId,
         ),
-        hostContainer: ViewGroup? = null,
     ) {
         if (!canShow(activity, session, onResult = onResult)) return
         if (!appOpenAd.isAdReady) {
@@ -708,8 +705,7 @@ internal object TopOnAds {
             return
         }
         val hostResult = runCatching {
-            hostContainer
-                ?: activity.findViewById<ViewGroup?>(android.R.id.content)
+            activity.findViewById<ViewGroup?>(android.R.id.content)
                 ?: (activity.window?.decorView as? ViewGroup)
         }
         val host = hostResult.getOrElse { error ->

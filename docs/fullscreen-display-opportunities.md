@@ -6,6 +6,10 @@
 
 插屏和激励默认等待 5 秒，开屏默认等待 12 秒；外部传入 `timeoutMillis` 覆盖默认值，且必须为正数，从调用时开始计时；排队等待主线程的时间也计入期限。`position` 默认为 `"manual"`，用于业务归因。`isSceneValid` 在主线程执行，应快速读取当前场景状态且不产生副作用。
 
+开屏等待只累计宿主可恢复等待期间的时间：宿主 `onPause` 或应用切后台时暂停计时与展示检查，底层加载继续，不返回结束结果。回到同一个 Activity 的 `onResume` 后，已有有效缓存就优先展示（竞价选择当前可用候选）；否则继续剩余等待，不重置整个期限。窗口尚未附着或获得焦点时仍须等待展示条件满足。例如 15 秒预算前台已等 3 秒，后台停留多久，恢复后都只剩 12 秒。广告缓存有效期仍按真实经过时间判断，不随等待计时暂停。
+
+页面销毁、另一个 Activity 恢复、主动取消或场景失效仍会结束开屏机会；结束的机会不会恢复。插屏和激励保留离场即取消的规则。
+
 以下列出调用签名，省略函数实现和内部构造参数；句柄由 `Ads` 返回。
 
 ```kotlin
@@ -16,15 +20,6 @@ class AdDisplayOpportunity internal constructor(/* 由 SDK 创建 */) {
 object Ads {
     fun showAppOpenWhenReady(
         activity: Activity,
-        position: String = "manual",
-        timeoutMillis: Long = 12_000L,
-        isSceneValid: () -> Boolean = { true },
-        onResult: (AdShowResult) -> Unit = {},
-    ): AdDisplayOpportunity
-
-    fun showAppOpenWhenReady(
-        activity: Activity,
-        hostContainer: ViewGroup,
         position: String = "manual",
         timeoutMillis: Long = 12_000L,
         isSceneValid: () -> Boolean = { true },
@@ -49,7 +44,7 @@ object Ads {
 }
 ```
 
-开屏可以不传 `hostContainer`，SDK 使用已有的宿主容器选择逻辑；需要把 TopOn 等开屏内容挂到宿主 ViewGroup 时，传入绑定 Activity 窗口内已附着、可见的容器。容器属于宿主，SDK 不会移除它。
+开屏不接收外部容器。TopOn 由 SDK 内部选择 Activity 的 `android.R.id.content`，回退到 `decorView`，创建并清理广告子容器。
 
 `cancel()` 是幂等的。它只在 SDK 交接展示前取消机会；一旦 SDK 已经收到 `show()`，后续取消不会撤回广告，也不会屏蔽关闭、失败、奖励或收益回调。一个机会只交付一次最终结果。
 
@@ -109,7 +104,7 @@ fun leaveLevel() {
 
 ## Activity 生命周期和加载复用
 
-机会绑定创建时传入的 Activity。等待期间原 Activity 暂停、销毁、结束、被其他 Activity 实例替换、应用退后台，都会结束尚未交接的机会；SDK 不会把旧机会迁移到新 Activity。首次 Resume 或窗口尚未 ready 时可以在原期限内等待；已因暂停而结束的机会不会在恢复时继续。
+机会绑定创建时传入的 Activity。原 Activity 销毁、结束或被其他 Activity 实例替换时，结束尚未交接的机会，SDK 不会将机会迁移到新 Activity。开屏在原 Activity 暂停或应用退后台时保留机会并暂停计时，恢复后继续；插屏和激励在暂停或退后台时结束机会。首次 Resume 或窗口尚未 ready 时可以继续等待展示条件。
 
 机会取消或超时不会停止 AdMob Preloader、TopOn 的既有加载/重试，也不会清空有效缓存。后续兼容的新机会可以复用在途请求或缓存；新的业务 `position` 不会单独隔离广告缓存。竞价模式只比较本次请求广告类型的候选：两家成功立即比价，一家成功另一家明确失败立即展示，两家失败立即结束；仍有平台未完成则继续等待。截止时从当前有效缓存选择，有候选且展示条件满足就展示，否则返回超时。已有缓存视为成功。单平台模式成功即展示、明确失败即结束。新等待入口在一个平台初始化成功后即可开始加载等待，但另一平台仍在初始化时会继续给它参与竞价的机会；`Ads.state` 和 `onInitialized` 仍按两家平台的整体初始化进度报告。
 
@@ -124,23 +119,13 @@ Ads.initialize(
     ),
 )
 
-fun showStartupAd(activity: Activity, splashHost: ViewGroup?) {
-    val opportunity = if (splashHost == null) {
-        Ads.showAppOpenWhenReady(
-            activity = activity,
-            position = "startup",
-            timeoutMillis = 7_000,
-            onResult = ::handleAppOpenResult,
-        )
-    } else {
-        Ads.showAppOpenWhenReady(
-            activity = activity,
-            hostContainer = splashHost,
-            position = "startup",
-            timeoutMillis = 7_000,
-            onResult = ::handleAppOpenResult,
-        )
-    }
+fun showStartupAd(activity: Activity) {
+    val opportunity = Ads.showAppOpenWhenReady(
+        activity = activity,
+        position = "startup",
+        timeoutMillis = 7_000,
+        onResult = ::handleAppOpenResult,
+    )
 
     // 在启动页确定离开时调用 opportunity.cancel()。
 }
@@ -322,7 +307,7 @@ fun LevelScreen(
 
 loading 使用当前 Activity 页面内的 View/Compose 覆盖层，避免独立 Activity 或夺取窗口焦点的 Dialog。一次业务触发只创建一个机会，不因重组、重复点击或恢复前台重新计时。
 
-等待期间切后台或离开页面会取消机会，底层加载与缓存保留。返回前台后不恢复旧等待、不补弹广告。业务应在原页面恢复前台且仍有效时清理 loading，并且只继续一次被阻塞的业务；原页面已失效则丢弃继续动作。取消可能同步交付回调，应先标记场景失效再取消，避免取消回调误导航。
+插屏和激励等待期间切后台或离开页面会取消机会，底层加载与缓存保留。返回前台后不恢复已取消的等待、不补弹广告。开屏切后台只暂停等待与计时，回到原 Activity 后继续，不触发结果回调；真正销毁或主动取消仍会终止。业务应在原页面恢复前台且仍有效时清理 loading，并且只继续一次被阻塞的业务；原页面已失效则丢弃继续动作。取消可能同步交付回调，应先标记场景失效再取消，避免取消回调误导航。
 
 `onResult` 在等待失败或广告最终关闭/失败时交付；当前没有新增展示交接回调。页面内 loading 可由全屏广告覆盖，最终结果时清理。交给 SDK 后等待计时停止，不限制广告播放时长。
 

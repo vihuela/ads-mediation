@@ -19,6 +19,7 @@ import com.google.android.libraries.ads.mobile.sdk.banner.BannerAd
 import com.google.android.libraries.ads.mobile.sdk.banner.BannerAdPreloader
 import com.google.android.libraries.ads.mobile.sdk.banner.BannerAdRequest
 import com.google.android.libraries.ads.mobile.sdk.common.AdRequest
+import com.google.android.libraries.ads.mobile.sdk.common.AdLoadCallback
 import com.google.android.libraries.ads.mobile.sdk.common.AdValue
 import com.google.android.libraries.ads.mobile.sdk.common.FullScreenContentError
 import com.google.android.libraries.ads.mobile.sdk.common.LoadAdError
@@ -45,6 +46,11 @@ import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.cashcraft.ads.mediation.internal.AutoAppOpenController
 import com.cashcraft.ads.mediation.internal.FullScreenShowGate
 import com.cashcraft.ads.mediation.internal.FullScreenShowAttempt
+import com.cashcraft.ads.mediation.internal.admob.AdMobConfig
+import com.cashcraft.ads.mediation.internal.admob.AdMobEventName
+import com.cashcraft.ads.mediation.internal.admob.AdMobFormat
+import com.cashcraft.ads.mediation.internal.admob.AdMobRewardResult
+import com.cashcraft.ads.mediation.internal.admob.AdMobShowResult
 import com.cashcraft.ads.mediation.internal.dismissedResult
 import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
@@ -204,28 +210,49 @@ object AdMobAds {
         }
     }
 
-    internal fun preloadBanner(request: BannerRequest, size: AdSize, bufferSize: Int) = onMain {
+    internal fun preloadBanner(
+        request: BannerRequest,
+        size: AdSize,
+        bufferSize: Int,
+        autoRefill: Boolean = true,
+    ) = onMain {
         if (state == AdMobState.FAILED || bufferSize <= 0) return@onMain
         val descriptor = BannerPreloadDescriptor(
             preloadId = bannerPreloadId(request, size),
             adUnitId = request.adUnitId,
+            position = request.position,
             size = size,
-            bufferSize = bufferSize,
+            bufferSize = if (autoRefill) bufferSize else 1,
+            autoRefill = autoRefill,
         )
         val placement = request.adUnitId to request.position
-        val previous = bannerPreloadDescriptors.put(placement, descriptor)
-        if (previous != null && previous.preloadId != descriptor.preloadId) {
-            BannerAdPreloader.destroy(previous.preloadId)
+        val previous = bannerPreloadDescriptors[placement]
+        if (previous == descriptor && (previous.autoRefill || !previous.settled ||
+                previous.ad?.isUsable(SystemClock.elapsedRealtime()) == true)
+        ) return@onMain
+        bannerPreloadDescriptors[placement] = descriptor
+        if (previous != null) {
+            previous.ad?.ad?.destroy()
+            previous.ad = null
+            if (previous.autoRefill && previous.started) BannerAdPreloader.destroy(previous.preloadId)
         }
         if (state == AdMobState.READY) startBannerPreloading(descriptor)
     }
 
-    internal fun pollBanner(request: BannerRequest, size: AdSize): BannerAd? =
-        if (state == AdMobState.READY && request.platform == AdPlatform.ADMOB && config.preload.banner > 0) {
-            BannerAdPreloader.pollAd(bannerPreloadId(request, size))
-        } else {
-            null
+    internal fun pollBanner(request: BannerRequest, size: AdSize): BannerAd? {
+        if (state != AdMobState.READY || request.platform != AdPlatform.ADMOB || config.preload.banner == 0) {
+            return null
         }
+        val placement = request.adUnitId to request.position
+        val descriptor = bannerPreloadDescriptors[placement] ?: return null
+        if (descriptor.preloadId != bannerPreloadId(request, size)) return null
+        if (descriptor.autoRefill) return BannerAdPreloader.pollAd(descriptor.preloadId)
+        val retained = descriptor.ad ?: return null // An empty poll leaves an in-flight load intact.
+        descriptor.ad = null // Ownership transfers to the View only while the ad is still usable.
+        if (retained.isUsable(SystemClock.elapsedRealtime())) return retained.ad
+        retained.ad.destroy()
+        return null
+    }
 
     fun showAppOpen(
         activity: Activity,
@@ -383,11 +410,33 @@ object AdMobAds {
     }
 
     private fun startBannerPreloading(descriptor: BannerPreloadDescriptor) {
+        if (descriptor.started) return
+        descriptor.started = true
         val request = BannerAdRequest.Builder(descriptor.adUnitId, descriptor.size).build()
-        BannerAdPreloader.start(
-            descriptor.preloadId,
-            PreloadConfiguration(request, descriptor.bufferSize),
-        )
+        if (descriptor.autoRefill) {
+            BannerAdPreloader.start(descriptor.preloadId, PreloadConfiguration(request, descriptor.bufferSize))
+            return
+        }
+        val startedAt = SystemClock.elapsedRealtime()
+        // ponytail: one ad per placement; use a native no-refill switch if the SDK adds one.
+        BannerAd.load(request, object : AdLoadCallback<BannerAd> {
+            override fun onAdLoaded(ad: BannerAd) = onMain {
+                if (bannerPreloadDescriptors[descriptor.adUnitId to descriptor.position] !== descriptor ||
+                    descriptor.settled
+                ) {
+                    ad.destroy()
+                    return@onMain
+                }
+                descriptor.settled = true
+                val retained = RetainedAd(ad, startedAt, BANNER_MAX_AGE_MILLIS)
+                if (retained.isUsable(SystemClock.elapsedRealtime())) descriptor.ad = retained
+                else ad.destroy()
+            }
+
+            override fun onAdFailedToLoad(adError: LoadAdError) = onMain {
+                descriptor.settled = true // No retry or replenishment, including after a failure.
+            }
+        })
     }
 
     private fun bannerPreloadId(request: BannerRequest, size: AdSize) =
@@ -745,6 +794,7 @@ object AdMobAds {
     private const val NO_AD_AVAILABLE = "no_preloaded_ad"
     private const val MICROS_PER_UNIT = 1_000_000.0
     private const val APP_OPEN_MAX_AGE_MILLIS = 4 * 60 * 60 * 1_000L
+    private const val BANNER_MAX_AGE_MILLIS = 60 * 60 * 1_000L
 
     private data class PreloadDescriptor(
         val format: AdMobFormat,
@@ -755,9 +805,15 @@ object AdMobAds {
     private data class BannerPreloadDescriptor(
         val preloadId: String,
         val adUnitId: String,
+        val position: String,
         val size: AdSize,
         val bufferSize: Int,
-    )
+        val autoRefill: Boolean,
+    ) {
+        var started = false
+        var settled = false
+        var ad: RetainedAd<BannerAd>? = null
+    }
 }
 
 /** Keeps failed show opportunities distinguishable from requests made while SDK startup is pending. */

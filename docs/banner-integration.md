@@ -22,6 +22,40 @@ val config = AdsConfig(
 `AdMobPreloadConfig(banner = 0)` 只关闭 `Ads.preloadBanner()` 的预加载，不关闭 Banner View 本身的请求。
 测试宿主关闭 UMP 仅用于自动化，不应复制到生产隐私配置。
 
+## 预加载与补货
+
+在根布局首次完成测量后，用与展示容器一致的内容宽度（dp，已扣宿主 padding）预加载：
+
+```kotlin
+Ads.preloadBanner(activity, request, contentWidthDp, autoRefill = false)
+```
+
+`request` 的广告位 ID、position 和解析后的尺寸必须与 `AdsBannerView` 一致。
+初始化未完成时只保留 placement 的最新配置，AdMob 初始化成功后再启动；不保留 Activity。
+默认 `autoRefill = true` 保持 SDK 持续补货行为，库存上限由 `AdMobPreloadConfig.banner` 控制。
+同 placement 的相同配置不重复启动；尺寸或补货参数改变时替换配置，true 模式的库存上限改变也会替换。
+旧预加载／尚未消费的缓存先销毁再启动；旧单次请求不可取消，但其晚回调会立即销毁广告，
+即使配置切回原值也不会把旧结果放入新库存。已经取出的广告归 View 所有，由 View 释放。
+
+**false 为单次预加载：**1.2.1 的 `PreloadConfiguration` 没有关闭补货开关，因此直接调用公开的
+`BannerAd.load(request, callback)`，不调用 `BannerAdPreloader.start()` 或 `pollAd()`。
+每个 placement 配置只请求一次、最多存一条；`banner > 0` 时即使配置大于 1，false 仍只存一条。
+空 poll 不取消在途加载；成功 poll 仅移交库存，不触发任何加载。失败、消费或过期后不自动重试／补货，
+加载中或库存有效时再次调用同配置不重复请求；消费、失败或过期后，调用方可再次显式调用预加载来启动新的一次请求。没有 timer，也不会自动刷新预加载库存。
+
+1.2.1 没有公开的 Banner 有效性查询；复用 `RetainedAd`，以请求开始的单调时钟时间为起点，
+采用保守的 1 小时缓存上限，不因晚回调或重复调用延长寿命。加载完成／取出时检查过期并销毁；
+无 timer，未访问的过期对象会在下一次取出或配置替换时清理。该上限是本库策略，不保证素材有效期。
+没有预加载库存时，Banner View 仍按原流程直接加载；其展示请求不属于预加载补货。
+
+这里的补货指预加载库存补齐；已展示广告的自动刷新由 AdMob 广告位后台及 SDK 控制，
+`autoRefill = false` **不关闭广告位展示刷新**，也不改变页面可见性与生命周期规则。
+参数带 Kotlin 默认值，现有源码调用可继续使用；宿主及依赖库需要重新编译，不保证旧二进制签名兼容。
+依据：[PreloadConfiguration](https://developers.google.com/admob/android/next-gen/reference/kotlin/com/google/android/libraries/ads/mobile/sdk/common/PreloadConfiguration)、
+[BannerAdPreloader](https://developers.google.com/admob/android/next-gen/reference/kotlin/com/google/android/libraries/ads/mobile/sdk/banner/BannerAdPreloader)。
+单次加载依据：[BannerAd.load](https://developers.google.com/admob/android/next-gen/reference/kotlin/com/google/android/libraries/ads/mobile/sdk/banner/BannerAd#load)。
+该 API 在较新 SDK 已弃用；本实现以实际依赖 1.2.1 的公开签名为准，升级时需复核。
+
 ## View／Fragment
 
 ```kotlin
