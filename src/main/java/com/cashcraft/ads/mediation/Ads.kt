@@ -24,6 +24,9 @@ import com.cashcraft.ads.mediation.internal.FullScreenShowGate
 import com.cashcraft.ads.mediation.internal.UmpConsentManager
 import com.cashcraft.ads.mediation.internal.topon.TopOnAds
 import com.cashcraft.ads.mediation.internal.topon.TopOnState
+import com.cashcraft.ads.mediation.internal.nativeads.NativeAvailability
+import com.cashcraft.ads.mediation.internal.nativeads.NativeSlot
+import com.cashcraft.ads.mediation.internal.nativeads.nativeAvailability
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -38,6 +41,7 @@ enum class AdsState {
 object Ads {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
+    private val nativeReadinessListeners = CopyOnWriteArrayList<() -> Unit>()
     private val providerInitializationStarted = AtomicBoolean(false)
     private val bannerProviders = BannerProviderReadiness()
 
@@ -51,6 +55,7 @@ object Ads {
 
     private lateinit var application: Application
     private lateinit var config: AdsConfig
+    private var nativeLogger: com.cashcraft.ads.mediation.internal.AdsModuleLogger? = null
     private lateinit var facadeEvents: AdEventDispatcher
     private lateinit var umpConsentManager: UmpConsentManager
     private lateinit var autoBiddingAppOpenController: AutoAppOpenController<Unit>
@@ -123,6 +128,7 @@ object Ads {
             this.application = application
             this.config = config
             mediationMode = config.provider.mediationMode
+            nativeLogger = com.cashcraft.ads.mediation.internal.AdsModuleLogger(config.loggingEnabled, config.logTag)
             umpConsentManager = UmpConsentManager(
                 context = application,
                 config = config.umpConsent,
@@ -145,10 +151,6 @@ object Ads {
                 isProviderReady = { initializationStage == InitializationStage.COMPLETE },
                 providerFailureReason = { null },
                 isAdAvailable = { isReady(AdFormat.APP_OPEN) },
-                shouldIgnoreActivity = { activity ->
-                    activity.javaClass.name.startsWith("com.google.android.libraries.ads.mobile.sdk.") ||
-                        activity.javaClass.name.startsWith("com.thinkup.")
-                },
                 beginOpportunity = { Unit },
                 show = { activity, _ ->
                     showAppOpen(activity, this.config.appOpenPosition)
@@ -191,6 +193,7 @@ object Ads {
         if (!providerInitializationStarted.compareAndSet(false, true)) return
         initializationStage = InitializationStage.PROVIDER_INITIALIZING
         bannerProviders.started()
+        notifyNativeReadiness()
         val initialActivity = AdLifecycleMonitor.currentActivity
             ?.takeUnless { it.isFinishing || it.isDestroyed }
         when (val provider = config.provider) {
@@ -262,6 +265,7 @@ object Ads {
     private fun finishBiddingProviderInitialization(isAdMob: Boolean, success: Boolean) {
         if (isAdMob) admobInitializationResult = success else topOnInitializationResult = success
         bannerProviders.completed(if (isAdMob) AdPlatform.ADMOB else AdPlatform.TOPON, success)
+        notifyNativeReadiness()
         val admobResult = admobInitializationResult ?: return
         val topOnResult = topOnInitializationResult ?: return
         finishInitialization(admobResult || topOnResult)
@@ -270,6 +274,7 @@ object Ads {
     private fun finishInitialization(success: Boolean) {
         initializationStage = if (success) InitializationStage.COMPLETE else InitializationStage.FAILED
         if (!success) bannerProviders.failedPending()
+        notifyNativeReadiness()
         initializationListeners.forEach { listener -> runCatching { listener(success) } }
         initializationListeners.clear()
         if (success && config.provider is BiddingProviderConfig) {
@@ -277,7 +282,7 @@ object Ads {
         }
     }
 
-    fun isReady(format: AdFormat): Boolean = format != AdFormat.BANNER &&
+    fun isReady(format: AdFormat): Boolean = format != AdFormat.BANNER && format != AdFormat.NATIVE &&
         ::config.isInitialized && config.provider.isFormatEnabled(format) && consentSnapshot.canRequestAds &&
         when (config.provider) {
             is AdMobProviderConfig -> AdMobAds.isReady(format)
@@ -481,6 +486,10 @@ object Ads {
         onResult: (AdRewardResult) -> Unit,
     ): AdDisplayOpportunity {
         require(format != AdFormat.BANNER) { "Banner does not use full-screen display opportunities" }
+        if (format == AdFormat.NATIVE) {
+            onMain { onResult(AdRewardResult(false, AdShowResult.Failed("unsupported_ad_format"))) }
+            return AdDisplayOpportunity { }
+        }
         // Capture before posting: a congested main queue must not extend the caller's deadline.
         val startedAt = SystemClock.elapsedRealtime()
         lateinit var controller: DisplayOpportunityController
@@ -600,6 +609,7 @@ object Ads {
         when (winner) {
             AdPlatform.ADMOB -> when (format) {
                 AdFormat.BANNER -> error("Banner does not use full-screen display")
+                AdFormat.NATIVE -> onResult(AdRewardResult(false, AdShowResult.Failed("unsupported_ad_format")))
                 AdFormat.APP_OPEN -> AdMobAds.showBiddingAppOpen(
                     activity, position, onSessionStarted, callback, attempt, created,
                 )
@@ -612,6 +622,7 @@ object Ads {
             }
             AdPlatform.TOPON -> when (format) {
                 AdFormat.BANNER -> error("Banner does not use full-screen display")
+                AdFormat.NATIVE -> onResult(AdRewardResult(false, AdShowResult.Failed("unsupported_ad_format")))
                 AdFormat.APP_OPEN -> TopOnAds.showBiddingAppOpen(
                     activity, position, onSessionStarted, callback, hostContainer, attempt, created,
                 )
@@ -724,6 +735,67 @@ object Ads {
     val isPrivacyOptionsRequired: Boolean
         get() = ::umpConsentManager.isInitialized && umpConsentManager.isPrivacyOptionsRequired
 
+    internal fun nativeAvailability(platform: AdPlatform): NativeAvailability {
+        if (!::config.isInitialized) return NativeAvailability(failure = "sdk_not_initialized")
+        return nativeAvailability(
+            platformConfigured = config.provider is BiddingProviderConfig || config.provider.platform == platform,
+            consentPending = initializationStage == InitializationStage.WAITING_FOR_UMP,
+            consentAllowed = consentSnapshot.canRequestAds,
+            providerState = when (platform) {
+                AdPlatform.ADMOB -> AdMobAds.state.toCommonState()
+                AdPlatform.TOPON -> TopOnAds.state.toCommonState()
+            },
+        )
+    }
+
+    internal fun resolveNativeRequest(request: NativeRequest): ResolvedNativeRequest? =
+        if (::config.isInitialized) config.provider.resolveNativeRequest(request) else null
+
+    internal fun nativeAvailability(request: ResolvedNativeRequest): NativeAvailability {
+        request.failureReason()?.let { return NativeAvailability(failure = it) }
+        val candidates = request.candidates().map { nativeAvailability(requireNotNull(it.platform)) }
+        return candidates.firstOrNull { it.ready } ?: candidates.firstOrNull { it.failure == null }
+            ?: candidates.first()
+    }
+
+    internal fun nativeLog(position: String, debug: Boolean = false, warning: Boolean = false,
+        error: Throwable? = null, message: () -> String) {
+        // 日志不能中断平台交付、收益回调或资源清理。
+        runCatching { nativeLogger?.native(position, debug, warning, error, message) }
+    }
+
+    internal fun beginNativeInventoryLoad(platform: AdPlatform, adUnitId: String): com.cashcraft.ads.mediation.internal.AdLoadSession {
+        val mode = if (platform == AdPlatform.ADMOB) AdMediationMode.ADMOB else AdMediationMode.TOPON
+        return AdEventDispatcher(application, platform, mode, config.eventListener,
+            config.loggingEnabled, config.logTag).beginLoad(AdFormat.NATIVE, adUnitId, 1)
+    }
+
+    internal fun newNativeSlot(request: ResolvedNativeRequest): NativeSlot? {
+        if (!::config.isInitialized || request.failureReason() != null) return null
+        val platform = requireNotNull(request.candidates().first().platform)
+        val mode = if (request.isBidding) AdMediationMode.BIDDING
+            else if (platform == AdPlatform.ADMOB) AdMediationMode.ADMOB else AdMediationMode.TOPON
+        return AdEventDispatcher(application, platform, mode, config.eventListener,
+            config.loggingEnabled, config.logTag).nativeSlot(request, config.revenueListener)
+    }
+
+    internal fun observeNativeReadiness(listener: () -> Unit): AutoCloseable {
+        val subscribed = AtomicBoolean(true)
+        val guarded = { if (subscribed.get()) listener() }
+        nativeReadinessListeners.add(guarded)
+        return AutoCloseable {
+            subscribed.set(false)
+            nativeReadinessListeners.remove(guarded)
+        }
+    }
+
+    internal fun notifyNativeReadiness() {
+        if (!consentSnapshot.canRequestAds) {
+            com.cashcraft.ads.mediation.internal.nativeads.NativeAdCache.consentRevoked()
+        }
+        nativeReadinessListeners.forEach { runCatching(it) }
+    }
+
     fun showPrivacyOptions(
         activity: Activity,
         onDismissed: (errorMessage: String?) -> Unit = {},
@@ -734,6 +806,7 @@ object Ads {
         }
         umpConsentManager.showPrivacyOptions(activity) { errorMessage ->
             if (umpConsentManager.snapshot.canRequestAds) startProviderInitialization()
+            notifyNativeReadiness()
             onDismissed(errorMessage)
         }
     }

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="ads_native_ad_label">Ad</string>
+    <string name="ads_native_ad_choices">Ad choices</string>
+    <string name="ads_native_advertiser_info">Advertiser information</string>
+</resources>

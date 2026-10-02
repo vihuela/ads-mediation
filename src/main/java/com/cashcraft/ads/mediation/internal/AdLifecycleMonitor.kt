@@ -9,6 +9,7 @@ import java.lang.ref.WeakReference
 import java.util.Collections
 import java.util.WeakHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import com.cashcraft.ads.mediation.internal.nativeads.NativeInteractions
 
 /** Single source of truth for host activity and foreground state. */
 internal object AdLifecycleMonitor {
@@ -121,12 +122,14 @@ internal object AdLifecycleMonitor {
     private fun enterForeground(activity: Activity) {
         if (isAppInForeground) return
         isAppInForeground = true
+        NativeInteractions.onForeground()
         listeners.forEach { it.onAppEnteredForeground(activity) }
     }
 
     private fun enterBackground() {
         if (!isAppInForeground) return
         isAppInForeground = false
+        NativeInteractions.onBackground()
         listeners.forEach(Listener::onAppEnteredBackground)
     }
 

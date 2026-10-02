@@ -142,7 +142,6 @@ object AdMobAds {
                     state.takeUnless { it == AdMobState.READY }?.showFailureReason()
                 },
                 isAdAvailable = { isReady(AdMobFormat.APP_OPEN) },
-                shouldIgnoreActivity = { it.isGoogleMobileAdsActivity() },
                 beginOpportunity = {
                     events.begin(
                         AdMobFormat.APP_OPEN,
@@ -193,7 +192,7 @@ object AdMobAds {
         ::config.isInitialized && config.ids.isFormatEnabled(format, config.preload)
 
     fun isReady(format: AdMobFormat): Boolean {
-        if (format == AdMobFormat.BANNER || !isFormatEnabled(format)) return false
+        if (format == AdMobFormat.BANNER || format == AdMobFormat.NATIVE || !isFormatEnabled(format)) return false
         if (state != AdMobState.READY) return false
         if (pendingAd(format) != null) return true
         return when (format) {
@@ -201,6 +200,7 @@ object AdMobAds {
             AdMobFormat.APP_OPEN -> AppOpenAdPreloader.isAdAvailable(PRELOAD_APP_OPEN)
             AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.isAdAvailable(PRELOAD_INTERSTITIAL)
             AdMobFormat.REWARDED -> RewardedAdPreloader.isAdAvailable(PRELOAD_REWARDED)
+            AdMobFormat.NATIVE -> false
         }
     }
 
@@ -376,7 +376,7 @@ object AdMobAds {
                 AdMobFormat.APP_OPEN -> AppOpenAdPreloader.start(preloadId, configuration, preloadCallback)
                 AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.start(preloadId, configuration, preloadCallback)
                 AdMobFormat.REWARDED -> RewardedAdPreloader.start(preloadId, configuration, preloadCallback)
-                AdMobFormat.BANNER -> Unit
+                AdMobFormat.BANNER, AdMobFormat.NATIVE -> Unit
             }
         }
         bannerPreloadDescriptors.values.forEach(::startBannerPreloading)
@@ -415,7 +415,7 @@ object AdMobAds {
     )
 
     internal fun bidPrice(format: AdMobFormat): Double? {
-        if (format == AdMobFormat.BANNER || !isFormatEnabled(format)) return null
+        if (format == AdMobFormat.BANNER || format == AdMobFormat.NATIVE || !isFormatEnabled(format)) return null
         pendingAd(format)?.let { return it.priceUsd }
         if (!isReady(format)) return null
         return AdMobNextGenBidPrice.peek(format, format.preloadId())
@@ -444,6 +444,7 @@ object AdMobAds {
             AdMobFormat.APP_OPEN -> AppOpenAdPreloader.pollAd(PRELOAD_APP_OPEN)
             AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.pollAd(PRELOAD_INTERSTITIAL)
             AdMobFormat.REWARDED -> RewardedAdPreloader.pollAd(PRELOAD_REWARDED)
+            AdMobFormat.NATIVE -> error("unsupported_ad_format")
         } ?: return null
         val bound = responseLoadBounds.remove(ad.getResponseInfo().responseId)
         takenAds[ad] = RetainedAd(
@@ -476,6 +477,7 @@ object AdMobAds {
         AdMobFormat.APP_OPEN -> PRELOAD_APP_OPEN
         AdMobFormat.INTERSTITIAL -> PRELOAD_INTERSTITIAL
         AdMobFormat.REWARDED -> PRELOAD_REWARDED
+        AdMobFormat.NATIVE -> error("unsupported_ad_format")
     }
 
     private fun showAppOpenOnMain(
@@ -732,8 +734,6 @@ object AdMobAds {
         }
     }
 
-    private fun Activity.isGoogleMobileAdsActivity(): Boolean =
-        javaClass.name.startsWith("com.google.android.libraries.ads.mobile.sdk.")
 
     private fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else mainHandler.post(block)

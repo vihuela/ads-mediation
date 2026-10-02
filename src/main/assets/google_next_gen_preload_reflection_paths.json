@@ -2,7 +2,11 @@
   "versions": {
     "1.2.1": {
       "preloading": {
-        "enabledAdTypes": ["APP_OPEN", "INTERSTITIAL", "REWARDED"],
+        "enabledAdTypes": [
+          "APP_OPEN",
+          "INTERSTITIAL",
+          "REWARDED"
+        ],
         "sdkRoot": {
           "className": "ads_mobile_sdk.gt0",
           "method": "a",
@@ -22,7 +26,15 @@
           "configurationPriceField": "m"
         },
         "priceFields": {
-          "valueMicros": "b"
+          "valueMicros": "b",
+          "currencyCode": "d"
+        }
+      },
+      "regular": {
+        "adPaths": {
+          "NATIVE": [
+            "a->b->m"
+          ]
         }
       }
     }

@@ -5,6 +5,7 @@ enum class AdFormat(val analyticsValue: String) {
     INTERSTITIAL("interstitial"),
     REWARDED("rewarded"),
     BANNER("banner"),
+    NATIVE("native"),
 }
 
 enum class AdEventName(val analyticsName: String) {
@@ -79,6 +80,7 @@ data class AdEvent(
         mediationAdapterClassName?.let { put("mediation_adapter_class_name", it) }
         precisionType?.let { put("precision_type", it) }
         requestId?.let { put("request_id", it) }
+        slotId?.let { put("slot_id", it) }
         result?.let { put("result", it) }
         latencyMillis?.let { put("latency_ms", it) }
         bufferSize?.let { put("buffer_size", it) }

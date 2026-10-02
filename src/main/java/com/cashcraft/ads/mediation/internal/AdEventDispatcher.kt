@@ -11,6 +11,8 @@ import com.cashcraft.ads.mediation.AdMediationMode
 import com.cashcraft.ads.mediation.AdPlatform
 import com.cashcraft.ads.mediation.AdRevenueListener
 import com.cashcraft.ads.mediation.AdShowResult
+import com.cashcraft.ads.mediation.ResolvedNativeRequest
+import com.cashcraft.ads.mediation.internal.nativeads.NativeSlot
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -27,6 +29,24 @@ internal class AdEventDispatcher(
         Context.MODE_PRIVATE,
     )
     private val logger = AdsModuleLogger(loggingEnabled, logTag)
+
+    private fun nextNumber(format: AdFormat, kind: String): Long = synchronized(preferences) {
+        val key = "${format.analyticsValue}_${kind}_count"
+        val next = preferences.getLong(key, 0L) + 1L
+        preferences.edit { putLong(key, next) }
+        next
+    }
+
+    fun nativeSlot(request: ResolvedNativeRequest, revenueListener: AdRevenueListener): NativeSlot = NativeSlot(
+        request = request,
+        number = nextNumber(AdFormat.NATIVE, "position"),
+        nextLoadNumber = { nextNumber(AdFormat.NATIVE, "load") },
+        listener = AdEventListener { event ->
+            logger.event(event)
+            runCatching { listener.onEvent(event) }.onFailure { logger.eventDispatchFailed(event, it) }
+        },
+        revenueListener = revenueListener,
+    )
 
     fun begin(
         format: AdFormat,
@@ -111,13 +131,6 @@ internal class AdEventDispatcher(
             logger = logger,
             slotId = slot.slotId,
         )
-    }
-
-    private fun nextNumber(format: AdFormat, kind: String): Long = synchronized(preferences) {
-        val key = "${format.analyticsValue}_${kind}_count"
-        val next = preferences.getLong(key, 0L) + 1L
-        preferences.edit { putLong(key, next) }
-        next
     }
 
     private companion object {

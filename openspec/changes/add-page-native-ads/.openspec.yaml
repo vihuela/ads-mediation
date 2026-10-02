@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-29
+goal: 依据 docs/native-implementation-plan.md，为页面内独立 Native 卡片增加 AdMob 与 TopOn
+  支持、默认与自定义 View/XML 布局、统一生命周期和可选 Compose 包装。

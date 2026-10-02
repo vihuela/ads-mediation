@@ -58,6 +58,7 @@ internal object BidCandidateSelector {
 internal object AdBiddingCoordinator {
     fun select(format: AdFormat): BidDecision {
         require(format != AdFormat.BANNER) { "Banner does not use full-screen bidding" }
+        require(format != AdFormat.NATIVE) { "unsupported_ad_format" }
         // Match each standalone provider's show semantics: this opportunity never waits for a
         // network load. TopOn still starts a background fill for the next opportunity.
         TopOnAds.ensureLoaded(format)
@@ -67,6 +68,7 @@ internal object AdBiddingCoordinator {
     /** Reads the same-format cache without triggering a new load on every waiting tick. */
     fun selectAvailable(format: AdFormat): BidDecision {
         require(format != AdFormat.BANNER) { "Banner does not use full-screen bidding" }
+        require(format != AdFormat.NATIVE) { "unsupported_ad_format" }
         val admobAvailable = AdMobAds.isReady(format)
         val topOnAvailable = TopOnAds.isReady(format)
         val selection = BidCandidateSelector.select(

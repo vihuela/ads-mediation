@@ -165,7 +165,6 @@ internal object TopOnAds {
                     state.takeUnless { it == TopOnState.READY }?.showFailureReason()
                 },
                 isAdAvailable = { ::appOpenAd.isInitialized && appOpenAd.isAdReady },
-                shouldIgnoreActivity = { it.isTopOnActivity() },
                 beginOpportunity = {
                     events.begin(
                         AdFormat.APP_OPEN,
@@ -217,6 +216,7 @@ internal object TopOnAds {
             AdFormat.APP_OPEN -> ::appOpenAd.isInitialized && appOpenAd.isAdReady
             AdFormat.INTERSTITIAL -> ::interstitialAd.isInitialized && interstitialAd.isAdReady
             AdFormat.REWARDED -> ::rewardedAd.isInitialized && rewardedAd.isAdReady
+            AdFormat.NATIVE -> false
         }
     }
 
@@ -229,6 +229,7 @@ internal object TopOnAds {
                 AdFormat.APP_OPEN -> loadAppOpen()
                 AdFormat.INTERSTITIAL -> loadInterstitial()
                 AdFormat.REWARDED -> loadRewarded()
+                AdFormat.NATIVE -> Unit
             }
         }
     }
@@ -243,6 +244,7 @@ internal object TopOnAds {
             AdFormat.APP_OPEN -> appOpenAd.checkAdStatus().getTUTopAdInfo()
             AdFormat.INTERSTITIAL -> interstitialAd.checkAdStatus().getTUTopAdInfo()
             AdFormat.REWARDED -> rewardedAd.checkAdStatus().getTUTopAdInfo()
+            AdFormat.NATIVE -> null
         } ?: return null
         return info.getPublisherRevenue(TUAdConst.CURRENCY.USD)
             ?.takeIf { it.isFinite() && it >= 0.0 }
@@ -1140,8 +1142,6 @@ internal object TopOnAds {
         else -> "error"
     }
 
-    private fun Activity.isTopOnActivity(): Boolean =
-        javaClass.name.startsWith("com.thinkup.")
 
     private fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else mainHandler.post(block)

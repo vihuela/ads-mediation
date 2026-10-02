@@ -4,6 +4,7 @@ import android.app.Activity
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import com.cashcraft.ads.mediation.internal.nativeads.NativeInteractions
 
 /** Coordinates the foreground window used by standalone and bidding auto app-open flows. */
 internal class AutoAppOpenController<T>(
@@ -11,7 +12,8 @@ internal class AutoAppOpenController<T>(
     private val isProviderReady: () -> Boolean,
     private val providerFailureReason: () -> String?,
     private val isAdAvailable: () -> Boolean,
-    private val shouldIgnoreActivity: (Activity) -> Boolean = { false },
+    private val shouldIgnoreActivity: (Activity) -> Boolean =
+        { isAdSdkActivityClassName(it.javaClass.name) },
     private val beginOpportunity: () -> T,
     private val show: (Activity, T) -> Unit,
     private val fail: (T, String) -> Unit,
@@ -33,7 +35,7 @@ internal class AutoAppOpenController<T>(
 
         override fun onAppEnteredForeground(activity: Activity) {
             foregroundStartedAtMillis = clock()
-            attempted = false
+            attempted = NativeInteractions.blocksAutoAppOpen()
             if (!shouldIgnoreActivity(activity)) beginOpportunityIfNeeded()
             schedule()
         }
@@ -70,6 +72,7 @@ internal class AutoAppOpenController<T>(
 
     private fun beginOpportunityIfNeeded() {
         if (!isEnabled() || !isProviderReady() || attempted || pendingOpportunity != null) return
+        if (NativeInteractions.blocksAutoAppOpen()) { attempted = true; return }
         pendingOpportunity = beginOpportunity()
     }
 
@@ -90,9 +93,14 @@ internal class AutoAppOpenController<T>(
 
     private fun checkAndShow() {
         if (!AdLifecycleMonitor.isAppInForeground || attempted) return
+        if (NativeInteractions.blocksAutoAppOpen()) {
+            finishOpportunity("native_interaction")
+            return
+        }
         val elapsed = clock() - foregroundStartedAtMillis
         val activity = AdLifecycleMonitor.currentActivity
-        val activityAvailable = activity != null && !activity.isFinishing && !activity.isDestroyed
+        val activityAvailable = activity != null && !activity.isFinishing && !activity.isDestroyed &&
+            !shouldIgnoreActivity(activity)
         val activityInteractive = activityAvailable &&
             AdLifecycleMonitor.activityShowFailureReason(checkNotNull(activity)) == null
         val adAvailable = isAdAvailable()
@@ -129,6 +137,15 @@ internal class AutoAppOpenController<T>(
         const val DEFAULT_CHECK_INTERVAL_MILLIS = 100L
     }
 }
+
+// 只限制自动机会；SDK落地页不是业务宿主，手动全屏资格仍由原show gate判断。
+internal fun isAdSdkActivityClassName(name: String): Boolean =
+    name.startsWith("com.google.android.libraries.ads.mobile.sdk.") ||
+        name.startsWith("com.thinkup.") ||
+        name.startsWith("com.bytedance.sdk.openadsdk.") ||
+        name.startsWith("com.facebook.ads.") ||
+        name.startsWith("com.smartdigimkt.sdk.") ||
+        name.startsWith("com.mbridge.msdk.")
 
 internal enum class AutoAppOpenCheck {
     WAIT,

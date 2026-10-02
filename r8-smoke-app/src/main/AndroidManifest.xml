@@ -15,6 +15,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".NativeSmokeActivity"
+            android:exported="true" />
+        <activity
+            android:name=".NativeSmokeDetailsActivity"
+            android:exported="false" />
         <activity android:name=".TraditionalBannerActivity" android:exported="false" />
     </application>
 </manifest>

@@ -141,6 +141,22 @@ class AdsConfigTest {
     }
 
     @Test
+    fun `providers reject native format for full screen ids`() {
+        val providers = listOf<AdProviderConfig>(
+            AdMobProviderConfig(AdMobIds.TEST),
+            testTopOnProvider(),
+            BiddingProviderConfig(AdMobProviderConfig(AdMobIds.TEST), testTopOnProvider()),
+        )
+
+        providers.forEach { provider ->
+            val error = assertThrows(IllegalStateException::class.java) {
+                provider.adUnitId(AdFormat.NATIVE)
+            }
+            assertEquals("unsupported_ad_format", error.message)
+        }
+    }
+
+    @Test
     fun `bidding keeps AdMob as deterministic fallback for unchanged failure events`() {
         val provider = BiddingProviderConfig(
             admob = AdMobProviderConfig(AdMobIds.TEST),
@@ -159,6 +175,36 @@ class AdsConfigTest {
             AdMobProviderConfig(AdMobIds.TEST).mediationMode,
         )
         assertEquals(AdMediationMode.TOPON, testTopOnProvider().mediationMode)
+    }
+
+    @Test
+    fun `Native 广告位仅从初始化配置解析`() {
+        val page = NativeRequest("home", topOnTemplateAspectRatio = 2f, bidTimeoutMillis = 1234)
+        val google = AdMobProviderConfig(AdMobIds.TEST)
+        val topOn = testTopOnProvider().let { it.copy(ids = it.ids.copy(nativePlacementId = "native-topon")) }
+        assertEquals(listOf(AdPlatform.ADMOB), google.resolveNativeRequest(page).candidates().map { it.platform })
+        assertEquals(listOf("native-topon"), topOn.resolveNativeRequest(page).candidates().map { it.adUnitId })
+        val both = BiddingProviderConfig(google, topOn).resolveNativeRequest(page)
+        assertEquals(true, both.isBidding)
+        assertEquals(1234L, both.bidTimeoutMillis)
+        assertEquals(2f, both.candidates().last().topOnTemplateAspectRatio)
+        assertEquals(listOf(AdMobIds.TEST.nativeId, "native-topon"), both.candidates().map { it.adUnitId })
+        val onlyGoogle = BiddingProviderConfig(google, testTopOnProvider()).resolveNativeRequest(page)
+        assertEquals(false, onlyGoogle.isBidding)
+        assertEquals(1, onlyGoogle.candidates().size)
+        val onlyTopOn = BiddingProviderConfig(google.copy(ids = google.ids.copy(nativeId = null)), topOn)
+            .resolveNativeRequest(page)
+        assertEquals(AdPlatform.TOPON, onlyTopOn.candidates().single().platform)
+        assertEquals("native_not_configured", testTopOnProvider().resolveNativeRequest(page).failureReason())
+        assertEquals("native_not_configured", google.copy(ids = google.ids.copy(nativeId = null))
+            .resolveNativeRequest(page).failureReason())
+        assertEquals("invalid_position", page.copy(position = " ").failureReason())
+        assertEquals("invalid_template_ratio", page.copy(topOnTemplateAspectRatio = Float.NaN).failureReason())
+        assertEquals("invalid_native_bid_timeout", page.copy(bidTimeoutMillis = 0).failureReason())
+        assertThrows(IllegalArgumentException::class.java) { google.ids.copy(nativeId = " ") }
+        assertThrows(IllegalArgumentException::class.java) { topOn.ids.copy(nativePlacementId = " ") }
+        assertEquals(listOf("position", "topOnTemplateAspectRatio", "bidTimeoutMillis"),
+            NativeRequest::class.java.declaredFields.filterNot { it.isSynthetic }.map { it.name })
     }
 
     private fun testTopOnProvider() = TopOnProviderConfig(

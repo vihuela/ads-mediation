@@ -50,12 +50,14 @@ data class AdMobIds(
     val appOpenId: String = "",
     val interstitialId: String = "",
     val rewardedId: String = "",
+    val nativeId: String? = null,
 ) {
     init {
         require(applicationId.isNotBlank()) { "applicationId must not be blank" }
         require(appOpenId.isEmpty() || appOpenId.isNotBlank()) { "appOpenId must not be whitespace" }
         require(interstitialId.isEmpty() || interstitialId.isNotBlank()) { "interstitialId must not be whitespace" }
         require(rewardedId.isEmpty() || rewardedId.isNotBlank()) { "rewardedId must not be whitespace" }
+        require(nativeId == null || nativeId.isNotBlank()) { "nativeId must not be blank" }
     }
 
     companion object {
@@ -65,6 +67,7 @@ data class AdMobIds(
             appOpenId = "ca-app-pub-3940256099942544/9257395921",
             interstitialId = "ca-app-pub-3940256099942544/1033173712",
             rewardedId = "ca-app-pub-3940256099942544/5224354917",
+            nativeId = "ca-app-pub-3940256099942544/2247696110",
         )
     }
 }
@@ -74,10 +77,12 @@ internal fun AdMobIds.adUnitId(format: AdFormat): String = when (format) {
     AdFormat.APP_OPEN -> appOpenId
     AdFormat.INTERSTITIAL -> interstitialId
     AdFormat.REWARDED -> rewardedId
+    AdFormat.NATIVE -> error("unsupported_ad_format")
 }
 
 internal fun AdMobIds.isFormatEnabled(format: AdFormat, preload: AdMobPreloadConfig): Boolean =
-    format == AdFormat.BANNER || (adUnitId(format).isNotEmpty() && preload.bufferSize(format) > 0)
+    if (format == AdFormat.NATIVE) false
+    else format == AdFormat.BANNER || (adUnitId(format).isNotEmpty() && preload.bufferSize(format) > 0)
 
 /** Buffer limits. Zero disables a full-screen format, or only preloading for request-owned Banners. */
 data class AdMobPreloadConfig(
@@ -106,6 +111,7 @@ internal fun AdMobPreloadConfig.bufferSize(format: AdFormat): Int = when (format
     AdFormat.APP_OPEN -> appOpen
     AdFormat.INTERSTITIAL -> interstitial
     AdFormat.REWARDED -> rewarded
+    AdFormat.NATIVE -> error("unsupported_ad_format")
 }
 
 /** UMP consent collection runs before any selected mediation provider is initialized. */
@@ -124,7 +130,10 @@ data class AdMobProviderConfig(
 ) : AdProviderConfig {
     override val platform: AdPlatform = AdPlatform.ADMOB
 
-    override fun adUnitId(format: AdFormat): String = ids.adUnitId(format)
+    override fun adUnitId(format: AdFormat): String = when (format) {
+        AdFormat.NATIVE -> error("unsupported_ad_format")
+        else -> ids.adUnitId(format)
+    }
 }
 
 /** Credentials are required; an empty or omitted placement ID disables its full-screen format. */
@@ -134,6 +143,7 @@ data class TopOnIds(
     val appOpenPlacementId: String = "",
     val interstitialPlacementId: String = "",
     val rewardedPlacementId: String = "",
+    val nativePlacementId: String? = null,
 ) {
     init {
         require(applicationId.isNotBlank()) { "applicationId must not be blank" }
@@ -141,6 +151,7 @@ data class TopOnIds(
         require(appOpenPlacementId.isEmpty() || appOpenPlacementId.isNotBlank()) { "appOpenPlacementId must not be whitespace" }
         require(interstitialPlacementId.isEmpty() || interstitialPlacementId.isNotBlank()) { "interstitialPlacementId must not be whitespace" }
         require(rewardedPlacementId.isEmpty() || rewardedPlacementId.isNotBlank()) { "rewardedPlacementId must not be whitespace" }
+        require(nativePlacementId == null || nativePlacementId.isNotBlank()) { "nativePlacementId must not be blank" }
     }
 }
 
@@ -154,6 +165,7 @@ data class TopOnProviderConfig(
         AdFormat.APP_OPEN -> ids.appOpenPlacementId
         AdFormat.INTERSTITIAL -> ids.interstitialPlacementId
         AdFormat.REWARDED -> ids.rewardedPlacementId
+        AdFormat.NATIVE -> error("unsupported_ad_format")
     }
 }
 

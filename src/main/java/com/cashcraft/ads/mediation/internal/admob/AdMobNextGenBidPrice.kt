@@ -3,6 +3,10 @@ package com.cashcraft.ads.mediation.admob
 import android.content.Context
 import com.google.android.libraries.ads.mobile.sdk.MobileAds
 import com.cashcraft.ads.mediation.AdFormat
+import com.google.android.libraries.ads.mobile.sdk.common.AdValue
+import com.google.android.libraries.ads.mobile.sdk.nativead.NativeAd
+import java.util.Locale
+import kotlinx.serialization.json.jsonArray
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.util.Queue
@@ -58,6 +62,29 @@ internal object AdMobNextGenBidPrice {
         valueMicros.coerceAtLeast(0L) / MICROS_PER_UNIT
     }.getOrNull()
 
+    /** Loaded Native objects use the regular path, never the full-screen preload queue. */
+    fun fromNative(ad: NativeAd): Double? = runCatching {
+        val version = MobileAds.getVersion().let { "${it.majorVersion}.${it.minorVersion}.${it.microVersion}" }
+        readNativePrice(ad, repository?.get(version) ?: return null)
+    }.getOrNull()
+
+    internal fun readNativePrice(ad: Any, config: ReflectionConfig): Double? = runCatching {
+        if (config.nativePricePath.isEmpty()) return null
+        var value: Any = ad
+        for (field in config.nativePricePath) value = readField(value, field) ?: return null
+        val micros: Long?
+        val currency: String?
+        if (value is AdValue) {
+            micros = value.valueMicros
+            currency = value.currencyCode
+        } else {
+            micros = readField(value, config.priceValueMicrosField) as? Long
+            currency = readField(value, config.priceCurrencyField ?: return null) as? String
+        }
+        if (micros == null || micros < 0 || currency?.trim()?.uppercase(Locale.ROOT) != "USD") return null
+        micros / MICROS_PER_UNIT
+    }.getOrNull()
+
     internal fun parse(json: String): Map<String, ReflectionConfig> {
         val versions = Json.parseToJsonElement(json).jsonObject.requiredObject("versions")
         return versions.mapValues { (_, versionElement) ->
@@ -79,6 +106,10 @@ internal object AdMobNextGenBidPrice {
                     queuePath.requiredString("internalAdConfigurationMethod"),
                 configurationPriceField = queuePath.requiredString("configurationPriceField"),
                 priceValueMicrosField = priceFields.requiredString("valueMicros"),
+                priceCurrencyField = priceFields["currencyCode"]?.jsonPrimitive?.content,
+                nativePricePath = versionElement.jsonObject["regular"]?.jsonObject
+                    ?.get("adPaths")?.jsonObject?.get("NATIVE")?.jsonArray?.firstOrNull()
+                    ?.jsonPrimitive?.content?.split("->") ?: emptyList(),
             )
         }
     }
@@ -131,4 +162,6 @@ internal data class ReflectionConfig(
     val internalAdConfigurationMethod: String,
     val configurationPriceField: String,
     val priceValueMicrosField: String,
+    val priceCurrencyField: String? = null,
+    val nativePricePath: List<String> = emptyList(),
 )

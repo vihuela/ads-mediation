@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-09-30
+goal: 在现有 add-page-native-ads 基础上，依据 docs/native-implementation-plan.md 规划 AdMob
+  与 TopOn 原生广告预加载、比价、落选保留、消费补货、统一素材、中文流程日志及双展示策略，覆盖单 Activity 与
+  Compose；分别记录新路径的实现和验证状态。

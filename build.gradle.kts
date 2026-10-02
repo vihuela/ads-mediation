@@ -29,6 +29,7 @@ android {
 
     defaultConfig {
         minSdk = 26
+        testInstrumentationRunner = "android.test.InstrumentationTestRunner"
         consumerProguardFiles("consumer-rules.pro")
     }
 
@@ -63,6 +64,10 @@ configurations.configureEach {
 dependencies {
     // LifecycleOwner is part of the public View API; Compose remains an optional module.
     api(libs.androidx.lifecycle.runtime)
+    androidTestCompileOnly(files(
+        "${android.sdkDirectory}/platforms/android-${android.compileSdk}/optional/android.test.base.jar",
+        "${android.sdkDirectory}/platforms/android-${android.compileSdk}/optional/android.test.runner.jar",
+    ))
     // Direct AdMob provider + TopOn's GMA Next-Gen network adapter.
     implementation(libs.ads.mobile.sdk)
     // GMA Next-Gen 1.2.1 still declares WorkManager 2.7.0/Room 2.2.5. With
@@ -99,6 +104,7 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.topon.androidx.browser)
     implementation(libs.androidx.core.ktx)
+    api(libs.androidx.lifecycle.runtime)
     implementation(libs.kotlinx.coroutines.android)
 
     testImplementation(libs.junit)

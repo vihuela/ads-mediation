@@ -46,3 +46,11 @@
     com.google.android.libraries.ads.mobile.sdk.common.PrecisionType c;
     java.lang.String d;
 }
+
+# GMA 1.2.1 loaded Native price path: a -> b -> m. No class-name lookup is used.
+# The path is version-gated; keep these field names through a second host R8 pass.
+-keepclassmembers class ads_mobile_sdk.** {
+    *** a;
+    *** b;
+    *** m;
+}
