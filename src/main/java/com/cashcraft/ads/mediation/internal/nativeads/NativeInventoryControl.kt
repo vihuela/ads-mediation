@@ -78,6 +78,13 @@ internal class NativeInventoryControl(
         // AdMob 的持续回调和补货由 SDK 承担，不重复启动或叠加重试。
     }
 
+    fun takeFailed(key: NativeInventoryKey) {
+        val entry = entries[key] ?: return
+        if (key.platform != AdPlatform.TOPON || !isReady(key)) return
+        entry.ready = false
+        scheduleRetry(entry)
+    }
+
     fun retry(key: NativeInventoryKey) {
         val entry = entries[key] ?: return
         if (!entry.exhausted || entry.demand == 0) return
@@ -163,9 +170,14 @@ internal class NativeInventoryControl(
         if (entry.key.platform == AdPlatform.ADMOB) return
         val operation = entry.operation
         entry.operation = null
-        if (success) {
-            entry.retries = 0
-        } else if (entry.retries < 3) {
+        // SDK 就绪仍可能领取失败；只有 consumed 才重置失败预算。
+        if (!success) scheduleRetry(entry)
+        cancel(entry, operation)
+    }
+
+    private fun scheduleRetry(entry: Entry) {
+        if (entry.retries < 3) {
+            val token = entry.token
             val delay = 2_000L shl entry.retries++
             val retry = Runnable {
                 if (current(entry, token)) {
@@ -178,7 +190,6 @@ internal class NativeInventoryControl(
         } else {
             entry.exhausted = true
         }
-        cancel(entry, operation)
     }
 
     private fun idle(entry: Entry) {

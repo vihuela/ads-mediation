@@ -13,6 +13,48 @@ import java.util.concurrent.TimeUnit
 /** Uses official AdMob test inventory. Optional TopOn credentials are supplied only at execution. */
 @Suppress("DEPRECATION")
 class NativeCacheTransferTest : InstrumentationTestCase() {
+    fun testCacheFirstClaimsSdkInventoryBeforeReturningWhileOtherPlatformIsPending() {
+        onMain { initializeSdk(AdPlatform.ADMOB, android.os.Bundle()) }
+        val activity = launch()
+        val request = ResolvedNativeRequest(position = "cache_first", admobAdUnitId = AdMobIds.TEST.nativeId,
+            topOnPlacementId = "pending-topon", preferCachedAds = true)
+        val google = request.candidates().single { it.platform == AdPlatform.ADMOB }
+        val result = Listener()
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        var demand: AutoCloseable? = null
+        var auction: NativeLoad? = null
+        try {
+            waitUntil { Ads.nativeAvailability(AdPlatform.ADMOB).ready }
+            onMain { demand = NativeAdCache.acquirePreload(google) }
+            waitUntil { NativeAdCache.peekPreload(google) != null }
+            onMain {
+                val start = android.os.SystemClock.elapsedRealtime()
+                // 真实 SDK 缓存，另一端确定保持未就绪；必须在 start 返回前交付。
+                auction = NativeAuction(request, result,
+                    availability = { if (it == AdPlatform.ADMOB) Ads.nativeAvailability(it) else NativeAvailability() },
+                    startLoad = { candidate, listener -> NativeAdCache.load(activity, candidate,
+                        activity.resources.displayMetrics.widthPixels, false, listener) },
+                    subscribe = { AutoCloseable {} }, dispatch = NativeMainThread::run,
+                    schedule = { action, delay -> handler.postDelayed(action, delay) },
+                    unschedule = handler::removeCallbacks, clock = android.os.SystemClock::elapsedRealtime,
+                ).also { it.start() }
+                assertNull(result.failure)
+                assertNotNull("Ready SDK inventory must not wait for the pending platform", result.ad)
+                assertTrue(result.ad!!.isValid)
+                android.util.Log.i("NativeCacheTransfer",
+                    "cache_first sdk_inventory_delivered=true elapsed_ms=${android.os.SystemClock.elapsedRealtime() - start}")
+            }
+        } finally {
+            onMain {
+                auction?.cancel()
+                result.ad?.destroy()
+                demand?.close()
+                NativeAdCache.clear()
+                activity.finish()
+            }
+        }
+    }
+
     fun testUnrenderedAdSurvivesLoadingActivityAndRendersInNewActivity() {
         val args = (instrumentation as android.test.InstrumentationTestRunner).arguments
         val platform = if (args.getString("platform") == "topon") AdPlatform.TOPON else AdPlatform.ADMOB
@@ -20,6 +62,10 @@ class NativeCacheTransferTest : InstrumentationTestCase() {
         val request = ResolvedNativeRequest(platform,
             if (platform == AdPlatform.ADMOB) "ca-app-pub-3940256099942544/2247696110"
             else requireNotNull(args.getString("nativePlacement")), "cache_transfer", ratio)
+        onMain {
+            NativeAdCache.clear()
+            initializeSdk(platform, args)
+        }
         var first: Activity? = launch()
         val width = first!!.resources.displayMetrics.widthPixels
         var second: Activity? = null
@@ -27,10 +73,6 @@ class NativeCacheTransferTest : InstrumentationTestCase() {
         var view: View? = null
         var inventoryGeneration = 0L
         try {
-            onMain {
-                NativeAdCache.clear()
-                initializeSdk(platform, args)
-            }
             waitUntil { Ads.nativeAvailability(platform).ready }
             val original = Listener()
             onMain {
@@ -88,6 +130,7 @@ class NativeCacheTransferTest : InstrumentationTestCase() {
         }
         val request = ResolvedNativeRequest(AdPlatform.TOPON,
             requireNotNull(args.getString("nativePlacement")), "managed-topon")
+        onMain { initializeSdk(AdPlatform.TOPON, args) }
         val activity = launch()
         val width = activity.resources.displayMetrics.widthPixels
         var a: AutoCloseable? = null
@@ -95,7 +138,6 @@ class NativeCacheTransferTest : InstrumentationTestCase() {
         var ad: NativeAdHandle? = null
         var view: View? = null
         try {
-            onMain { initializeSdk(AdPlatform.TOPON, args) }
             waitUntil { Ads.nativeAvailability(AdPlatform.TOPON).ready }
             onMain {
                 a = NativeAdCache.acquireTopOnInventory(activity, request, width)
@@ -149,16 +191,16 @@ class NativeCacheTransferTest : InstrumentationTestCase() {
         val request = ResolvedNativeRequest(platform,
             if (platform == AdPlatform.ADMOB) "ca-app-pub-3940256099942544/2247696110"
             else requireNotNull(args.getString("nativePlacement")), "consent_generation")
+        onMain {
+            NativeAdCache.clear()
+            if (platform == AdPlatform.TOPON) requireNotNull(args.getString("toponTestDeviceId"))
+            initializeSdk(platform, args)
+        }
         val activity = launch()
         val width = activity.resources.displayMetrics.widthPixels
         var sdkSeed: com.thinkup.nativead.api.TUNative? = null
         val result = Listener()
         try {
-            onMain {
-                NativeAdCache.clear()
-                if (platform == AdPlatform.TOPON) requireNotNull(args.getString("toponTestDeviceId"))
-                initializeSdk(platform, args)
-            }
             waitUntil { Ads.nativeAvailability(platform).ready }
             var oldResponse: String? = null
             if (platform == AdPlatform.TOPON) {

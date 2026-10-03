@@ -34,6 +34,8 @@ internal class NativeCardController(
     private val retentionPolicy: NativeRetentionPolicy = NativeRetentionPolicy.DESTROY_ON_HIDE,
     private val onRetentionFallback: (String) -> Unit = {},
     private val recordLoadEvents: Boolean = true,
+    private val schedule: (Runnable, Long) -> Unit = { _, _ -> },
+    private val unschedule: (Runnable) -> Unit = {},
 ) {
     var state: NativeState = NativeState.Idle
         private set
@@ -47,6 +49,8 @@ internal class NativeCardController(
     private var ad: NativeAdHandle? = null
     private var closed = false
     private var retained = false
+    private var automaticRetries = 0
+    private var retryTask: Runnable? = null
     val isRetained: Boolean get() = retained
     var retentionFallbackReason: String? = null
         private set
@@ -57,11 +61,16 @@ internal class NativeCardController(
         this.active = active
         this.visible = visible
         if (!active) {
+            cancelRetry()
             val token = generation
             if (wasActive && !retainBoundAd() && generation == token) endCycle(retentionFallbackReason ?: "native_inactive")
             return
         }
-        if (!wasActive && !retained) { closed = false; transition(NativeState.Idle) }
+        if (!wasActive && !retained) {
+            automaticRetries = 0
+            closed = false
+            transition(NativeState.Idle)
+        }
         refresh()
     }
 
@@ -81,6 +90,7 @@ internal class NativeCardController(
             return
         }
         if (!gate.ready || !visible || !canDisplay()) {
+            cancelRetry()
             val token = generation
             if ((state == NativeState.Loading || state == NativeState.Loaded) && !retainBoundAd() && generation == token) {
                 releaseToIdle(retentionFallbackReason ?: "native_temporarily_unavailable")
@@ -106,13 +116,39 @@ internal class NativeCardController(
                 if (!releaseToIdle("native_retention_resume_unsupported")) return
             }
         }
-        if (state == NativeState.Idle) start()
+        if (state == NativeState.Idle) start() else scheduleRetry()
     }
 
     fun retry() {
         if (state !is NativeState.Failed || !eligible() || closed) return
+        cancelRetry()
+        automaticRetries = 0
         transition(NativeState.Idle)
         refresh()
+    }
+
+    private fun scheduleRetry() {
+        val failed = state as? NativeState.Failed ?: return
+        if (failed.reason !in RETRYABLE_FAILURES || !eligible() || retryTask != null || automaticRetries >= 3) return
+        val token = generation
+        lateinit var action: Runnable
+        action = Runnable {
+            if (retryTask !== action) return@Runnable
+            retryTask = null
+            if (generation == token && state == failed && eligible()) {
+                automaticRetries++
+                transition(NativeState.Idle)
+                refresh()
+            }
+        }
+        retryTask = action
+        schedule(action, 2_000L shl automaticRetries)
+    }
+
+    private fun cancelRetry() {
+        val action = retryTask
+        retryTask = null
+        action?.let(unschedule)
     }
 
     fun sizeChanged() {
@@ -192,7 +228,10 @@ internal class NativeCardController(
                         runCatching { result.setCallbacks(callbacks); render(result) { generation == token && eligible() } }.fold(
                             onSuccess = {
                                 if (generation == token) {
-                                    if (eligible()) transition(NativeState.Loaded) else refresh()
+                                    if (eligible()) {
+                                        automaticRetries = 0
+                                        transition(NativeState.Loaded)
+                                    } else refresh()
                                 }
                             },
                             onFailure = { error ->
@@ -241,7 +280,10 @@ internal class NativeCardController(
         val released = release(reason, reportCancellation = false)
         events?.fail(reason, code)
         if (events == null) oldSlot?.end(reason)
-        if (generation == released && state == failed) runCatching { onStateChanged(failed) }
+        if (generation == released && state == failed) {
+            runCatching { onStateChanged(failed) }
+            if (generation == released && state == failed) scheduleRetry()
+        }
     }
 
     private fun endCycle(reason: String) {
@@ -261,6 +303,7 @@ internal class NativeCardController(
     }
 
     private fun release(reason: String, reportCancellation: Boolean = true): Long {
+        cancelRetry()
         val released = ++generation
         val oldDelivery = delivery
         val oldLoad = loading
@@ -283,6 +326,11 @@ internal class NativeCardController(
         if (state == NativeState.Destroyed || state == next) return
         state = next
         runCatching { onStateChanged(next) }
+    }
+
+    private companion object {
+        val RETRYABLE_FAILURES = setOf("no_fill", "native_load_timeout", "native_bid_timeout",
+            "native_no_bid_candidate", "native_load_failed", "native_render_failed")
     }
 }
 

@@ -36,6 +36,42 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
 private const val NATIVE_CONSENT_GENERATION = "cashcraft_native_consent_generation"
+private const val NATIVE_INVENTORY_SESSION = "cashcraft_native_inventory_session"
+
+/** A foreign SDK head must not hide this inventory's valid candidates. */
+internal fun <T> findTopOnNativeCache(
+    caches: List<T>?,
+    generation: Long,
+    sessionId: String? = null,
+    localExtra: (T) -> Map<String, Any?>?,
+): T? = caches?.firstOrNull { info ->
+    val extra = localExtra(info)
+    extra?.get(NATIVE_CONSENT_GENERATION) == generation &&
+        (sessionId == null || extra[NATIVE_INVENTORY_SESSION] == sessionId)
+}
+
+/** SDK 按共享队列取出对象；候选查询不提供独占领取保证。 */
+internal fun <T> takeTopOnNativeCache(
+    maxAttempts: Int,
+    isCurrent: () -> Boolean,
+    poll: () -> T?,
+    accept: (T) -> Boolean,
+    discard: (T) -> Unit,
+): T? {
+    // ponytail: 每轮最多领取四条；更大的共享队列交由库存退避分轮恢复，避免主线程无限清空。
+    repeat(maxAttempts.coerceIn(0, 4)) {
+        if (!isCurrent()) return null
+        val ad = poll() ?: return null
+        try {
+            if (isCurrent() && accept(ad) && isCurrent()) return ad
+        } catch (failure: Throwable) {
+            discard(ad)
+            throw failure
+        }
+        discard(ad)
+    }
+    return null
+}
 
 internal class TopOnNativeProvider : NativeProvider {
     override fun load(
@@ -68,15 +104,15 @@ internal class TopOnNativeProvider : NativeProvider {
             override fun onNativeAdLoaded() {
                 NativeMainThread.run {
                     if (completion.get()) return@run
-                    val quotedGeneration = try {
+                    val candidate = try {
                         check(requestGeneration == NativeAdCache.generation) { "native_consent_changed" }
                         clearStaleSdkAds(loader, requestGeneration)
-                        loader.checkAdStatus().getTUTopAdInfo()?.localExtra?.get(NATIVE_CONSENT_GENERATION)
+                        findTopOnNativeCache(loader.checkValidAdCaches(), requestGeneration) { it?.localExtra }
                     } catch (failure: Throwable) {
                         if (finish()) callbacks.failed(failure.message ?: "native_load_setup_failed")
                         return@run
                     }
-                    if (quotedGeneration != requestGeneration) {
+                    if (candidate == null) {
                         if (refresh != null) return@run
                         if (refreshed) {
                             if (finish()) callbacks.failed("native_consent_generation_mismatch")
@@ -104,14 +140,9 @@ internal class TopOnNativeProvider : NativeProvider {
                     var initialized: TopOnNativeAd? = null
                     val handle = try {
                         check(requestGeneration == NativeAdCache.generation) { "native_consent_changed" }
-                        val ad = loader.nativeAd
-                            ?: throw IllegalStateException("native_ad_missing_after_load")
+                        val ad = takeOwnedAd(loader, requestGeneration, request.position)
+                            ?: throw IllegalStateException("native_owned_inventory_unavailable")
                         acquired = ad
-                        // 同placement共享缓存可能返回旧请求对象，不能把本次回调当成广告的许可代次。
-                        check(requestGeneration == NativeAdCache.generation &&
-                            ad.adInfo?.localExtra?.get(NATIVE_CONSENT_GENERATION) == requestGeneration) {
-                            "native_consent_generation_mismatch"
-                        }
                         TopOnNativeAd(ad, request, widthPx, callbacks).also {
                             initialized = it
                             it.installListeners()
@@ -195,7 +226,7 @@ internal class TopOnNativeProvider : NativeProvider {
             val extra = mutableMapOf<String, Any>(
                 TUAdConst.KEY.AD_CHOICES_PLACEMENT to TUAdConst.AD_CHOICES_PLACEMENT_TOP_RIGHT,
                 NATIVE_CONSENT_GENERATION to requestGeneration,
-                "cashcraft_native_inventory_session" to sessionId,
+                NATIVE_INVENTORY_SESSION to sessionId,
             )
             key.templateRatio?.let { ratio ->
                 val width = checkNotNull(key.widthPx)
@@ -207,7 +238,7 @@ internal class TopOnNativeProvider : NativeProvider {
                 loader.setAdListener(listener)
                 clearStaleSdkAds(loader, requestGeneration)
                 val previous = loader.checkValidAdCaches()?.filter {
-                    val session = it?.localExtra?.get("cashcraft_native_inventory_session")
+                    val session = it?.localExtra?.get(NATIVE_INVENTORY_SESSION)
                     session is String && session != sessionId
                 }
                 if (!previous.isNullOrEmpty()) loader.clearCache(previous)
@@ -225,27 +256,21 @@ internal class TopOnNativeProvider : NativeProvider {
             }
         }
 
-        fun available(): Boolean {
-            if (closed || requestGeneration != NativeAdCache.generation) return false
+        private fun readyInfo(): TUAdInfo? {
+            if (closed || requestGeneration != NativeAdCache.generation) return null
             clearStaleSdkAds(loader, requestGeneration)
-            val extra = loader.checkAdStatus().getTUTopAdInfo()?.localExtra
-            return extra?.get(NATIVE_CONSENT_GENERATION) == requestGeneration &&
-                extra["cashcraft_native_inventory_session"] == sessionId
+            return findTopOnNativeCache(loader.checkValidAdCaches(), requestGeneration, sessionId) { it?.localExtra }
         }
 
-        fun peekIdentity(): String? = if (available())
-            loader.checkAdStatus().getTUTopAdInfo()?.requestId else null
+        fun available(): Boolean = readyInfo() != null
+
+        fun peekIdentity(): String? = readyInfo()?.requestId
 
         fun take(request: ResolvedNativeRequest, widthPx: Int, callbacks: NativeCallbacks): NativeAdHandle? {
-            if (!available()) return null
-            val ad = loader.nativeAd ?: return null
+            val ad = takeOwnedAd(loader, requestGeneration, request.position, sessionId) { !closed }
+                ?: return null
             var handle: TopOnNativeAd? = null
             return try {
-                check(requestGeneration == NativeAdCache.generation &&
-                    ad.adInfo?.localExtra?.get(NATIVE_CONSENT_GENERATION) == requestGeneration &&
-                    ad.adInfo?.localExtra?.get("cashcraft_native_inventory_session") == sessionId) {
-                    "native_consent_generation_mismatch"
-                }
                 TopOnNativeAd(ad, request, widthPx, callbacks).also {
                     handle = it
                     it.installListeners()
@@ -267,7 +292,7 @@ internal class TopOnNativeProvider : NativeProvider {
         private fun clearOwnedCaches() {
             // SDK 请求不可取消；只清理当前会话明确标记的缓存，不消费外部共享对象。
             val owned = loader.checkValidAdCaches()?.filter {
-                it?.localExtra?.get("cashcraft_native_inventory_session") == sessionId
+                it?.localExtra?.get(NATIVE_INVENTORY_SESSION) == sessionId
             }
             if (!owned.isNullOrEmpty()) loader.clearCache(owned)
         }
@@ -285,6 +310,34 @@ internal class TopOnNativeProvider : NativeProvider {
         }
         // 只选择清理本库明确标记的旧对象；不取光共享缓存，也不声称取消SDK在途网络请求。
         stale?.let { loader.clearCache(it) }
+    }
+
+    private fun takeOwnedAd(
+        loader: TUNative,
+        requestGeneration: Long,
+        position: String,
+        sessionId: String? = null,
+        isActive: () -> Boolean = { true },
+    ): NativeAd? {
+        if (!isActive() || requestGeneration != NativeAdCache.generation) return null
+        clearStaleSdkAds(loader, requestGeneration)
+        val caches = loader.checkValidAdCaches()
+        if (findTopOnNativeCache(caches, requestGeneration, sessionId) { it?.localExtra } == null) return null
+        return takeTopOnNativeCache(
+            maxAttempts = caches?.size ?: 0,
+            isCurrent = { isActive() && requestGeneration == NativeAdCache.generation },
+            poll = { loader.nativeAd },
+            accept = { ad ->
+                val info = ad.adInfo
+                val owned = findTopOnNativeCache(listOf(info), requestGeneration, sessionId) { it?.localExtra } != null
+                Ads.nativeLog(position, debug = true) {
+                    if (owned) "TopOn 实际领取对象身份匹配 | 来源=${info?.networkName} | SDK请求=${info?.requestId}"
+                    else "TopOn 返回其他库存，释放后继续领取 | 来源=${info?.networkName} | SDK请求=${info?.requestId}"
+                }
+                owned
+            },
+            discard = ::releaseTopOnAd,
+        )
     }
 
     private fun releaseTopOnAd(ad: NativeAd) {

@@ -7,7 +7,14 @@ import android.widget.FrameLayout
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import com.cashcraft.ads.mediation.internal.AdLoadClock
+import com.cashcraft.ads.mediation.internal.AdLoadSession
+import com.cashcraft.ads.mediation.internal.BannerSlot
+import com.cashcraft.ads.mediation.internal.admob.AdMobBannerEvents
 import com.google.android.libraries.ads.mobile.sdk.banner.AdSize
+import com.google.android.libraries.ads.mobile.sdk.banner.AdView
+import com.google.android.libraries.ads.mobile.sdk.banner.BannerAd
+import com.google.android.libraries.ads.mobile.sdk.banner.BannerAdRefreshCallback
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -15,6 +22,8 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import java.lang.ref.WeakReference
+import java.lang.reflect.Proxy
 import kotlin.math.ceil
 
 @RunWith(RobolectricTestRunner::class)
@@ -165,6 +174,49 @@ class AdsBannerViewTest {
         } finally {
             compact.destroy()
             large.destroy()
+        }
+    }
+
+    @Test
+    fun `refresh requests layout for the visible ad but ignores an obsolete generation`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val banner = AdsBannerView(activity, PageOwner(), request())
+        val child = AdView(activity)
+        fun field(name: String) = AdsBannerView::class.java.getDeclaredField(name).apply { isAccessible = true }
+        field("adView").set(banner, child)
+        val generation = field("generation").getLong(banner)
+        val listener = AdEventListener {}
+        val slot = BannerSlot(listener, AdPlatform.ADMOB, AdMediationMode.ADMOB,
+            "page", "test-unit", "slot", 1L, revenueListener = AdRevenueListener {})
+        val load = AdLoadSession(listener, AdPlatform.ADMOB, AdMediationMode.ADMOB, AdFormat.BANNER,
+            "page", "test-unit", "request", "request", 1L, null, 0L, AdLoadClock { 1L }, slotId = "slot")
+        val relay = AdMobBannerEvents(slot, load)
+        var refresh: BannerAdRefreshCallback? = null
+        val ad = Proxy.newProxyInstance(BannerAd::class.java.classLoader, arrayOf(BannerAd::class.java)) { _, method, args ->
+            if (method.name == "setBannerAdRefreshCallback") refresh = args?.get(0) as BannerAdRefreshCallback
+            null
+        } as BannerAd
+        val companion = checkNotNull(field("Companion").get(null))
+        companion.javaClass.getDeclaredMethod("installCallbacks", BannerAd::class.java,
+            AdMobBannerEvents::class.java, WeakReference::class.java, java.lang.Long.TYPE)
+            .apply { isAccessible = true }.invoke(companion, ad, relay, WeakReference(banner), generation)
+        try {
+            shadowOf(Looper.getMainLooper()).idle()
+            child.layout(0, 0, 320, 50)
+            assertEquals(View.VISIBLE, child.visibility)
+            assertFalse(child.isLayoutRequested)
+            checkNotNull(refresh).onAdRefreshed()
+            assertFalse(child.isLayoutRequested) // SDK callbacks must dispatch layout to main.
+            shadowOf(Looper.getMainLooper()).idle()
+            assertTrue("A refresh must lay out replacement content even when already visible", child.isLayoutRequested)
+
+            child.layout(0, 0, 320, 50)
+            checkNotNull(refresh).onAdRefreshed()
+            field("generation").setLong(banner, generation + 1)
+            shadowOf(Looper.getMainLooper()).idle()
+            assertFalse("A queued old refresh must not touch a replacement ad", child.isLayoutRequested)
+        } finally {
+            banner.destroy()
         }
     }
 

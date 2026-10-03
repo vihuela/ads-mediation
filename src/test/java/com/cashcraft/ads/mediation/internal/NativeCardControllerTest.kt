@@ -8,6 +8,53 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NativeCardControllerTest {
+    @Test fun `transient failures retry at two four eight seconds then stop until explicit retry`() {
+        val h = Host().start()
+        for ((index, delay) in listOf(2_000L, 4_000L, 8_000L).withIndex()) {
+            h.loads.last().failed("native_bid_timeout")
+            repeat(5) { h.controller.refresh() }
+            assertEquals(1, h.tasks.size)
+            h.advance(delay - 1)
+            assertEquals(index + 1, h.loads.size)
+            h.advance(1)
+            assertEquals(index + 2, h.loads.size)
+        }
+        h.loads.last().failed("no_fill")
+        h.advance(60_000)
+        h.controller.refresh()
+        assertEquals(4, h.loads.size)
+        assertTrue(h.tasks.isEmpty())
+        h.controller.retry()
+        h.loads.last().failed("native_load_timeout")
+        h.advance(2_000)
+        assertEquals(6, h.loads.size)
+    }
+
+    @Test fun `hidden destroyed and stale retry callbacks cannot start or replace a live retry`() {
+        val h = Host().start()
+        h.loads.last().failed("native_load_failed")
+        val stale = h.tasks.keys.single()
+        h.display = false
+        h.controller.refresh()
+        assertTrue(h.tasks.isEmpty())
+        h.advance(10_000)
+        h.display = true
+        h.controller.refresh()
+        stale.run()
+        h.advance(2_000)
+        assertEquals(2, h.loads.size)
+        h.loads.last().loaded(Ad())
+        h.advance(60_000)
+        assertEquals(2, h.loads.size)
+        h.controller.update(false, true)
+        h.controller.update(true, true)
+        h.loads.last().failed("native_load_failed")
+        h.controller.destroy()
+        h.advance(60_000)
+        assertTrue(h.tasks.isEmpty())
+        assertEquals(3, h.loads.size)
+    }
+
     @Test fun `initial flags and repeated notifications never create extra loads`() {
         val h = Host()
         h.controller.update(false, true)
@@ -125,6 +172,7 @@ class NativeCardControllerTest {
         assertEquals(1, h.loads.size)
         assertEquals(1, h.events.count { it.name == AdEventName.SHOW_FAIL })
         assertEquals("filled", h.events.single { it.name == AdEventName.LOAD_RESULT }.result)
+        assertTrue(h.tasks.isEmpty()) // Unsupported layouts cannot be repaired by requesting more ads.
     }
 
     @Test fun `unexpected render exception reports a stable failure`() {
@@ -416,6 +464,17 @@ class NativeCardControllerTest {
         var gate = NativeAvailability(ready = true)
         var display = true
         var now = 0L
+        val tasks = linkedMapOf<Runnable, Long>()
+        fun advance(millis: Long) {
+            val end = now + millis
+            while (true) {
+                val next = tasks.entries.filter { it.value <= end }.minByOrNull { it.value } ?: break
+                now = next.value
+                tasks.remove(next.key)
+                next.key.run()
+            }
+            now = end
+        }
         var renders = 0
         var cancellations = 0
         var removes = 0
@@ -435,6 +494,7 @@ class NativeCardControllerTest {
             render = { _, current -> renderError?.let { error(it) }; if (current()) renders++ }, removeView = { removes++ }, clock = { now },
             dispatch = { it() }, interaction = { _, _ -> }, onStateChanged = { onState(it) },
             retentionPolicy = policy, onRetentionFallback = { fallbacks += it },
+            schedule = { action, delay -> tasks[action] = now + delay }, unschedule = { tasks.remove(it) },
         )
         fun start(): Host { controller.update(true, true); return this }
     }

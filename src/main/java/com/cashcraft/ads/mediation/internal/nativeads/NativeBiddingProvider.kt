@@ -84,6 +84,8 @@ internal class NativeAuction(
         val observation = subscribe { dispatch(::loadReadyCandidates) }
         if (finished || cancelled) observation.close() else subscription = observation
         loadReadyCandidates()
+        // 两端先各领取一次现有库存，再决定；未命中的加载继续由共享库存补货。
+        if (request.preferCachedAds && candidates.any { it.ad != null }) finish()
     }
 
     private fun loadReadyCandidates() {

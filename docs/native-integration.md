@@ -28,21 +28,28 @@ val provider = BiddingProviderConfig(
     topon = TopOnProviderConfig(topOnIds.copy(nativePlacementId = topOnNativeId)),
 )
 Ads.initialize(application, AdsConfig(provider = provider))
+Ads.preloadNative()
 ```
+
+`Ads.preloadNative()` 预热初始化配置中的自渲染库存，可在 `initialize` 后立即调用。它独立等待 UMP 允许、应用前台和每个平台 READY，不占用 `observeInitialization` 的单一观察者，也不等待另一平台初始化成功。重复调用合并已有库存，不创建 View、不产生曝光。没有页面需求时沿用五分钟前台闲置及后台关闭；TopOn 模板仍由携带实际尺寸和比例的页面请求准备。
+
+页面命中未渲染保留区时也会建立库存需求：已闲置关闭的 SDK 会话重新启动，仍存活的会话保活；当前缓存对象继续立即交付，页面释放时结束需求。
 
 smoke 来源通过构建参数 `-PnativeSmoke=true -PnativePlatform=admob|topon|bidding` 在 Application 初始化时选择；TopOn ID 来自既有 `nativeTestConfig`。Activity 不再读取 `platform/placement/bidding` 来覆盖广告请求。
 
 每端先独占取出兼容的缓存候选，未命中时在就绪后并行加载。默认最多等待 7 秒（`bidTimeoutMillis` 可调）；另一端初始化未完成也占用这一期限。一端失败、未配置或超时，有可用候选即可展示；两端都无可用对象则 Failed。选择后直接交付同一个获胜对象，将有效、未渲染的落选对象放入跨 Activity 缓存。页面销毁或隐藏取消本轮等待；已取得但尚未渲染的有效候选可保留，提供方取消后无法安全交付的 SDK 迟到对象释放。已进入保留区的对象不归旧页面销毁。
 
+需要优先展示现有库存的位置可设置 `NativeRequest(preferCachedAds = true, position = ...)`：先同步领取两端兼容、有效的缓存（包括 SDK 预加载库存及未渲染保留区），两端都有就立即比价，只有一端有就立即展示；两端均无缓存才沿用限时竞价。未命中端已启动的库存准备继续运行，不阻塞本次展示。默认仍为 `false`，HealthTracker 仅在退出弹窗启用。日志中的“备用库存可领取”描述尚未领取的库存；领取后暂时为空不代表本次展示失败，领取动作会单独记录。
+
 比较口径为 **USD/次展示**。TopOn 展示前使用 `getEcpm(USD) / 1000`，读取失败、负数或非有限值记为未知价格；`getPublisherRevenue()` 不参与比价。AdMob 使用锁定 GMA Next-Gen 1.2.1 的已加载 Native 对象价格路径，按配置读取 micros 和 USD 币种；版本、字段或币种不匹配即未知价格，不猜值。已知有效价格优先于未知；真实 0 仍是有效价格；同价或均未知时固定选 AdMob。无填充不会作为 0 价候选。报价仅用于选择，收入仍由平台 paid 回调上报，不能把报价当作 ILRD。
 
-自定义布局不接收 TopOn 模板；默认布局未给出已确认的 `topOnTemplateAspectRatio` 也不接收模板。这些不兼容模板在比价前释放，另一端可继续获胜。自渲染的素材完整性仍在绑定时校验，渲染失败会明确 Failed，业务可在合资格时调用 `retry()`。
+自定义布局不接收 TopOn 模板；默认布局未给出已确认的 `topOnTemplateAspectRatio` 也不接收模板。这些不兼容模板在比价前释放，另一端可继续获胜。自渲染的素材完整性仍在绑定时校验，渲染失败会明确 Failed。无填充、加载/竞价超时、无候选、一般加载/渲染异常在页面仍合资格时按 2/4/8 秒最多额外重试三次；隐藏、失焦、许可失效或销毁取消定时器。配置、布局及模板兼容错误不自动重试。成功加载或业务页面重新激活恢复自动重试预算，重复布局通知不重置预算；业务也可在修正问题后显式 `retry()`。
 
 缓存由库自动管理：每个平台/广告位最多 1 条，总计最多 4 条；超出时释放最早保留的一条。只有尚未渲染的对象可缓存，已经展示的卡片不会重新出售。AdMob 使用原始加载时刻的一小时期限；TopOn 取用前检查 SDK `isValid`，并从首次入区起设置最长一小时的本层保留上限；跨页、领取后再次入区均不续期。TopOn 领取后仍由原句柄携带该期限，竞价等待期间和首次渲染前继续检查，不能因离区而重新获得一小时。该上限不是 TopOn 广告的虚构加载时间；期限未知的 AdMob 对象不入区。到期及许可撤回主动清理。
 
 加载阶段不捕获业务 Activity：TopOn 使用 Application Context，AdMob Next-Gen 的 loader 本身不接收 Activity。缓存期间解绑旧回调；取出后安装本轮回调，以当前 Activity 新建容器及布局。模板还需匹配加载宽度与已确认比例，不能把 A 页已渲染的 View 移到 B 页。单平台请求也可消费同广告位的落选缓存。页面获取保留独立 requestId/sessionId；缓存命中与恢复不产生 LOAD_REQUEST/LOAD_RESULT。库存准备事件使用 preload_native，不回填业务 position；持续预加载的 SDK 自动补货不伪造本层网络请求，SDK 未提供的逐对象加载身份保持未知。
 
-许可失效先递增本层库存代次；即使后来恢复允许，旧请求迟到的候选也不能重新入区。TopOn 同 placement 的 SDK 缓存在不同 `TUNative` 实例间共享，因此请求同时在 `localExtra` 标记许可代次。准备/领取前用锁定 SDK 的 `clearCache(List<TUAdInfo>)` 选择清理本库标记的旧对象，领取后再核对实际对象标记；不取光外部共享缓存、不声称取消 SDK 在途网络。旧成功回调没有当前代次候选时，退出 SDK 回调栈后只刷新一次；取消会移除该任务，仍无法关联则明确失败，不套用本次请求的许可。
+许可失效先递增本层库存代次；即使后来恢复允许，旧请求迟到的候选也不能重新入区。TopOn 同 placement 的 SDK 缓存在不同 `TUNative` 实例间共享，因此请求同时在 `localExtra` 标记许可代次。准备/领取前用锁定 SDK 的 `clearCache(List<TUAdInfo>)` 选择清理本库标记的旧对象，领取后再核对实际对象标记；不无界清空共享缓存、不声称取消 SDK 在途网络。库存从 `checkValidAdCaches()` 中确认存在许可代次和库存会话匹配的候选，再按 SDK 默认顺序领取并验证实际返回对象；不依赖 `TUShowConfig.Builder.adInfo(candidate)` 指定缓存，该路径在锁定 SDK 的真机验证中仍可能返回其他队首。无标记或其他会话的已领取对象释放后继续尝试，每轮最多领取当前缓存条数且不超过四条，不因后续补货无限清空共享队列；合法对象使用自身价格参与比价。未能取得合法对象时撤销库存就绪状态，沿用 2/4/8 秒最多三次退避；SDK 加载成功不重置失败预算，实际成功领取或显式恢复才重置。旧成功回调没有当前代次候选时，退出 SDK 回调栈后只刷新一次；取消会移除该任务，仍无法关联则明确失败，不套用本次请求的许可。
 
 TopOn 文档的构造参数接受 Context 并建议 Activity；Pangle 明确要求渲染容器使用 Activity。本实现参照 remax 的 Application 加载方式，实际跨 Activity 展示能力仍须逐来源验收，不能由 `isValid` 或编译通过替代。测试入口 `NativeCacheTransferTest` 检查 A 加载→保留对象→A 销毁→B 命中同一个对象→真实曝光，以及旧回调不再收到曝光。详见验证记录。
 

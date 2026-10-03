@@ -7,6 +7,8 @@ data class NativeRequest(
     val topOnTemplateAspectRatio: Float? = null,
     /** 竞价最长等待时间；到期后已加载广告可参与选择。 */
     val bidTimeoutMillis: Long = 7_000,
+    /** 有可用缓存时立即选择；两端均无缓存时仍按竞价期限等待。 */
+    val preferCachedAds: Boolean = false,
 ) {
     internal fun failureReason(): String? = when {
         position.isBlank() -> "invalid_position"
@@ -25,6 +27,7 @@ internal data class ResolvedNativeRequest(
     val admobAdUnitId: String? = null,
     val topOnPlacementId: String? = null,
     val bidTimeoutMillis: Long = 7_000,
+    val preferCachedAds: Boolean = false,
 ) {
     val isBidding: Boolean get() = platform == null && admobAdUnitId != null && topOnPlacementId != null
 
@@ -38,8 +41,9 @@ internal data class ResolvedNativeRequest(
     }
 
     fun candidates(): List<ResolvedNativeRequest> = if (platform != null) listOf(this) else buildList {
-        admobAdUnitId?.let { add(ResolvedNativeRequest(AdPlatform.ADMOB, it, position)) }
-        topOnPlacementId?.let { add(ResolvedNativeRequest(AdPlatform.TOPON, it, position, topOnTemplateAspectRatio)) }
+        admobAdUnitId?.let { add(ResolvedNativeRequest(AdPlatform.ADMOB, it, position, preferCachedAds = preferCachedAds)) }
+        topOnPlacementId?.let { add(ResolvedNativeRequest(AdPlatform.TOPON, it, position, topOnTemplateAspectRatio,
+            preferCachedAds = preferCachedAds)) }
     }
 }
 
@@ -60,6 +64,7 @@ internal fun AdProviderConfig.resolveNativeRequest(request: NativeRequest): Reso
         admobAdUnitId = admobId,
         topOnPlacementId = topOnId,
         bidTimeoutMillis = request.bidTimeoutMillis,
+        preferCachedAds = request.preferCachedAds,
     )
 }
 

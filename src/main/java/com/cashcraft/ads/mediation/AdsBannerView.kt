@@ -405,7 +405,7 @@ class AdsBannerView(
                     val response = snapshot(ad)
                     relay.prepareLoaded(response)
                     val configurationError = runCatching {
-                        installCallbacks(ad, relay)
+                        installCallbacks(ad, relay, owner, generation)
                         registerBanner?.invoke(ad)
                     }.exceptionOrNull()
                     if (configurationError != null) {
@@ -434,7 +434,12 @@ class AdsBannerView(
                 }
             }
 
-        fun installCallbacks(ad: BannerAd, relay: AdMobBannerEvents) {
+        fun installCallbacks(
+            ad: BannerAd,
+            relay: AdMobBannerEvents,
+            owner: WeakReference<AdsBannerView>,
+            generation: Long,
+        ) {
             val weakAd = WeakReference(ad)
             ad.adEventCallback = object : BannerAdEventCallback {
                 override fun onAdImpression() {
@@ -458,7 +463,11 @@ class AdsBannerView(
             ad.bannerAdRefreshCallback = object : BannerAdRefreshCallback {
                 override fun onAdRefreshed() {
                     val response = snapshot(weakAd.get())
-                    main.post { relay.refreshed(response) }
+                    main.post {
+                        relay.refreshed(response)
+                        // Refreshed SDK content can stay at 0x0 while the visible slot keeps its size.
+                        owner.get()?.takeIf { it.isCurrent(generation) }?.adView?.requestLayout()
+                    }
                 }
                 override fun onAdFailedToRefresh(adError: LoadAdError) {
                     val code = adError.code.toString()

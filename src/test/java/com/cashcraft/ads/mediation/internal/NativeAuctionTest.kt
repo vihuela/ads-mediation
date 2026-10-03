@@ -8,6 +8,58 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NativeAuctionTest {
+    @Test fun `cache first displays either single cached platform without waiting for the other`() {
+        for (platform in AdPlatform.entries) for (otherReady in listOf(true, false)) {
+            val cache = NativeCandidateCache({ 0 }, { _, _ -> }, {})
+            val h = Host(cache = cache, preferCachedAds = true)
+            val other = AdPlatform.entries.single { it != platform }
+            h.gates[other] = NativeAvailability(ready = otherReady)
+            val ad = Ad(platform, 1.0)
+            cache.put(h.request.candidates().single { it.platform == platform }, 320, ad)
+            h.start()
+            assertSame(ad, h.rendered)
+            assertNull(h.timer)
+            assertNull(h.observer)
+            assertEquals(if (otherReady) 1 else 0, h.loadCount)
+            assertEquals(0, ad.releases)
+            h.controller.destroy()
+            assertEquals(1, ad.releases)
+        }
+    }
+
+    @Test fun `cache first compares both cached objects and retains the actual loser`() {
+        for (winner in AdPlatform.entries) {
+            val cache = NativeCandidateCache({ 0 }, { _, _ -> }, {})
+            val h = Host(cache = cache, preferCachedAds = true)
+            val ads = h.request.candidates().associateWith { candidate ->
+                Ad(candidate.platform!!, if (candidate.platform == winner) 2.0 else 1.0)
+                    .also { cache.put(candidate, 320, it) }
+            }
+            h.start()
+            assertSame(ads.values.single { it.platform == winner }, h.rendered)
+            assertEquals(0, h.loadCount)
+            assertNull(h.timer)
+            val loser = ads.entries.single { it.key.platform != winner }
+            assertSame(loser.value, cache.take(loser.key, 320, true))
+            assertEquals(0, loser.value.releases)
+            assertEquals(1, h.events.count { it.name == AdEventName.BID_RESULT })
+            h.controller.destroy()
+            loser.value.destroy()
+        }
+    }
+
+    @Test fun `cache first with two empty caches keeps the cold auction deadline`() {
+        val h = Host(preferCachedAds = true).start()
+        assertEquals(2, h.loadCount)
+        val ad = Ad(AdPlatform.ADMOB, 1.0)
+        h.loaded(ad)
+        assertNull(h.rendered)
+        assertNotNull(h.timer)
+        h.expire()
+        assertSame(ad, h.rendered)
+        h.controller.destroy()
+    }
+
     @Test fun `selection reads current actual object price once and ignores duplicate completion`() {
         val h = Host().start()
         val google = Ad(AdPlatform.ADMOB, 100.0)
@@ -531,8 +583,10 @@ class NativeAuctionTest {
     }
 
     private class Host(private val allowTemplate: Boolean = true, private val cache: NativeCandidateCache? = null,
-        position: String = "home", var now: Long = 0L, recordLoadEvents: Boolean = true) {
-        val request = ResolvedNativeRequest(position = position, admobAdUnitId = "google-id", topOnPlacementId = "topon-id")
+        position: String = "home", var now: Long = 0L, recordLoadEvents: Boolean = true,
+        preferCachedAds: Boolean = false) {
+        val request = ResolvedNativeRequest(position = position, admobAdUnitId = "google-id", topOnPlacementId = "topon-id",
+            preferCachedAds = preferCachedAds)
         val events = mutableListOf<AdEvent>()
         val revenues = mutableListOf<AdRevenuePayload>()
         var onEvent: (AdEvent) -> Unit = {}

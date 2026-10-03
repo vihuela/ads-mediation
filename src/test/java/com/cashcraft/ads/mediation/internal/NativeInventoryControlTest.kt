@@ -292,6 +292,121 @@ class NativeInventoryControlTest {
         assertFalse(h.control.hasIncompatibleKey(key.copy(widthPx = 640)))
     }
 
+    @Test fun `TopOn ready callbacks cannot reset bounded take failure retries`() {
+        val h = Host()
+        h.control.acquire(h.key)
+        h.complete(true)
+        h.control.takeFailed(h.key)
+        assertFalse(h.control.isReady(h.key))
+
+        for (delay in listOf(2_000L, 4_000L, 8_000L)) {
+            val count = h.calls.size
+            assertEquals(listOf(h.now + delay), h.timers.values.toList())
+            h.control.takeFailed(h.key)
+            h.control.acquire(h.key)
+            h.advance(delay - 1)
+            assertEquals(count, h.calls.size)
+            h.advance(1)
+            assertEquals(count + 1, h.calls.size)
+            h.complete(true)
+            assertTrue(h.control.isReady(h.key))
+            h.control.takeFailed(h.key)
+            assertFalse(h.control.isReady(h.key))
+        }
+
+        assertEquals(4, h.calls.size)
+        assertTrue(h.timers.isEmpty())
+        h.control.acquire(h.key)
+        h.control.takeFailed(h.key)
+        h.advance(60_000)
+        assertEquals(4, h.calls.size)
+        assertTrue(h.timers.isEmpty())
+    }
+
+    @Test fun `successful consumption restores full take failure retry budget`() {
+        val h = Host()
+        h.control.acquire(h.key)
+        h.complete(true)
+        for (delay in listOf(2_000L, 4_000L)) {
+            h.control.takeFailed(h.key)
+            h.advance(delay)
+            h.complete(true)
+        }
+        assertEquals(3, h.calls.size)
+        h.control.consumed(h.key)
+        assertFalse(h.control.isReady(h.key))
+        assertEquals(4, h.calls.size)
+        h.complete(true)
+        h.control.takeFailed(h.key)
+
+        for (delay in listOf(2_000L, 4_000L, 8_000L)) {
+            val count = h.calls.size
+            h.advance(delay - 1)
+            assertEquals(count, h.calls.size)
+            h.advance(1)
+            assertEquals(count + 1, h.calls.size)
+            h.complete(true)
+            h.control.takeFailed(h.key)
+        }
+        h.advance(60_000)
+        assertEquals(7, h.calls.size)
+        assertFalse(h.control.isReady(h.key))
+        assertTrue(h.timers.isEmpty())
+    }
+
+    @Test fun `take failure ignores absent pending and AdMob inventory`() {
+        for (platform in AdPlatform.entries) {
+            val h = Host(platform)
+            h.control.takeFailed(h.key)
+            assertTrue(h.calls.isEmpty())
+            assertTrue(h.timers.isEmpty())
+            h.control.acquire(h.key)
+            val timers = h.timers.toMap()
+            h.control.takeFailed(h.key)
+            assertEquals(1, h.calls.size)
+            assertEquals(timers, h.timers)
+            h.complete(true)
+            h.control.takeFailed(h.key)
+            assertEquals(platform == AdPlatform.ADMOB, h.control.isReady(h.key))
+            assertEquals(1, h.calls.size)
+            if (platform == AdPlatform.TOPON) {
+                assertEquals(listOf(2_000L), h.timers.values.toList())
+            } else {
+                assertEquals(timers, h.timers)
+            }
+        }
+    }
+
+    @Test fun `explicit retry and environment reset restore take failure budget`() {
+        val h = Host()
+        h.control.acquire(h.key)
+        repeat(4) { index ->
+            h.complete(true)
+            h.control.takeFailed(h.key)
+            if (index < 3) h.advance(2_000L shl index)
+        }
+        h.control.retry(h.key)
+        assertEquals(5, h.calls.size)
+        h.complete(true)
+        h.control.takeFailed(h.key)
+        h.advance(1_999)
+        assertEquals(5, h.calls.size)
+        h.advance(1)
+        assertEquals(6, h.calls.size)
+        h.complete(true)
+        h.control.takeFailed(h.key)
+        h.control.updateEnvironment(false, true)
+        assertTrue(h.timers.isEmpty())
+        h.control.updateEnvironment(true, true)
+        assertEquals(7, h.calls.size)
+        h.complete(true)
+        h.control.takeFailed(h.key)
+        h.advance(1_999)
+        assertEquals(7, h.calls.size)
+        h.advance(1)
+        assertEquals(8, h.calls.size)
+    }
+
     private class Host(platform: AdPlatform = AdPlatform.TOPON) {
         data class Call(val key: NativeInventoryKey, val deadline: Long?, val complete: (Boolean) -> Unit)
         val key = NativeInventoryKey(platform, "placement")

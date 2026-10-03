@@ -85,7 +85,7 @@ internal object NativeAdCache {
                     session.prepare(checkNotNull(deadline)) { success ->
                         inventoryLoaded(key, events, success)
                         complete(success)
-                        Ads.nativeLog(key.platform.name, debug = true) { "库存状态 | 就绪=$success" }
+                        Ads.nativeLog(key.platform.name, debug = true) { "备用库存 | 可领取=$success（不代表当前展示对象状态）" }
                         inventoryChanged()
                     }
                 } else {
@@ -95,7 +95,7 @@ internal object NativeAdCache {
                     session.prepare { success ->
                         inventoryLoaded(key, events, success)
                         complete(success)
-                        Ads.nativeLog(key.platform.name, debug = true) { "库存状态 | 就绪=$success" }
+                        Ads.nativeLog(key.platform.name, debug = true) { "备用库存 | 可领取=$success（不代表当前展示对象状态）" }
                         inventoryChanged()
                     }
                 }
@@ -149,8 +149,18 @@ internal object NativeAdCache {
             !com.cashcraft.ads.mediation.internal.AdLifecycleMonitor.isAppInForeground) return null
         val key = topOnKey(request, widthPx)
         if (!control.isReady(key)) return null
-        val ad = topOnInventories[key]?.take(request, widthPx, callbacks) ?: return null
+        val ad = try {
+            topOnInventories[key]?.take(request, widthPx, callbacks)
+        } catch (error: Exception) {
+            control.takeFailed(key)
+            throw error
+        }
+        if (ad == null) {
+            control.takeFailed(key)
+            return null
+        }
         control.consumed(key)
+        Ads.nativeLog(request.position, debug = true) { "TopOn 预加载广告已领取，交给本次比价或展示；继续补货" }
         return ad
     }
 
@@ -173,6 +183,7 @@ internal object NativeAdCache {
         if (!control.isReady(key)) return null
         val ad = preloads[key]?.take(callbacks) ?: return null
         control.consumed(key)
+        Ads.nativeLog(request.position, debug = true) { "AdMob 预加载广告已领取，交给本次比价或展示；SDK 继续补货" }
         return ad
     }
 
@@ -180,21 +191,36 @@ internal object NativeAdCache {
         control.close(NativeInventoryKey(requireNotNull(request.platform), request.adUnitId))
 
 
+    fun preload(context: android.content.Context, request: ResolvedNativeRequest) {
+        require(request.topOnTemplateAspectRatio == null) { "native_preload_requires_self_rendered" }
+        val demand = if (request.platform == AdPlatform.ADMOB) acquirePreload(request)
+            else acquireTopOnInventory(context, request, 0)
+        // 预热不持有页面需求；让现有闲置计时器限制其寿命。
+        demand.close()
+    }
+
     fun load(activity: Activity, request: ResolvedNativeRequest, widthPx: Int,
         allowTemplate: Boolean, callbacks: NativeCallbacks): NativeLoad {
-        val cached = inventory.take(request, widthPx, allowTemplate)
-        if (cached != null) {
-            cached.setCallbacks(callbacks)
-            callbacks.loaded(cached)
-            return NativeLoad { }
-        }
         val key = if (request.platform == AdPlatform.ADMOB)
             NativeInventoryKey(AdPlatform.ADMOB, request.adUnitId) else topOnKey(request, widthPx)
         val hadDemand = control.hasDemand(key)
+        // 命中未渲染保留区也必须建立需求，重新启动或保活下一条库存。
         val demand = if (request.platform == AdPlatform.ADMOB) acquirePreload(request)
             else acquireTopOnInventory(activity, request, widthPx)
         // 新页面不重置另一页面仍在等待的失败轮；无活跃需求后的显式获取可重新尝试。
         if (!hadDemand) control.retry(key)
+        val cached = inventory.take(request, widthPx, allowTemplate)
+        if (cached != null) {
+            try {
+                cached.setCallbacks(callbacks)
+                callbacks.loaded(cached)
+            } catch (error: Exception) {
+                runCatching { cached.destroy() }
+                demand.close()
+                throw error
+            }
+            return NativeLoad { demand.close() }
+        }
         var settled = false
         var cancelled = false
         lateinit var receive: Runnable
@@ -236,8 +262,8 @@ internal object NativeAdCache {
         waiting.add(receive)
         // 单平台冷库存允许 SDK 完成加载；双平台仍由 NativeAuction 的七秒期限取消等待。
         handler.postDelayed(timeout, 30_000L)
-        // SDK 回调退出后再独占领取，避免消费触发补货时重入当前通知栈。
-        handler.post(receive)
+        // 缓存优先在请求入口同步领取，供本轮立即比价；SDK 后续通知仍通过 inventoryChanged 排队交付。
+        if (request.preferCachedAds) receive.run() else handler.post(receive)
         return NativeLoad {
             if (!cancelled) {
                 cancelled = true

@@ -3,6 +3,7 @@ package com.cashcraft.ads.mediation
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
+import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.View
@@ -189,6 +190,7 @@ class AdsNativeView(
         private var started = false
         private var destroyed = false
         private var subscription: AutoCloseable? = null
+        private val handler = Handler(Looper.getMainLooper())
         private var platformView: View? = null
         private var requestedWidth = 0
         private var activityResumed = (activity as? LifecycleOwner)?.lifecycle?.currentState
@@ -244,6 +246,8 @@ class AdsNativeView(
             retentionPolicy = policy,
             // 页面只领取共享库存；真实 SDK 准备事件由库存会话记录。
             recordLoadEvents = false,
+            schedule = { action, delay -> handler.postDelayed(action, delay) },
+            unschedule = handler::removeCallbacks,
             onRetentionFallback = { reason ->
                 Ads.nativeLog(request.position, warning = true) { "保留降级释放：来源未通过安全暂停或恢复" }
                 Ads.nativeLog(request.position, debug = true) { "保留降级 | 原因标识=$reason" }

@@ -179,7 +179,7 @@ class AdsConfigTest {
 
     @Test
     fun `Native 广告位仅从初始化配置解析`() {
-        val page = NativeRequest("home", topOnTemplateAspectRatio = 2f, bidTimeoutMillis = 1234)
+        val page = NativeRequest("home", topOnTemplateAspectRatio = 2f, bidTimeoutMillis = 1234, preferCachedAds = true)
         val google = AdMobProviderConfig(AdMobIds.TEST)
         val topOn = testTopOnProvider().let { it.copy(ids = it.ids.copy(nativePlacementId = "native-topon")) }
         assertEquals(listOf(AdPlatform.ADMOB), google.resolveNativeRequest(page).candidates().map { it.platform })
@@ -187,6 +187,8 @@ class AdsConfigTest {
         val both = BiddingProviderConfig(google, topOn).resolveNativeRequest(page)
         assertEquals(true, both.isBidding)
         assertEquals(1234L, both.bidTimeoutMillis)
+        assertTrue(both.preferCachedAds)
+        assertTrue(both.candidates().all { it.preferCachedAds })
         assertEquals(2f, both.candidates().last().topOnTemplateAspectRatio)
         assertEquals(listOf(AdMobIds.TEST.nativeId, "native-topon"), both.candidates().map { it.adUnitId })
         val onlyGoogle = BiddingProviderConfig(google, testTopOnProvider()).resolveNativeRequest(page)
@@ -203,7 +205,7 @@ class AdsConfigTest {
         assertEquals("invalid_native_bid_timeout", page.copy(bidTimeoutMillis = 0).failureReason())
         assertThrows(IllegalArgumentException::class.java) { google.ids.copy(nativeId = " ") }
         assertThrows(IllegalArgumentException::class.java) { topOn.ids.copy(nativePlacementId = " ") }
-        assertEquals(listOf("position", "topOnTemplateAspectRatio", "bidTimeoutMillis"),
+        assertEquals(listOf("position", "topOnTemplateAspectRatio", "bidTimeoutMillis", "preferCachedAds"),
             NativeRequest::class.java.declaredFields
                 .filterNot { it.isSynthetic || java.lang.reflect.Modifier.isStatic(it.modifiers) }
                 .map { it.name })

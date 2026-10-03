@@ -24,6 +24,7 @@ import com.cashcraft.ads.mediation.internal.UmpConsentManager
 import com.cashcraft.ads.mediation.internal.topon.TopOnAds
 import com.cashcraft.ads.mediation.internal.topon.TopOnState
 import com.cashcraft.ads.mediation.internal.nativeads.NativeAvailability
+import com.cashcraft.ads.mediation.internal.nativeads.NativeAdCache
 import com.cashcraft.ads.mediation.internal.nativeads.NativeSlot
 import com.cashcraft.ads.mediation.internal.nativeads.nativeAvailability
 import java.util.concurrent.CopyOnWriteArrayList
@@ -41,6 +42,7 @@ object Ads {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var initializationCallback: ((Boolean) -> Unit)? = null
     private val nativeReadinessListeners = CopyOnWriteArrayList<() -> Unit>()
+    private val pendingNativePreloads = linkedMapOf<AdPlatform, ResolvedNativeRequest>()
     private val providerInitializationStarted = AtomicBoolean(false)
     private val bannerProviders = BannerProviderReadiness()
 
@@ -68,6 +70,7 @@ object Ads {
     private val lifecycleListener = object : AdLifecycleMonitor.Listener {
         override fun onActivityResumed(activity: Activity) {
             gatherConsentIfNeeded(activity)
+            startPendingNativePreloads()
         }
     }
 
@@ -316,6 +319,31 @@ object Ads {
             is TopOnProviderConfig -> TopOnAds.isReady(format)
             is BiddingProviderConfig -> AdMobAds.isReady(format) || TopOnAds.isReady(format)
         }
+
+    /**
+     * 预热初始化配置中的 Native 自渲染库存，不创建页面或曝光。
+     * 可在 initialize 后立即调用；逐平台等待许可、前台和就绪，不占用初始化观察者。
+     * 重复调用合并已有库存；无页面需求时沿用五分钟闲置及后台清理规则。
+     */
+    fun preloadNative() = onMain {
+        if (!::config.isInitialized) return@onMain
+        val request = config.provider.resolveNativeRequest(NativeRequest("preload_native"))
+        if (request.failureReason() != null) return@onMain
+        request.candidates().forEach { pendingNativePreloads[requireNotNull(it.platform)] = it }
+        startPendingNativePreloads()
+    }
+
+    private fun startPendingNativePreloads() {
+        if (!AdLifecycleMonitor.isAppInForeground) return
+        pendingNativePreloads.toMap().forEach { (platform, request) ->
+            if (nativeAvailability(platform).ready) {
+                pendingNativePreloads.remove(platform)
+                runCatching { NativeAdCache.preload(application, request) }.onFailure { error ->
+                    nativeLog("预加载", warning = true, error = error) { "原生库存预热失败，页面仍可重试" }
+                }
+            }
+        }
+    }
 
     /**
      * Preloads the AdMob Banner for this measured placement.
@@ -804,6 +832,7 @@ object Ads {
         if (!consentSnapshot.canRequestAds) {
             com.cashcraft.ads.mediation.internal.nativeads.NativeAdCache.consentRevoked()
         }
+        startPendingNativePreloads()
         nativeReadinessListeners.forEach { runCatching(it) }
     }
 
