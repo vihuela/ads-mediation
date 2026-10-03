@@ -346,6 +346,26 @@ object Ads {
     }
 
     /**
+     * Resolves the default AdMob Banner configured by initialize; SDK readiness is not required.
+     * Bidding configurations use their AdMob Banner, without running a Banner auction.
+     * @throws IllegalStateException if initialize has not been called or no AdMob bannerId is configured.
+     */
+    fun bannerRequest(
+        position: String,
+        size: BannerSize = BannerSize.AnchoredAdaptive,
+    ): BannerRequest {
+        require(position.isNotBlank()) { "position must not be blank" }
+        check(::config.isInitialized) { "Call Ads.initialize before using a configured Banner" }
+        val ids = when (val provider = config.provider) {
+            is AdMobProviderConfig -> provider.ids
+            is BiddingProviderConfig -> provider.admob.ids
+            is TopOnProviderConfig -> error("topon_banner_not_supported")
+        }
+        val id = checkNotNull(ids.bannerId) { "Configure AdMobIds.bannerId before using a configured Banner" }
+        return BannerRequest(AdPlatform.ADMOB, id, position, size)
+    }
+
+    /**
      * Preloads the AdMob Banner for this measured placement.
      * With autoRefill=false, loads at most one ad once; polling never replenishes it.
      */

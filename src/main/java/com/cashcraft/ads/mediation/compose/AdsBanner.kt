@@ -22,10 +22,30 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.cashcraft.ads.mediation.AdPlatform
+import com.cashcraft.ads.mediation.Ads
 import com.cashcraft.ads.mediation.AdsBannerView
 import com.cashcraft.ads.mediation.BannerRequest
 import com.cashcraft.ads.mediation.BannerSize
 import com.cashcraft.ads.mediation.BannerState
+
+/** Uses the default bannerId from Ads.initialize; loading and release follow the page owner. */
+@Composable
+fun AdsBanner(
+    position: String,
+    modifier: Modifier = Modifier,
+    size: BannerSize = BannerSize.AnchoredAdaptive,
+    lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
+    active: Boolean = true,
+    visible: Boolean = true,
+    onState: (BannerState) -> Unit = {},
+) {
+    val request = if (LocalInspectionMode.current) {
+        BannerRequest(AdPlatform.ADMOB, "preview", position, size)
+    } else {
+        Ads.bannerRequest(position, size)
+    }
+    AdsBanner(request, modifier, lifecycleOwner, active, visible, onState)
+}
 
 /** Owns one Banner View for this Activity, page owner, and request value. */
 @Composable
@@ -86,5 +106,5 @@ private fun Context.findActivity(): Activity = when (this) {
 @Preview(showBackground = true)
 @Composable
 private fun AdsBannerPreview() {
-    AdsBanner(BannerRequest(AdPlatform.ADMOB, "preview", "preview", BannerSize.Standard320x50))
+    AdsBanner(position = "preview")
 }

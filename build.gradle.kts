@@ -67,6 +67,7 @@ dependencies {
     api(libs.androidx.lifecycle.runtime)
     api(libs.androidx.compose.ui)
     api(libs.androidx.lifecycle.runtime.compose)
+    api(libs.androidx.fragment)
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.ui.tooling.preview)
     androidTestCompileOnly(files(

@@ -12,10 +12,8 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import com.cashcraft.ads.mediation.AdPlatform
-import com.cashcraft.ads.mediation.AdsBannerView
-import com.cashcraft.ads.mediation.BannerRequest
 import com.cashcraft.ads.mediation.BannerSize
+import com.cashcraft.ads.mediation.bindBanner
 
 /** A Fragment View owner is replaced on View recreation, even when its Activity survives. */
 class TraditionalBannerActivity : FragmentActivity() {
@@ -69,8 +67,6 @@ class TraditionalBannerActivity : FragmentActivity() {
 }
 
 class TraditionalBannerFragment : Fragment() {
-    private var banner: AdsBannerView? = null
-
     override fun onCreateView(
         inflater: android.view.LayoutInflater,
         container: ViewGroup?,
@@ -78,16 +74,14 @@ class TraditionalBannerFragment : Fragment() {
     ): View = FrameLayout(requireContext())
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        val request = BannerRequest(
-            AdPlatform.ADMOB,
-            "ca-app-pub-3940256099942544/9214589741",
-            "smoke_fragment",
-            if (requireActivity().intent.getBooleanExtra("standard_banner", false)) BannerSize.Standard320x50
-                else BannerSize.AnchoredAdaptive,
-        )
         val state = TextView(requireContext())
-        val newBanner = AdsBannerView(requireActivity(), viewLifecycleOwner, request) { state.text = it.toString() }
-        banner = newBanner
+        val bannerContainer = FrameLayout(requireContext())
+        val newBanner = bindBanner(
+            bannerContainer,
+            position = "smoke_fragment",
+            size = if (requireActivity().intent.getBooleanExtra("standard_banner", false)) BannerSize.Standard320x50
+                else BannerSize.AnchoredAdaptive,
+        ) { state.text = it.toString() }
         var narrow = false
         (view as FrameLayout).addView(LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
@@ -102,14 +96,9 @@ class TraditionalBannerFragment : Fragment() {
             })
         })
         view.addView(
-            newBanner,
+            bannerContainer,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM),
         )
     }
 
-    override fun onDestroyView() {
-        banner?.destroy()
-        banner = null
-        super.onDestroyView()
-    }
 }

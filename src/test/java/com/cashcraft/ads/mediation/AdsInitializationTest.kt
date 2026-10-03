@@ -56,6 +56,42 @@ class AdsInitializationTest {
     }
 
     @Test
+    fun `configured Banner resolves before SDK readiness and keeps the requested position and size`() {
+        initializePending()
+        assertEquals(AdsState.INITIALIZING, Ads.state)
+        assertEquals(
+            BannerRequest(AdPlatform.ADMOB, checkNotNull(AdMobIds.TEST.bannerId), "footer", BannerSize.AnchoredAdaptive),
+            Ads.bannerRequest("footer"),
+        )
+        assertEquals(BannerSize.Standard320x50, Ads.bannerRequest("footer", BannerSize.Standard320x50).size)
+        assertThrows(IllegalArgumentException::class.java) { Ads.bannerRequest(" ") }
+    }
+
+    @Test
+    fun `configured Banner rejects missing initialization and ID without affecting explicit requests`() {
+        assertThrows(IllegalStateException::class.java) { Ads.bannerRequest("footer") }
+        Ads.initialize(RuntimeEnvironment.getApplication(), AdsConfig(
+            AdMobProviderConfig(AdMobIds.TEST.copy(bannerId = null)), loggingEnabled = false,
+        ))
+        val error = assertThrows(IllegalStateException::class.java) { Ads.bannerRequest("footer") }
+        assertTrue(error.message.orEmpty().contains("AdMobIds.bannerId"))
+        assertEquals("explicit", BannerRequest(AdPlatform.ADMOB, "explicit", "footer", BannerSize.Standard320x50).adUnitId)
+    }
+
+    @Test
+    fun `configured Banner selects only AdMob in bidding and rejects TopOn only`() {
+        Ads.initialize(RuntimeEnvironment.getApplication(), AdsConfig(
+            BiddingProviderConfig(AdMobProviderConfig(AdMobIds.TEST), topOn()), loggingEnabled = false,
+        ))
+        assertEquals(AdPlatform.ADMOB, Ads.bannerRequest("footer").platform)
+        assertEquals(AdMobIds.TEST.bannerId, Ads.bannerRequest("footer").adUnitId)
+        clearPendingInitialization()
+        Ads.initialize(RuntimeEnvironment.getApplication(), AdsConfig(topOn(), loggingEnabled = false))
+        val error = assertThrows(IllegalStateException::class.java) { Ads.bannerRequest("footer") }
+        assertEquals("topon_banner_not_supported", error.message)
+    }
+
+    @Test
     fun `repeated initialization accepts equal config and rejects changes without reporting success`() {
         val application = RuntimeEnvironment.getApplication()
         val provider = AdMobProviderConfig(AdMobIds.TEST)

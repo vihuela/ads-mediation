@@ -76,7 +76,7 @@ class SmokeActivity : ComponentActivity() {
                     if (sharedFooter) {
                         // This shell explicitly owns one common slot across both allowed destinations.
                         AdsBanner(
-                            BannerRequest(AdPlatform.ADMOB, TEST_BANNER_ID, "smoke_shared_footer", BannerSize.AnchoredAdaptive),
+                            position = "smoke_shared_footer",
                             lifecycleOwner = this@SmokeActivity,
                             active = initialActive,
                             visible = !initialHidden,

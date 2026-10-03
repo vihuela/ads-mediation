@@ -62,6 +62,7 @@ class AdsBannerView(
     private var state: BannerState? = null
     private var removeReadinessObserver: (() -> Unit)? = null
     private var stateCallback: (BannerState) -> Unit = onState
+    private var destroyListener: (() -> Unit)? = null
 
     var onState: (BannerState) -> Unit
         get() = stateCallback
@@ -104,6 +105,12 @@ class AdsBannerView(
         evaluate()
     }
 
+    /** Binding cleanup must survive replacement of the public state callback. */
+    internal fun setOnDestroyed(listener: () -> Unit) {
+        requireMain()
+        if (destroyed) listener() else destroyListener = listener
+    }
+
     fun destroy() {
         requireMain()
         if (destroyed) return
@@ -120,6 +127,9 @@ class AdsBannerView(
         // Clear before notification so reentrant calls cannot retain or revive a page callback.
         stateCallback = {}
         state = BannerState.Destroyed
+        val releaseBinding = destroyListener
+        destroyListener = null
+        releaseBinding?.invoke()
         notify(callback, BannerState.Destroyed)
     }
 

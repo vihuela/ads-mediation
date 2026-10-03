@@ -80,6 +80,8 @@ class AdsConfigTest {
         assertEquals("ca-app-pub-3940256099942544/9257395921", AdMobIds.TEST.appOpenId)
         assertEquals("ca-app-pub-3940256099942544/1033173712", AdMobIds.TEST.interstitialId)
         assertEquals("ca-app-pub-3940256099942544/5224354917", AdMobIds.TEST.rewardedId)
+        assertEquals("ca-app-pub-3940256099942544/9214589741", AdMobIds.TEST.bannerId)
+        assertThrows(IllegalArgumentException::class.java) { AdMobIds.TEST.copy(bannerId = " ") }
     }
 
     @Test

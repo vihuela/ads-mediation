@@ -28,7 +28,7 @@ val AdProviderConfig.mediationMode: AdMediationMode
         is BiddingProviderConfig -> AdMediationMode.BIDDING
     }
 
-/** Omitted full-screen IDs disable that format. AdMob Banner is configured by each BannerRequest. */
+/** Omitted full-screen IDs disable that format. Explicit BannerRequests remain independently configured. */
 fun AdProviderConfig.isFormatEnabled(format: AdFormat): Boolean = when (this) {
     is AdMobProviderConfig -> ids.isFormatEnabled(format, preload)
     is TopOnProviderConfig -> format != AdFormat.BANNER && adUnitId(format).isNotEmpty()
@@ -51,6 +51,8 @@ data class AdMobIds(
     val interstitialId: String = "",
     val rewardedId: String = "",
     val nativeId: String? = null,
+    /** Default for position-only Banner entry points; explicit BannerRequests may use another ID. */
+    val bannerId: String? = null,
 ) {
     init {
         require(applicationId.isNotBlank()) { "applicationId must not be blank" }
@@ -58,6 +60,7 @@ data class AdMobIds(
         require(interstitialId.isEmpty() || interstitialId.isNotBlank()) { "interstitialId must not be whitespace" }
         require(rewardedId.isEmpty() || rewardedId.isNotBlank()) { "rewardedId must not be whitespace" }
         require(nativeId == null || nativeId.isNotBlank()) { "nativeId must not be blank" }
+        require(bannerId == null || bannerId.isNotBlank()) { "bannerId must not be blank" }
     }
 
     companion object {
@@ -68,6 +71,7 @@ data class AdMobIds(
             interstitialId = "ca-app-pub-3940256099942544/1033173712",
             rewardedId = "ca-app-pub-3940256099942544/5224354917",
             nativeId = "ca-app-pub-3940256099942544/2247696110",
+            bannerId = "ca-app-pub-3940256099942544/9214589741",
         )
     }
 }
