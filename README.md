@@ -6,6 +6,8 @@
 
 当前稳定版本：`1.0.5`
 
+从当前源码接入五种广告的完整步骤见 [广告接入文档](docs/integration-guide.md)，包含依赖、初始化、全屏展示、Banner/Native 的 View 与 Compose 示例，以及事件、收益和常见问题。
+
 工作树新增的 AdMob Banner 与 Compose 接口尚未远程发布，参见 [Banner 接入与当前验证边界](docs/banner-integration.md)；页面 Native 卡片尚未发布，View 核心、默认/业务 XML 布局及 Compose 接入见 [Native 接入说明](docs/native-integration.md)。Native 支持单平台或双 ID 实际对象比价，与全屏竞价独立；新增只读素材工厂与默认销毁的双展示策略。真实来源尚未通过恢复验收时明确降级释放。实施状态见 [Native 验证记录](openspec/changes/refactor-native-ad-loading-and-retention/verification.md)。稳定版 `1.0.5` 不包含这些新增接口。
 
 [![打开 AI 接入提示词](https://img.shields.io/badge/AI-%E6%89%93%E5%BC%80%E5%B9%B6%E5%A4%8D%E5%88%B6%E6%8E%A5%E5%85%A5%E6%8F%90%E7%A4%BA%E8%AF%8D-2ea44f)](#10-复制给-ai完整接入提示词)
@@ -303,8 +305,10 @@ val rewardedOnly = AdMobProviderConfig(
     ids = AdMobIds(applicationId = "AdMob App ID", rewardedId = "Rewarded Ad Unit ID"),
 )
 
-// 只用 Banner：广告位 ID 由 BannerRequest 提供。
-val bannerOnly = AdMobProviderConfig(ids = AdMobIds(applicationId = "AdMob App ID"))
+// 只用 Banner：初始化配置默认广告位，页面只传 position。
+val bannerOnly = AdMobProviderConfig(
+    ids = AdMobIds(applicationId = "AdMob App ID", bannerId = "Banner Ad Unit ID"),
+)
 
 // 只用 TopOn 激励：同样省略其他 placement ID。
 val topOnRewardedOnly = TopOnProviderConfig(
@@ -318,7 +322,12 @@ val enabled = rewardedOnly.isFormatEnabled(AdFormat.REWARDED) // true
 `Ads.isReady(format)` 返回 `false`；调用立即展示或等待展示都会直接得到
 `AdShowResult.Failed("ad_format_disabled")`。激励结果中的 `rewardEarned` 为 `false`。
 未启用开屏时，即使 `autoShowAppOpen = true` 也不会启动自动开屏机会。
-Banner 仍由每个 `BannerRequest` 和页面的 `active` 控制，TopOn Banner 仍不支持。
+Banner 页面可直接使用 `AdsBanner(position = "home_bottom")`，Fragment 在 `onViewCreated`
+使用 `bindBanner(bannerContainer, position = "home_bottom")`，自动随 View owner 释放。
+便捷入口要求先调用 `Ads.initialize()` 并配置 `bannerId`，无需等待 SDK 初始化完成。
+Activity 公共底栏可用 `Ads.bannerRequest(position, size)` 配合 `AdsBannerView`；
+HealthTracker 的实际接入、紧凑尺寸及预加载约定见 [宿主接入记录](docs/banner-integration.md#healthtracker-宿主接入)。
+需要独立广告位时仍可显式传 `BannerRequest`；高级业务启停由 `active` 控制，TopOn Banner 仍不支持。
 
 TopOn：
 

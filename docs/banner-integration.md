@@ -1,7 +1,8 @@
 # Banner 接入（本次变更，尚未远程发布）
 
-正式入口支持 AdMob GMA Next-Gen 1.2.1。TopOn 请求返回
+正式入口支持 AdMob GMA Next-Gen 1.2.1。显式 TopOn 请求通过 `onState` 返回
 `AdShowResult.Failed("topon_banner_not_supported")`，不会请求 TopOn 或回退 AdMob。
+TopOn-only 配置使用 position 便捷入口时会抛出 `IllegalStateException`，见下方初始化要求。
 TopOn 的尺寸、刷新身份反例保留在 [验证记录](../openspec/changes/archive/2026-09-29-add-banner-support/verification.md)，后续单独补齐。
 
 ## 依赖与初始化
@@ -10,20 +11,178 @@ TopOn 的尺寸、刷新身份反例保留在 [验证记录](../openspec/changes
 稳定版 `1.0.5` 尚不包含这些新入口。库为 minSdk 26、compileSdk 36、JVM 17；Compose 使用 Kotlin／Compose 编译插件 2.2.21、Compose UI 1.7.6、Lifecycle Compose 2.8.7。
 
 沿用 `Ads.initialize()`，配置 AdMob 或含 AdMob 的 Bidding provider。Banner 检查 AdMob 自身初始化结果与请求前 UMP 许可；整体 Bidding 初始化成功不能放行失败的 AdMob。
-仅使用 Banner 时，只需提供 AdMob 应用 ID，三种全屏广告位 ID 都可省略：
+仅使用 Banner 时，配置 AdMob 应用 ID 和 Banner 广告位 ID，三种全屏广告位 ID 都可省略：
 
 ```kotlin
 val config = AdsConfig(
-    provider = AdMobProviderConfig(ids = AdMobIds(applicationId = "AdMob App ID")),
+    provider = AdMobProviderConfig(
+        ids = AdMobIds(
+            applicationId = "AdMob App ID",
+            bannerId = "ca-app-pub-3940256099942544/9214589741", // 官方测试 ID
+        ),
+    ),
 )
 ```
 
-此配置不会启动全屏预加载或自动开屏。Banner 广告位 ID 仍通过 `BannerRequest` 提供。
+在应用中沿用 `Ads.initialize()` 传入配置，再使用下面的便捷入口；调用前必须已经调用
+`Ads.initialize()`，无需等待初始化完成。便捷入口从 AdMob provider 或 Bidding provider 中的
+AdMob 配置读取 `bannerId`，Banner 不参与全屏竞价。
+未调用初始化、缺少 Banner ID 或使用 TopOn-only 配置时，便捷入口立即抛出说明原因的
+`IllegalStateException`；空 `position` 仍抛出 `IllegalArgumentException`。
+
+`AdMobIds.bannerId: String? = null` 为可选配置；缺少它只影响便捷入口，显式
+`BannerRequest` 仍可提供广告位 ID。此配置不会启动全屏预加载或自动开屏。
 `AdMobPreloadConfig(banner = 0)` 只关闭 `Ads.preloadBanner()` 的预加载，不关闭 Banner View 本身的请求。
 测试宿主关闭 UMP 仅用于自动化，不应复制到生产隐私配置。
 
-## 预加载与补货
+## Compose：一行接入
 
+```kotlin
+import com.cashcraft.ads.mediation.compose.AdsBanner
+
+AdsBanner(position = "home_bottom")
+```
+
+默认使用 `LocalLifecycleOwner.current`，应将组件放在所属页面的生命周期作用域内。
+需要覆盖默认 owner 时，再传该页面实例的 `lifecycleOwner`；不要给不同页面共用 Activity owner。
+Preview 不要求调用 `Ads.initialize()`，也不初始化广告 SDK。原有 request 重载继续可用。
+默认 `AnchoredAdaptive` 保持原有 large anchored adaptive 尺寸语义；可通过 `size` 覆盖。
+普通接入不需要状态回调，定制 UI 时可选传 `onState`。
+
+## Fragment：一行绑定
+
+在 `onViewCreated()` 中调用：
+
+```kotlin
+import com.cashcraft.ads.mediation.bindBanner
+
+bindBanner(container = bannerContainer, position = "home_bottom")
+```
+
+内部使用 Fragment 的 `viewLifecycleOwner`，自动挂载和释放；业务无需保存返回对象，
+无需在 `onDestroyView()` 手动调用 `destroy()`。重复相同绑定不重复加载，
+不同绑定替换并释放前一个。绑定只操作自身创建的 View，不清空容器中的其他子 View。
+调用在主线程进行；默认尺寸同样保持原有 `AnchoredAdaptive` 语义。
+需要定制时可选传 `size`、`active`、`onState`，或使用返回的 `AdsBannerView`。
+
+## Activity：集中配置与 View 挂载
+
+Activity 公共区域继续使用 `AdsBannerView`，通过 `Ads.bannerRequest()` 取得默认广告位，
+页面无需再填写平台或广告位 ID。以下代码在实现 `LifecycleOwner` 的 Activity 中执行一次：
+
+```kotlin
+val request = Ads.bannerRequest(position = "home_bottom")
+val banner = AdsBannerView(activity = this, lifecycleOwner = this, request = request)
+bannerContainer.addView(banner, ViewGroup.LayoutParams(
+    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+))
+```
+
+`bindBanner()` 只用于 Fragment；Activity 仍负责添加自己的 Banner View。
+Activity owner 销毁时会自动释放；若持有字段，也可在 `onDestroy()` 显式销毁并清空。
+只属于某个页面的广告应使用该页面的 owner 或业务 `active`，公共底栏才适合随 Activity 持有。
+
+## HealthTracker 宿主接入
+
+HealthTracker 已迁移到集中配置与 `Ads.bannerRequest()`。当前仍由 `MainAct` 持有原生 View 公共底栏，
+未改成 Compose Banner 或 Fragment 的 `bindBanner()`。
+
+| 环节 | 当前调用与行为 |
+| --- | --- |
+| 初始化 | `AppInitializer.initializeAds()` 将 `BuildConfig.ADMOB_BANNER_ID` 写入 `AdMobIds.bannerId`，沿用渠道配置 |
+| 共用请求 | `MainAct.homeBannerRequest` 在访问时调用 `Ads.bannerRequest(AdPosition.BA_HOME_BOTTOM, BannerSize.StandardAnchoredAdaptive)`；先完成 `Ads.initialize()` 调用即可，无需等 SDK READY |
+| 预加载 | 冷启动的 `SplashScreen` 在根布局完成测量后传入该请求及内容宽度，`autoRefill = false` |
+| 展示 | `MainAct.setupHomeBanner()` 在权限／引导流程完成并恢复前台后，用同一请求创建 `AdsBannerView(this, this, request)` |
+| Tab 与遮罩 | 主界面 Tab 切换复用同一个 Banner；首页引导遮罩出现时设为 `INVISIBLE`，结束后恢复 |
+| 释放 | `MainAct.onDestroy()` 销毁 Banner 并清空引用，owner 的自动释放可重复安全执行 |
+
+尺寸保持 `StandardAnchoredAdaptive`，不能因便捷入口默认值为 `AnchoredAdaptive` 而省略，
+否则会切换到大尺寸自适应。预加载和展示共用这一定义，以保持广告位、位置和尺寸一致。
+
+宿主默认通过 `includeBuild("../ads-mediation")` 使用相邻广告库源码，无需发布远程包。
+切换到已发布 AAR 时，必须确认版本含 `AdMobIds.bannerId` 和 `Ads.bannerRequest()`，并重新编译宿主及依赖模块。
+
+本次宿主迁移于 2026-10-03 通过 `:app:assembleDebug`。这项证据仅覆盖宿主编译及打包，
+尚未完成本次迁移后的设备展示、刷新或视觉验收；下文广告库的历史设备记录不能替代宿主验收。
+
+## 高级接入：显式 request 与页面控制
+
+需要显式指定平台／广告位 ID、手动管理 View 或控制页面广告归属时，继续使用原有接口。
+显式 TopOn 请求仍返回 `AdShowResult.Failed("topon_banner_not_supported")`，
+不会请求 TopOn 或回退 AdMob；这与 TopOn-only 配置调用便捷入口时的配置异常不同。
+
+### 显式 request 与 active／visible：Compose
+
+```kotlin
+AdsBanner(
+    request = BannerRequest(AdPlatform.ADMOB, bannerId, "detail_bottom", BannerSize.AnchoredAdaptive),
+    lifecycleOwner = backStackEntry,
+    active = pageOwnsBanner,
+    visible = !sameWindowOverlay,
+    modifier = Modifier.fillMaxWidth(),
+    onState = { state ->
+        if (state is AdShowResult.Failed) {
+            // 与全屏广告共用失败处理逻辑，例如记录 state.reason。
+        }
+    },
+)
+```
+
+默认使用 `LocalLifecycleOwner.current`；页面作用域未提供实际 entry owner 时再显式传入。相同路由的不同 entry 不能共用一个 View。
+等值请求、普通重组、回调更新和页面内 Tab 切换不重新请求；`visible=false` 留在组合中并映射 `INVISIBLE`。
+移出组合意味着最终释放。Preview 不初始化广告 SDK。
+
+可选公共底部区域由宿主放在 NavHost 外，传公共区域的 owner：在允许广告的页面间保留该 owner 和 request；
+离开允许区域时设置 `active=false`，遮罩覆盖广告时另设 `visible=false`。路由仅用于业务白名单，不能用路由字符串代替 owner。
+页面独立持有的可运行示例见 [SmokeActivity.kt](../r8-smoke-app/src/main/java/com/cashcraft/ads/mediation/smoke/SmokeActivity.kt)。
+
+### 显式 request：View／Fragment
+
+```kotlin
+private var banner: AdsBannerView? = null
+
+override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+    val request = BannerRequest(
+        platform = AdPlatform.ADMOB,
+        adUnitId = "ca-app-pub-3940256099942544/9214589741", // 官方测试 ID
+        position = "home_bottom",
+        size = BannerSize.AnchoredAdaptive,
+    )
+    banner = AdsBannerView(requireActivity(), viewLifecycleOwner, request, active = true) {
+        state -> // 仅更新 UI；Ready 不等于实际曝光
+    }.also {
+        bannerContainer.addView(it, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+    }
+}
+
+override fun onDestroyView() {
+    banner?.destroy() // owner 销毁也会释放，重复调用安全
+    banner = null
+    super.onDestroyView()
+}
+```
+
+所有 View 宿主调用在主线程进行。Activity、owner、request 固定于构造时；更换时销毁旧 View，创建新 View。
+只向宿主添加这个自有 View，不跨页面搬运平台 View，不调用宿主 `removeAllViews()`。
+使用 `bindBanner()` 的完整、参与编译的 Fragment 示例见 [TraditionalBannerActivity.kt](../r8-smoke-app/src/main/java/com/cashcraft/ads/mediation/smoke/TraditionalBannerActivity.kt)。
+
+- `setActive(false)` 结束业务周期并释放；再次启用创建新 slot。最终 `destroy()` 后不能重新启用。
+- 临时隐藏使用 `visibility = View.INVISIBLE`，保留合法占位。隐藏父容器、失焦、后台及临时脱离会隐藏真实广告；全部资格恢复后复用原实例。
+- 完整页面离开应结束其业务归属。Fragment 的 View owner 销毁会自动释放；不能把所有 `ON_PAUSE` 都视为离页，因为 Dialog、落地页和后台属于临时暂停。
+
+## 可选预加载与补货
+
+普通展示无需预加载。需要预加载时，可用便捷入口生成 request，也可沿用显式 `BannerRequest`：
+
+```kotlin
+val request = Ads.bannerRequest(position = "home_bottom")
+```
+
+`Ads.bannerRequest(position: String, size: BannerSize = BannerSize.AnchoredAdaptive): BannerRequest`
+从初始化配置选取 AdMob provider 或 Bidding provider 中的 AdMob `bannerId`，不经过全屏竞价。
+它与前述 Compose／Fragment 便捷入口共用初始化与 ID 检查。
 在根布局首次完成测量后，用与展示容器一致的内容宽度（dp，已扣宿主 padding）预加载：
 
 ```kotlin
@@ -55,67 +214,6 @@ Ads.preloadBanner(activity, request, contentWidthDp, autoRefill = false)
 [BannerAdPreloader](https://developers.google.com/admob/android/next-gen/reference/kotlin/com/google/android/libraries/ads/mobile/sdk/banner/BannerAdPreloader)。
 单次加载依据：[BannerAd.load](https://developers.google.com/admob/android/next-gen/reference/kotlin/com/google/android/libraries/ads/mobile/sdk/banner/BannerAd#load)。
 该 API 在较新 SDK 已弃用；本实现以实际依赖 1.2.1 的公开签名为准，升级时需复核。
-
-## View／Fragment
-
-```kotlin
-private var banner: AdsBannerView? = null
-
-override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-    val request = BannerRequest(
-        platform = AdPlatform.ADMOB,
-        adUnitId = "ca-app-pub-3940256099942544/9214589741", // 官方测试 ID
-        position = "home_bottom",
-        size = BannerSize.AnchoredAdaptive,
-    )
-    banner = AdsBannerView(requireActivity(), viewLifecycleOwner, request, active = true) {
-        state -> // 仅更新 UI；Ready 不等于实际曝光
-    }.also {
-        bannerContainer.addView(it, ViewGroup.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ))
-    }
-}
-
-override fun onDestroyView() {
-    banner?.destroy() // owner 销毁也会释放，重复调用安全
-    banner = null
-    super.onDestroyView()
-}
-```
-
-所有 View 宿主调用在主线程进行。Activity、owner、request 固定于构造时；更换时销毁旧 View，创建新 View。
-只向宿主添加这个自有 View，不跨页面搬运平台 View，不调用宿主 `removeAllViews()`。
-完整、参与编译的 Fragment 示例见 [TraditionalBannerActivity.kt](../r8-smoke-app/src/main/java/com/cashcraft/ads/mediation/smoke/TraditionalBannerActivity.kt)。
-
-- `setActive(false)` 结束业务周期并释放；再次启用创建新 slot。最终 `destroy()` 后不能重新启用。
-- 临时隐藏使用 `visibility = View.INVISIBLE`，保留合法占位。隐藏父容器、失焦、后台及临时脱离会隐藏真实广告；全部资格恢复后复用原实例。
-- 完整页面离开应结束其业务归属。Fragment 的 View owner 销毁会自动释放；不能把所有 `ON_PAUSE` 都视为离页，因为 Dialog、落地页和后台属于临时暂停。
-
-## Compose
-
-```kotlin
-AdsBanner(
-    request = BannerRequest(AdPlatform.ADMOB, bannerId, "detail_bottom", BannerSize.AnchoredAdaptive),
-    lifecycleOwner = backStackEntry,
-    active = pageOwnsBanner,
-    visible = !sameWindowOverlay,
-    modifier = Modifier.fillMaxWidth(),
-    onState = { state ->
-        if (state is AdShowResult.Failed) {
-            // 与全屏广告共用失败处理逻辑，例如记录 state.reason。
-        }
-    },
-)
-```
-
-默认使用 `LocalLifecycleOwner.current`，Navigation 页面应明确传实际 entry owner。相同路由的不同 entry 不能共用一个 View。
-等值请求、普通重组、回调更新和页面内 Tab 切换不重新请求；`visible=false` 留在组合中并映射 `INVISIBLE`。
-移出组合意味着最终释放。Preview 不初始化广告 SDK。
-
-可选公共底部区域由宿主放在 NavHost 外，传公共区域的 owner：在允许广告的页面间保留该 owner 和 request；
-离开允许区域时设置 `active=false`，遮罩覆盖广告时另设 `visible=false`。路由仅用于业务白名单，不能用路由字符串代替 owner。
-页面独立持有的可运行示例见 [SmokeActivity.kt](../r8-smoke-app/src/main/java/com/cashcraft/ads/mediation/smoke/SmokeActivity.kt)。
 
 ## 尺寸、刷新与失败
 
@@ -156,6 +254,9 @@ Google 文档说明自动刷新依赖广告可见，开启后也可处理加载�
 原 `BannerState.Failed` 已移除，构造、类型判断及穷尽 `when` 分支统一改为 `AdShowResult.Failed`，
 并重新编译使用 Banner 的宿主与依赖模块；`onState` 参数类型和 `reason: String` 保持不变。
 `AdEvent` 增加 `slotId` 后构造及 `copy` 的 JVM 签名改变，宿主及依赖它的二进制模块必须重新编译；不能把默认参数视为二进制兼容保证。
+`AdMobIds` 新增带默认值的可选 `bannerId` 参数，原有源码调用可继续使用；
+宿主及依赖模块需要重新编译，不承诺二进制兼容。原有显式 request 接口继续可用，
+不要求配置 `AdMobIds.bannerId`。便捷入口的默认尺寸仍为原有 `AnchoredAdaptive`。
 原全屏入口明确拒绝 BANNER，Banner 不参与全屏缓存竞价或展示锁。
 
 完整任务与分层证据见 [tasks.md](../openspec/changes/archive/2026-09-29-add-banner-support/tasks.md) 和
@@ -192,7 +293,7 @@ python3 r8-smoke-app/check_banner_log.py /tmp/banner-cold.log <本次slot_id>
 
 ## 设备端契约回归
 
-[BannerContractInstrumentation](../r8-smoke-app/src/androidTest/java/com/cashcraft/ads/mediation/smoke/BannerContractInstrumentation.kt)
+[BannerContractInstrumentation](../r8-smoke-app/src/androidTestDebug/java/com/cashcraft/ads/mediation/smoke/BannerContractInstrumentation.kt)
 使用平台原生 Instrumentation、Debug 专用空 Activity 和官方测试广告，不增加测试框架或生产测试入口。
 测试 Application、回调记录与 SDK 接口替身仅在测试 APK 中。初始化等待、零宽／隐藏、加载通知重入、
 在途销毁／重启、配置异常、过期对象、三个回调出口异常、已确认收益的排队交付与交错暂停均有断言。

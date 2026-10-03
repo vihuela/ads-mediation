@@ -1,6 +1,6 @@
 # 页面 Native 卡片接入
 
-此入口属于当前工作树，尚未发布到 README 的稳定版 1.0.5。继续使用现有 `Ads.initialize` 和 UMP 配置，Native 广告位 ID 在初始化配置中传入；当前仍要求既有全屏 ID，尚不支持只填 Native ID 初始化。Compose 与 View 入口都包含在 `ads-mediation` 中。
+此入口属于当前工作树，尚未发布到 README 的稳定版 1.0.5。继续使用现有 `Ads.initialize` 和 UMP 配置，Native 广告位 ID 在初始化配置中传入；只接 Native 时可省略全屏 ID，应用 ID 和 TopOn App Key 等所选平台的必需凭据仍需提供。Compose 与 View 入口都包含在 `ads-mediation` 中。
 
 ## 双平台比价：业务只持有一个卡片
 
