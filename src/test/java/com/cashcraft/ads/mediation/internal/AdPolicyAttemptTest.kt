@@ -72,6 +72,29 @@ class AdPolicyAttemptTest {
         assertEquals(AdUsageStore.DailyUsage(0, 0), store.dailyUsage(wall))
     }
 
+    @Test fun `open can show during gap and its real close restarts passive fullscreen cooldown`() {
+        checker.policy = checker.policy.copy(frequency = checker.policy.frequency.copy(fullscreenGapSeconds = 60))
+        checker.fullscreenClosed()
+        val priorClose = wall
+        wall += 1_000L
+        val open = AdPolicyAttempt(AdPolicyRequest("cold", fullscreen = true, sceneType = AdSceneType.OPEN))
+        assertEquals(AdPolicyCheckResult.Passed, open.reserve())
+        open.impression()
+        assertEquals(priorClose, store.lastFullscreenCloseMillis)
+        wall += 2_000L
+        open.complete()
+        assertEquals(wall, store.lastFullscreenCloseMillis)
+        val passive = AdPolicyRequest("save", fullscreen = true, sceneType = AdSceneType.INTER)
+        assertEquals(AdPolicyCheckResult.Blocked(AdBlockReason.FULLSCREEN_GAP), checker.check(passive))
+        assertEquals(AdPolicyCheckResult.Passed,
+            AdPolicyAttempt(AdPolicyRequest("hot", fullscreen = true, sceneType = AdSceneType.OPEN)).check())
+        wall += 59_999L
+        assertEquals(AdPolicyCheckResult.Blocked(AdBlockReason.FULLSCREEN_GAP), checker.check(passive))
+        wall += 1L
+        assertEquals(AdPolicyCheckResult.Passed, checker.check(passive))
+        assertEquals(AdUsageStore.DailyUsage(1, 0), store.dailyUsage(wall, AdSceneType.OPEN))
+    }
+
     @Test fun `late full native callbacks after release keep original inter identity across page change`() {
         val old = AdPolicyAttempt(AdPolicyRequest("NA_New_Guide_Full", fullscreen = true, sceneType = AdSceneType.INTER))
         old.reserve()

@@ -111,7 +111,8 @@ internal class AdPolicyChecker(
             if (age(now, usage.firstLaunchTimeMillis) < millis(frequency.newUserDelaySeconds)) {
                 return blocked(AdBlockReason.NEW_USER_PROTECTION)
             }
-            if (request.fullscreen) closeAnchorElapsed?.let { anchor ->
+            // Open entries bypass the gap, but their real close still updates the shared anchor.
+            if (request.fullscreen && request.sceneType != AdSceneType.OPEN) closeAnchorElapsed?.let { anchor ->
                 val elapsed = age(elapsedClockMillis(), anchor)
                 val gap = millis(frequency.fullscreenGapSeconds)
                 if (closeAgeAtAnchor < gap && elapsed < gap - closeAgeAtAnchor) {

@@ -374,6 +374,48 @@ class AdPolicyCheckerTest {
     }
 
     @Test
+    fun `cold and hot open bypass shared gap while passive fullscreen remains blocked after restart`() {
+        val policy = typedPolicy().copy(frequency = AdFrequencyPolicy(enabled = true,
+            fullscreenGapSeconds = 120, sceneQuotas = emptyMap()))
+        checker.policy = policy
+        checker.fullscreenClosed()
+        for (instance in listOf(checker, newChecker().apply { this.policy = policy })) {
+            for (position in listOf("cold", "hot")) {
+                assertPassed(instance.check(typed(AdSceneType.OPEN, position).copy(fullscreen = true)))
+            }
+            for (sceneType in listOf(AdSceneType.INTER, AdSceneType.NATIVE_FULLSCREEN)) {
+                assertBlocked(AdBlockReason.FULLSCREEN_GAP,
+                    instance.check(typed(sceneType).copy(fullscreen = true)))
+            }
+            // Missing scene identity in legacy mode must not gain an open exemption.
+            instance.policy = policy.copy(frequency = policy.frequency.copy(sceneQuotas = null))
+            assertBlocked(AdBlockReason.FULLSCREEN_GAP, instance.check(auto))
+        }
+    }
+
+    @Test
+    fun `open gap exemption retains global position new user and its own quota gates`() {
+        val open = typed(AdSceneType.OPEN, "cold").copy(fullscreen = true)
+        val base = AdPolicy(frequency = AdFrequencyPolicy(enabled = true, fullscreenGapSeconds = 120,
+            sceneQuotas = mapOf(AdSceneType.OPEN to AdSceneQuota(true, 5, 2))))
+        checker.fullscreenClosed()
+        checker.policy = base.copy(enabled = false)
+        assertBlocked(AdBlockReason.GLOBAL_DISABLED, checker.check(open))
+        checker.policy = base.copy(positions = mapOf("cold" to false))
+        assertBlocked(AdBlockReason.POSITION_DISABLED, checker.check(open))
+        checker.policy = base.copy(frequency = base.frequency.copy(newUserDelaySeconds = 120))
+        assertBlocked(AdBlockReason.NEW_USER_PROTECTION, checker.check(open))
+        checker.policy = base.copy(frequency = base.frequency.copy(
+            sceneQuotas = mapOf(AdSceneType.OPEN to AdSceneQuota(true, 0, 2))))
+        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(open))
+        checker.policy = base.copy(frequency = base.frequency.copy(
+            sceneQuotas = mapOf(AdSceneType.OPEN to AdSceneQuota(true, 5, 0))))
+        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.check(open))
+        checker.policy = base
+        assertPassed(checker.check(open))
+    }
+
+    @Test
     fun `v2 empty or partial map never falls back to legacy global limits`() {
         checker.impression("old")
         checker.click()
@@ -545,7 +587,8 @@ class AdPolicyCheckerTest {
             checker.check(rewarded.copy(sceneType = AdSceneType.REWARDED)))
         wall += 120_000L
         assertPassed(checker.check(typed(AdSceneType.NATIVE)))
-        assertBlocked(AdBlockReason.FULLSCREEN_GAP, checker.check(auto.copy(sceneType = AdSceneType.OPEN)))
+        assertPassed(checker.check(auto.copy(sceneType = AdSceneType.OPEN)))
+        assertBlocked(AdBlockReason.FULLSCREEN_GAP, checker.check(auto.copy(sceneType = AdSceneType.INTER)))
         assertPassed(checker.checkLoad())
     }
 
