@@ -549,7 +549,7 @@ object Ads {
     fun bannerRequest(
         position: String,
         size: BannerSize = BannerSize.AnchoredAdaptive,
-        mainType: AdMainType? = AdMainType.BANNER,
+        sceneType: AdSceneType? = AdSceneType.BANNER,
     ): BannerRequest {
         require(position.isNotBlank()) { "position must not be blank" }
         check(::config.isInitialized) { "Call Ads.initialize before using a configured Banner" }
@@ -559,7 +559,7 @@ object Ads {
             is TopOnProviderConfig -> error("topon_banner_not_supported")
         }
         val id = checkNotNull(ids.bannerId) { "Configure AdMobIds.bannerId before using a configured Banner" }
-        return BannerRequest(AdPlatform.ADMOB, id, position, size, mainType)
+        return BannerRequest(AdPlatform.ADMOB, id, position, size, sceneType)
     }
 
     /**
@@ -628,25 +628,25 @@ object Ads {
         activity: Activity,
         position: String,
         onResult: (AdShowResult) -> Unit,
-    ) = onMain { showImmediate(AdFormat.APP_OPEN, activity, position, AdMainType.OPEN) { onResult(it.showResult) } }
+    ) = onMain { showImmediate(AdFormat.APP_OPEN, activity, position, AdSceneType.OPEN) { onResult(it.showResult) } }
 
     fun showInterstitial(
         activity: Activity,
         position: String,
         onResult: (AdShowResult) -> Unit = {},
-    ) = onMain { showImmediate(AdFormat.INTERSTITIAL, activity, position, AdMainType.INTER) { onResult(it.showResult) } }
+    ) = onMain { showImmediate(AdFormat.INTERSTITIAL, activity, position, AdSceneType.INTER) { onResult(it.showResult) } }
 
     fun showRewarded(
         activity: Activity,
         position: String,
         onResult: (AdRewardResult) -> Unit,
-    ) = onMain { showImmediate(AdFormat.REWARDED, activity, position, AdMainType.REWARDED, onResult) }
+    ) = onMain { showImmediate(AdFormat.REWARDED, activity, position, AdSceneType.REWARDED, onResult) }
 
     private fun showImmediate(format: AdFormat, activity: Activity, position: String,
-        mainType: AdMainType?,
+        sceneType: AdSceneType?,
         onResult: (AdRewardResult) -> Unit) {
         val policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true,
-            userInitiated = format == AdFormat.REWARDED, mainType = mainType))
+            userInitiated = format == AdFormat.REWARDED, sceneType = sceneType))
         val checked = policy.check()
         if (checked is AdPolicyCheckResult.Blocked) {
             policy.complete()
@@ -683,10 +683,7 @@ object Ads {
      * keep their own policies. Configure timeout and Native layout once in [AdsConfig].
      */
     fun showOpen(position: String, onResult: (AdShowResult) -> Unit = {}): AdTask =
-        showOpen(position, AdMainType.OPEN, onResult)
-
-    fun showOpen(position: String, mainType: AdMainType?, onResult: (AdShowResult) -> Unit = {}): AdTask =
-        showScene(AdFormat.APP_OPEN, position, mainType, onResult)
+        showScene(AdFormat.APP_OPEN, position, AdSceneType.OPEN, onResult)
 
     /**
      * Wait for interstitial candidates, then use cached full-screen Native only if none is available.
@@ -699,7 +696,7 @@ object Ads {
         position: String,
         onLoadingChanged: (Boolean) -> Unit = {},
         onResult: (AdShowResult) -> Unit = {},
-    ): AdTask = showScene(AdFormat.INTERSTITIAL, position, AdMainType.INTER, onResult, onLoadingChanged)
+    ): AdTask = showScene(AdFormat.INTERSTITIAL, position, AdSceneType.INTER, onResult, onLoadingChanged)
 
     /** Rechecks the host's business condition while waiting and immediately before SDK handoff. */
     fun showInter(
@@ -707,20 +704,12 @@ object Ads {
         isSceneValid: () -> Boolean,
         onLoadingChanged: (Boolean) -> Unit = {},
         onResult: (AdShowResult) -> Unit = {},
-    ): AdTask = showScene(AdFormat.INTERSTITIAL, position, AdMainType.INTER, onResult, onLoadingChanged, isSceneValid)
-
-    fun showInter(
-        position: String,
-        mainType: AdMainType?,
-        isSceneValid: () -> Boolean = { true },
-        onLoadingChanged: (Boolean) -> Unit = {},
-        onResult: (AdShowResult) -> Unit = {},
-    ): AdTask = showScene(AdFormat.INTERSTITIAL, position, mainType, onResult, onLoadingChanged, isSceneValid)
+    ): AdTask = showScene(AdFormat.INTERSTITIAL, position, AdSceneType.INTER, onResult, onLoadingChanged, isSceneValid)
 
     private fun showScene(
         scene: AdFormat,
         position: String,
-        mainType: AdMainType?,
+        sceneType: AdSceneType?,
         onResult: (AdShowResult) -> Unit,
         onLoadingChanged: ((Boolean) -> Unit)? = null,
         isSceneValid: () -> Boolean = { true },
@@ -739,7 +728,7 @@ object Ads {
             val trace: (String) -> Unit = { message ->
                 nativeLogger?.sceneTask(scene, task.id, position, SystemClock.elapsedRealtime() - startedAt, message)
             }
-            val policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true, mainType = mainType))
+            val policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true, sceneType = sceneType))
             var finished = false
             fun finish(result: AdShowResult) {
                 if (finished) return
@@ -919,7 +908,7 @@ object Ads {
         onResult: (AdShowResult) -> Unit = {},
     ): AdDisplayOpportunity = createOpportunity(
         AdFormat.APP_OPEN, activity, position, timeoutMillis, isSceneValid,
-        mainType = AdMainType.OPEN,
+        sceneType = AdSceneType.OPEN,
         onResult = { onResult(it.showResult) },
     )
 
@@ -933,13 +922,13 @@ object Ads {
         layout: NativeLayout.Custom,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdShowResult) -> Unit = {},
-    ): AdDisplayOpportunity = showNativeFullScreen(activity, position, layout, AdMainType.NATIVE_FULLSCREEN, isSceneValid, onResult)
+    ): AdDisplayOpportunity = showNativeFullScreen(activity, position, layout, AdSceneType.NATIVE_FULLSCREEN, isSceneValid, onResult)
 
     fun showNativeFullScreen(
         activity: Activity,
         position: String,
         layout: NativeLayout.Custom,
-        mainType: AdMainType?,
+        sceneType: AdSceneType?,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdShowResult) -> Unit = {},
     ): AdDisplayOpportunity {
@@ -954,7 +943,7 @@ object Ads {
                 onResult(AdShowResult.Failed("opportunity_cancelled"))
             } else {
                 val attempt = FullScreenShowAttempt().also {
-                    it.policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true, mainType = mainType))
+                    it.policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true, sceneType = sceneType))
                 }
                 session = NativeFullScreenSession.start(activity, position, layout, isSceneValid, attempt = attempt) {
                     opportunity.detach()
@@ -971,17 +960,17 @@ object Ads {
         timeoutMillis: Long = if (::config.isInitialized) config.rewardedTimeoutMillis(position) else 3_000L,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdRewardResult) -> Unit = {},
-    ): AdDisplayOpportunity = showRewardedWhenReady(activity, position, AdMainType.REWARDED, timeoutMillis, isSceneValid, onResult)
+    ): AdDisplayOpportunity = showRewardedWhenReady(activity, position, AdSceneType.REWARDED, timeoutMillis, isSceneValid, onResult)
 
     fun showRewardedWhenReady(
         activity: Activity,
         position: String,
-        mainType: AdMainType?,
+        sceneType: AdSceneType?,
         timeoutMillis: Long = if (::config.isInitialized) config.rewardedTimeoutMillis(position) else 3_000L,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdRewardResult) -> Unit = {},
     ): AdDisplayOpportunity = createOpportunity(
-        AdFormat.REWARDED, activity, position, timeoutMillis, isSceneValid, mainType, onResult,
+        AdFormat.REWARDED, activity, position, timeoutMillis, isSceneValid, sceneType, onResult,
     )
 
     private fun createOpportunity(
@@ -990,7 +979,7 @@ object Ads {
         position: String,
         timeoutMillis: Long,
         isSceneValid: () -> Boolean,
-        mainType: AdMainType?,
+        sceneType: AdSceneType?,
         onResult: (AdRewardResult) -> Unit,
     ): AdDisplayOpportunity {
         require(format != AdFormat.BANNER) { "Banner does not use full-screen display opportunities" }
@@ -1085,7 +1074,7 @@ object Ads {
             onResult = onResult,
             preferCachedImmediately = format != AdFormat.APP_OPEN,
             policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true,
-                userInitiated = format == AdFormat.REWARDED, mainType = mainType)),
+                userInitiated = format == AdFormat.REWARDED, sceneType = sceneType)),
             excludeWaitingTime = { initializationStage == InitializationStage.WAITING_FOR_UMP },
         )
         onMain {

@@ -112,6 +112,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     api(libs.androidx.lifecycle.runtime)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.mmkv)
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)

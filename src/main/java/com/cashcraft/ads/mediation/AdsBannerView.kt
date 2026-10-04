@@ -399,7 +399,7 @@ class AdsBannerView(
     private fun isCurrent(value: Long): Boolean = !destroyed && businessActive && generation == value && adView != null
 
     private fun checkPolicy(reserve: Boolean = false): Boolean {
-        val current = policyAttempt ?: AdPolicyAttempt(AdPolicyRequest(request.position, mainType = request.mainType)).also { policyAttempt = it }
+        val current = policyAttempt ?: AdPolicyAttempt(AdPolicyRequest(request.position, sceneType = request.sceneType)).also { policyAttempt = it }
         if (current.hasImpression) return true
         // Reuse the same reservation, excluding this opportunity from its own pending quota.
         val result = if (reserve || policyReserved) current.reserve() else current.check()

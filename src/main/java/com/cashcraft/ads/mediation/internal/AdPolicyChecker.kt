@@ -2,7 +2,7 @@ package com.cashcraft.ads.mediation.internal
 
 import android.os.SystemClock
 import com.cashcraft.ads.mediation.AdBlockReason
-import com.cashcraft.ads.mediation.AdMainType
+import com.cashcraft.ads.mediation.AdSceneType
 import com.cashcraft.ads.mediation.AdPolicy
 import com.cashcraft.ads.mediation.AdPolicyCheckResult
 import java.util.Collections
@@ -12,7 +12,7 @@ internal data class AdPolicyRequest(
     val position: String? = null,
     val fullscreen: Boolean = false,
     val userInitiated: Boolean = false,
-    val mainType: AdMainType? = null,
+    val sceneType: AdSceneType? = null,
 )
 
 /** Own one checker for the Ads lifetime; reservation IDs must identify distinct impressions. */
@@ -22,7 +22,7 @@ internal class AdPolicyChecker(
     private val elapsedClockMillis: () -> Long = SystemClock::elapsedRealtime,
 ) {
     private val lock = Any()
-    private val pending = mutableMapOf<String, AdMainType?>()
+    private val pending = mutableMapOf<String, AdSceneType?>()
     private val impressed = mutableSetOf<String>()
     private var snapshot = AdPolicy()
 
@@ -38,11 +38,11 @@ internal class AdPolicyChecker(
             snapshot = value.copy(
                 platforms = Collections.unmodifiableMap(HashMap(value.platforms)),
                 positions = Collections.unmodifiableMap(HashMap(value.positions)),
-                frequency = value.frequency.copy(mainTypeQuotas = value.frequency.mainTypeQuotas?.let { quotas ->
+                frequency = value.frequency.copy(sceneQuotas = value.frequency.sceneQuotas?.let { quotas ->
                     Collections.unmodifiableMap(quotas.mapValues { (_, quota) -> quota.copy() })
                 }),
             )
-            if (snapshot.frequency.mainTypeQuotas != null) usage.enableMainTypeUsage(wallClockMillis())
+            if (snapshot.frequency.sceneQuotas != null) usage.enableSceneTypeUsage(wallClockMillis())
         }
 
     /** Pure eligibility query: no quota consumption, callbacks, logs, or persistence. */
@@ -54,9 +54,9 @@ internal class AdPolicyChecker(
     fun reserve(id: String, request: AdPolicyRequest): AdPolicyCheckResult = synchronized(lock) {
         // Binding an already-reserved opportunity must observe policy updates, while
         // excluding its own pending show. Loading continues to include all reservations.
-        if (id in pending && pending[id] != request.mainType) return@synchronized blocked(AdBlockReason.INVALID_MAIN_TYPE)
+        if (id in pending && pending[id] != request.sceneType) return@synchronized blocked(AdBlockReason.INVALID_SCENE_TYPE)
         checkLocked(request, ownPending = id in pending).also {
-            if (it == AdPolicyCheckResult.Passed && id !in impressed) pending[id] = request.mainType
+            if (it == AdPolicyCheckResult.Passed && id !in impressed) pending[id] = request.sceneType
         }
     }
 
@@ -65,22 +65,22 @@ internal class AdPolicyChecker(
     }
 
     /** Late/unsolicited actual impressions still count, including after release or midnight. */
-    fun impression(id: String, mainType: AdMainType? = null) {
+    fun impression(id: String, sceneType: AdSceneType? = null) {
         synchronized(lock) {
             // V2 callbacks without ownership must not contaminate retained legacy history.
-            if (snapshot.frequency.mainTypeQuotas != null && mainType == null) return
+            if (snapshot.frequency.sceneQuotas != null && sceneType == null) return
             if (impressed.add(id)) {
                 pending.remove(id)
-                usage.impression(wallClockMillis(), if (snapshot.frequency.mainTypeQuotas != null) mainType else null)
+                usage.impression(wallClockMillis(), if (snapshot.frequency.sceneQuotas != null) sceneType else null)
             }
         }
     }
 
     /** Every actual click callback counts; session-level click deduplication is incorrect. */
-    fun click(mainType: AdMainType? = null) {
+    fun click(sceneType: AdSceneType? = null) {
         synchronized(lock) {
-            if (snapshot.frequency.mainTypeQuotas != null && mainType == null) return
-            usage.click(wallClockMillis(), if (snapshot.frequency.mainTypeQuotas != null) mainType else null)
+            if (snapshot.frequency.sceneQuotas != null && sceneType == null) return
+            usage.click(wallClockMillis(), if (snapshot.frequency.sceneQuotas != null) sceneType else null)
         }
     }
 
@@ -101,9 +101,9 @@ internal class AdPolicyChecker(
             return blocked(AdBlockReason.POSITION_DISABLED)
         }
         val frequency = current.frequency
-        val quotas = frequency.mainTypeQuotas
-        if (quotas != null && request != null && request.mainType == null) {
-            return blocked(AdBlockReason.INVALID_MAIN_TYPE)
+        val quotas = frequency.sceneQuotas
+        if (quotas != null && request != null && request.sceneType == null) {
+            return blocked(AdBlockReason.INVALID_SCENE_TYPE)
         }
         if (!frequency.enabled) return AdPolicyCheckResult.Passed
         val now = wallClockMillis()
@@ -121,11 +121,11 @@ internal class AdPolicyChecker(
         }
         if (quotas != null) {
             // Shared preload stock has no entry identity and cannot use a format's quota.
-            val mainType = request?.mainType ?: return AdPolicyCheckResult.Passed
-            val quota = quotas[mainType] ?: return AdPolicyCheckResult.Passed
+            val sceneType = request?.sceneType ?: return AdPolicyCheckResult.Passed
+            val quota = quotas[sceneType] ?: return AdPolicyCheckResult.Passed
             if (!quota.enabled) return AdPolicyCheckResult.Passed
-            val daily = usage.dailyUsage(now, mainType)
-            val pendingShows = pending.values.count { it == mainType }.toLong() - if (ownPending) 1L else 0L
+            val daily = usage.dailyUsage(now, sceneType)
+            val pendingShows = pending.values.count { it == sceneType }.toLong() - if (ownPending) 1L else 0L
             // Missing enabled thresholds fail closed; a malformed host policy is not unlimited.
             val maxClicks = quota.dailyMaxClicks ?: 0L
             if (daily.clicks >= maxClicks) return blocked(AdBlockReason.DAILY_CLICK_LIMIT)
@@ -149,13 +149,13 @@ internal class AdPolicyChecker(
     /** Called only for the first terminal block of an attempt, never for pure eligibility polls. */
     fun blockedDiagnostic(id: String, request: AdPolicyRequest, reason: AdBlockReason): String = synchronized(lock) {
         val frequency = snapshot.frequency
-        val v2 = frequency.mainTypeQuotas != null
-        val mainType = request.mainType
-        val daily = if (v2 && mainType == null) AdUsageStore.DailyUsage(0, 0)
-            else usage.dailyUsage(wallClockMillis(), if (v2) mainType else null)
-        val quota = mainType?.let { frequency.mainTypeQuotas?.get(it) }
-        val pendingShows = if (v2) pending.values.count { it == mainType } else pending.size
-        "ad_policy_blocked policy_version=${if (v2) 2 else 1} mainType=${mainType?.configKey ?: "missing"}" +
+        val v2 = frequency.sceneQuotas != null
+        val sceneType = request.sceneType
+        val daily = if (v2 && sceneType == null) AdUsageStore.DailyUsage(0, 0)
+            else usage.dailyUsage(wallClockMillis(), if (v2) sceneType else null)
+        val quota = sceneType?.let { frequency.sceneQuotas?.get(it) }
+        val pendingShows = if (v2) pending.values.count { it == sceneType } else pending.size
+        "ad_policy_blocked policy_version=${if (v2) 2 else 1} sceneType=${sceneType?.configKey ?: "missing"}" +
             " opportunity_id=${id.oneLine()} position=${request.position?.oneLine()} reason=${reason.code}" +
             " shows=${daily.shows} clicks=${daily.clicks} pending=$pendingShows" +
             " own_pending=${id in pending} frequency_enabled=${frequency.enabled}" +

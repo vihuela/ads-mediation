@@ -2,8 +2,8 @@ package com.cashcraft.ads.mediation.internal
 
 import com.cashcraft.ads.mediation.AdBlockReason
 import com.cashcraft.ads.mediation.AdFrequencyPolicy
-import com.cashcraft.ads.mediation.AdMainType
-import com.cashcraft.ads.mediation.AdMainTypeQuota
+import com.cashcraft.ads.mediation.AdSceneType
+import com.cashcraft.ads.mediation.AdSceneQuota
 import com.cashcraft.ads.mediation.AdPlatform
 import com.cashcraft.ads.mediation.AdPolicy
 import com.cashcraft.ads.mediation.AdPolicyCheckResult
@@ -25,7 +25,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
-@Config(manifest = Config.NONE, sdk = [28])
+@Config(manifest = Config.NONE, sdk = [28], shadows = [ShadowMMKV::class])
 class AdPolicyCheckerTest {
     private var wall = ZonedDateTime.parse("2026-10-04T12:00:00+08:00[Asia/Taipei]").toInstant().toEpochMilli()
     private var elapsed = 10_000L
@@ -37,7 +37,7 @@ class AdPolicyCheckerTest {
 
     @Before
     fun setUp() {
-        RuntimeEnvironment.getApplication().getSharedPreferences("cashcraft_ads_usage", 0).edit().clear().commit()
+        ShadowMMKV.reset()
         usage = AdUsageStore(RuntimeEnvironment.getApplication(), wall)
         checker = newChecker()
     }
@@ -359,18 +359,18 @@ class AdPolicyCheckerTest {
 
     @Test
     fun `v2 quotas and pending shows belong to entry type across positions`() {
-        checker.policy = typedPolicy(AdMainType.OPEN to AdMainTypeQuota(true, 1, 1),
-            AdMainType.INTER to AdMainTypeQuota(true, 1, 1))
-        assertPassed(checker.reserve("cold-open", typed(AdMainType.OPEN, "cold")))
-        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.reserve("hot-open", typed(AdMainType.OPEN, "hot")))
-        assertPassed(checker.reserve("save-inter", typed(AdMainType.INTER, "save")))
-        checker.impression("cold-open", AdMainType.OPEN)
-        checker.click(AdMainType.OPEN)
-        assertEquals(AdUsageStore.DailyUsage(1, 1), usage.dailyUsage(wall, AdMainType.OPEN))
-        assertEquals(AdUsageStore.DailyUsage(0, 0), usage.dailyUsage(wall, AdMainType.INTER))
+        checker.policy = typedPolicy(AdSceneType.OPEN to AdSceneQuota(true, 1, 1),
+            AdSceneType.INTER to AdSceneQuota(true, 1, 1))
+        assertPassed(checker.reserve("cold-open", typed(AdSceneType.OPEN, "cold")))
+        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.reserve("hot-open", typed(AdSceneType.OPEN, "hot")))
+        assertPassed(checker.reserve("save-inter", typed(AdSceneType.INTER, "save")))
+        checker.impression("cold-open", AdSceneType.OPEN)
+        checker.click(AdSceneType.OPEN)
+        assertEquals(AdUsageStore.DailyUsage(1, 1), usage.dailyUsage(wall, AdSceneType.OPEN))
+        assertEquals(AdUsageStore.DailyUsage(0, 0), usage.dailyUsage(wall, AdSceneType.INTER))
         checker.release("save-inter")
-        assertPassed(checker.check(typed(AdMainType.INTER, "back")))
-        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.check(typed(AdMainType.OPEN)))
+        assertPassed(checker.check(typed(AdSceneType.INTER, "back")))
+        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.check(typed(AdSceneType.OPEN)))
     }
 
     @Test
@@ -378,104 +378,104 @@ class AdPolicyCheckerTest {
         checker.impression("old")
         checker.click()
         checker.policy = typedPolicy().copy(frequency = AdFrequencyPolicy(true,
-            dailyMaxShows = 0, dailyMaxClicks = 0, mainTypeQuotas = emptyMap()))
-        AdMainType.entries.forEach { mainType ->
-            assertPassed(checker.reserve(mainType.configKey, typed(mainType)))
-            checker.impression(mainType.configKey, mainType)
-            checker.click(mainType)
-            assertPassed(checker.check(typed(mainType)))
-            assertEquals(AdUsageStore.DailyUsage(1, 1), usage.dailyUsage(wall, mainType))
+            dailyMaxShows = 0, dailyMaxClicks = 0, sceneQuotas = emptyMap()))
+        AdSceneType.entries.forEach { sceneType ->
+            assertPassed(checker.reserve(sceneType.configKey, typed(sceneType)))
+            checker.impression(sceneType.configKey, sceneType)
+            checker.click(sceneType)
+            assertPassed(checker.check(typed(sceneType)))
+            assertEquals(AdUsageStore.DailyUsage(1, 1), usage.dailyUsage(wall, sceneType))
         }
         assertEquals(AdUsageStore.DailyUsage(1, 1), usage.dailyUsage(wall))
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(true, 0, 0))
-        assertPassed(checker.check(typed(AdMainType.OPEN)))
-        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.check(typed(AdMainType.INTER)))
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(true, 0, 0))
+        assertPassed(checker.check(typed(AdSceneType.OPEN)))
+        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.check(typed(AdSceneType.INTER)))
     }
 
     @Test
     fun `v2 missing main type fails even with frequency off while shared loading skips counts`() {
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(true, 0, 0))
-        assertBlocked(AdBlockReason.INVALID_MAIN_TYPE, checker.check(inline))
-        assertBlocked(AdBlockReason.INVALID_MAIN_TYPE, checker.reserve("missing", auto))
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(true, 0, 0))
+        assertBlocked(AdBlockReason.INVALID_SCENE_TYPE, checker.check(inline))
+        assertBlocked(AdBlockReason.INVALID_SCENE_TYPE, checker.reserve("missing", auto))
         assertPassed(checker.checkLoad())
         checker.policy = checker.policy.copy(frequency = checker.policy.frequency.copy(enabled = false))
-        assertBlocked(AdBlockReason.INVALID_MAIN_TYPE, checker.check(inline))
+        assertBlocked(AdBlockReason.INVALID_SCENE_TYPE, checker.check(inline))
         checker.policy = checker.policy.copy(enabled = false)
         assertBlocked(AdBlockReason.GLOBAL_DISABLED, checker.checkLoad())
     }
 
     @Test
     fun `v2 zero click threshold wins over zero show threshold`() {
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(true, 0, 0))
-        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.reserve("zero", typed(AdMainType.INTER)))
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(true, 0, 3))
-        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.reserve("zero", typed(AdMainType.INTER)))
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(true, 20, 0))
-        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.check(typed(AdMainType.INTER)))
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(false, 0, 0))
-        assertPassed(checker.reserve("zero", typed(AdMainType.INTER)))
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(true, 0, 0))
+        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.reserve("zero", typed(AdSceneType.INTER)))
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(true, 0, 3))
+        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.reserve("zero", typed(AdSceneType.INTER)))
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(true, 20, 0))
+        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.check(typed(AdSceneType.INTER)))
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(false, 0, 0))
+        assertPassed(checker.reserve("zero", typed(AdSceneType.INTER)))
     }
 
     @Test
     fun `v2 malformed enabled thresholds fail closed without global fallback`() {
-        checker.policy = typedPolicy(AdMainType.OPEN to AdMainTypeQuota(true, 5, null))
-        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.check(typed(AdMainType.OPEN)))
-        checker.policy = typedPolicy(AdMainType.OPEN to AdMainTypeQuota(true, null, 2))
-        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdMainType.OPEN)))
+        checker.policy = typedPolicy(AdSceneType.OPEN to AdSceneQuota(true, 5, null))
+        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.check(typed(AdSceneType.OPEN)))
+        checker.policy = typedPolicy(AdSceneType.OPEN to AdSceneQuota(true, null, 2))
+        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdSceneType.OPEN)))
     }
 
     @Test
     fun `v2 switches attribution and threshold updates retain actual callbacks and pending`() {
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(false, 0, 0))
-        checker.impression("quota-off", AdMainType.INTER)
-        checker.click(AdMainType.INTER)
-        assertPassed(checker.reserve("off-pending", typed(AdMainType.INTER)))
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(true, 2, 2))
-        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdMainType.INTER)))
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(false, 0, 0))
+        checker.impression("quota-off", AdSceneType.INTER)
+        checker.click(AdSceneType.INTER)
+        assertPassed(checker.reserve("off-pending", typed(AdSceneType.INTER)))
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(true, 2, 2))
+        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdSceneType.INTER)))
         checker.release("off-pending")
-        assertPassed(checker.check(typed(AdMainType.INTER)))
+        assertPassed(checker.check(typed(AdSceneType.INTER)))
         checker.policy = checker.policy.copy(frequency = checker.policy.frequency.copy(enabled = false))
-        checker.impression("frequency-off", AdMainType.INTER)
-        checker.click(AdMainType.INTER)
-        assertPassed(checker.reserve("frequency-off-pending", typed(AdMainType.INTER)))
+        checker.impression("frequency-off", AdSceneType.INTER)
+        checker.click(AdSceneType.INTER)
+        assertPassed(checker.reserve("frequency-off-pending", typed(AdSceneType.INTER)))
         checker.policy = checker.policy.copy(enabled = false)
-        checker.impression("global-off", AdMainType.INTER)
-        checker.click(AdMainType.INTER)
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(true, 20, 3))
-        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.check(typed(AdMainType.INTER)))
-        assertEquals(AdUsageStore.DailyUsage(3, 3), usage.dailyUsage(wall, AdMainType.INTER))
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(true, 4, 4))
-        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdMainType.INTER)))
+        checker.impression("global-off", AdSceneType.INTER)
+        checker.click(AdSceneType.INTER)
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(true, 20, 3))
+        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.check(typed(AdSceneType.INTER)))
+        assertEquals(AdUsageStore.DailyUsage(3, 3), usage.dailyUsage(wall, AdSceneType.INTER))
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(true, 4, 4))
+        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdSceneType.INTER)))
         checker.release("frequency-off-pending")
-        assertPassed(checker.check(typed(AdMainType.INTER)))
+        assertPassed(checker.check(typed(AdSceneType.INTER)))
     }
 
     @Test
     fun `v2 same pending opportunity rechecks own type without consuming other type pending`() {
-        checker.policy = typedPolicy(AdMainType.OPEN to AdMainTypeQuota(true, 1, 2),
-            AdMainType.INTER to AdMainTypeQuota(true, 1, 2))
-        assertPassed(checker.reserve("open", typed(AdMainType.OPEN)))
-        assertPassed(checker.reserve("inter", typed(AdMainType.INTER)))
-        assertPassed(checker.reserve("open", typed(AdMainType.OPEN)))
-        assertBlocked(AdBlockReason.INVALID_MAIN_TYPE, checker.reserve("open", typed(AdMainType.INTER)))
-        checker.policy = typedPolicy(AdMainType.OPEN to AdMainTypeQuota(true, 0, 2))
-        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.reserve("open", typed(AdMainType.OPEN)))
+        checker.policy = typedPolicy(AdSceneType.OPEN to AdSceneQuota(true, 1, 2),
+            AdSceneType.INTER to AdSceneQuota(true, 1, 2))
+        assertPassed(checker.reserve("open", typed(AdSceneType.OPEN)))
+        assertPassed(checker.reserve("inter", typed(AdSceneType.INTER)))
+        assertPassed(checker.reserve("open", typed(AdSceneType.OPEN)))
+        assertBlocked(AdBlockReason.INVALID_SCENE_TYPE, checker.reserve("open", typed(AdSceneType.INTER)))
+        checker.policy = typedPolicy(AdSceneType.OPEN to AdSceneQuota(true, 0, 2))
+        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.reserve("open", typed(AdSceneType.OPEN)))
         checker.release("open")
         checker.release("open")
-        checker.policy = typedPolicy(AdMainType.OPEN to AdMainTypeQuota(true, 1, 2))
-        assertPassed(checker.reserve("replacement", typed(AdMainType.OPEN)))
+        checker.policy = typedPolicy(AdSceneType.OPEN to AdSceneQuota(true, 1, 2))
+        assertPassed(checker.reserve("replacement", typed(AdSceneType.OPEN)))
     }
 
     @Test
     fun `v2 concurrent reservations permit one per type at last show quota`() {
-        checker.policy = typedPolicy(AdMainType.OPEN to AdMainTypeQuota(true, 1, 10),
-            AdMainType.INTER to AdMainTypeQuota(true, 1, 10))
+        checker.policy = typedPolicy(AdSceneType.OPEN to AdSceneQuota(true, 1, 10),
+            AdSceneType.INTER to AdSceneQuota(true, 1, 10))
         val pool = Executors.newFixedThreadPool(8)
         val ready = CountDownLatch(8)
         val start = CountDownLatch(1)
         try {
             val futures = (1..8).map { id -> pool.submit(Callable {
-                val type = if (id % 2 == 0) AdMainType.OPEN else AdMainType.INTER
+                val type = if (id % 2 == 0) AdSceneType.OPEN else AdSceneType.INTER
                 ready.countDown()
                 assertTrue(start.await(5, TimeUnit.SECONDS))
                 type to checker.reserve("typed-concurrent-$id", typed(type))
@@ -483,7 +483,7 @@ class AdPolicyCheckerTest {
             assertTrue(ready.await(5, TimeUnit.SECONDS))
             start.countDown()
             val results = futures.map { it.get(5, TimeUnit.SECONDS) }
-            listOf(AdMainType.OPEN, AdMainType.INTER).forEach { type ->
+            listOf(AdSceneType.OPEN, AdSceneType.INTER).forEach { type ->
                 val typedResults = results.filter { it.first == type }.map { it.second }
                 assertEquals(1, typedResults.count { it == AdPolicyCheckResult.Passed })
                 assertEquals(3, typedResults.count { it == AdPolicyCheckResult.Blocked(AdBlockReason.DAILY_SHOW_LIMIT) })
@@ -493,59 +493,59 @@ class AdPolicyCheckerTest {
 
     @Test
     fun `v2 pending survives local midnight while late actual callbacks use callback date`() {
-        checker.policy = typedPolicy(AdMainType.OPEN to AdMainTypeQuota(true, 1, 10))
-        assertPassed(checker.reserve("midnight-open", typed(AdMainType.OPEN)))
+        checker.policy = typedPolicy(AdSceneType.OPEN to AdSceneQuota(true, 1, 10))
+        assertPassed(checker.reserve("midnight-open", typed(AdSceneType.OPEN)))
         val yesterday = wall
         wall += 86_400_000L
-        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdMainType.OPEN)))
+        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdSceneType.OPEN)))
         checker.release("midnight-open")
-        assertPassed(checker.check(typed(AdMainType.OPEN)))
-        checker.impression("midnight-open", AdMainType.OPEN)
-        checker.impression("midnight-open", AdMainType.OPEN)
-        repeat(2) { checker.click(AdMainType.OPEN) }
-        assertEquals(AdUsageStore.DailyUsage(0, 0), usage.dailyUsage(yesterday, AdMainType.OPEN))
-        assertEquals(AdUsageStore.DailyUsage(1, 2), usage.dailyUsage(wall, AdMainType.OPEN))
-        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdMainType.OPEN)))
+        assertPassed(checker.check(typed(AdSceneType.OPEN)))
+        checker.impression("midnight-open", AdSceneType.OPEN)
+        checker.impression("midnight-open", AdSceneType.OPEN)
+        repeat(2) { checker.click(AdSceneType.OPEN) }
+        assertEquals(AdUsageStore.DailyUsage(0, 0), usage.dailyUsage(yesterday, AdSceneType.OPEN))
+        assertEquals(AdUsageStore.DailyUsage(1, 2), usage.dailyUsage(wall, AdSceneType.OPEN))
+        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdSceneType.OPEN)))
         wall += 86_400_000L
-        assertPassed(checker.check(typed(AdMainType.OPEN)))
-        checker.impression("midnight-open", AdMainType.OPEN) // Same opportunity stays deduplicated across days.
-        assertEquals(AdUsageStore.DailyUsage(0, 0), usage.dailyUsage(wall, AdMainType.OPEN))
+        assertPassed(checker.check(typed(AdSceneType.OPEN)))
+        checker.impression("midnight-open", AdSceneType.OPEN) // Same opportunity stays deduplicated across days.
+        assertEquals(AdUsageStore.DailyUsage(0, 0), usage.dailyUsage(wall, AdSceneType.OPEN))
     }
 
     @Test
     fun `v2 deep copies quota map without resetting usage or first enable time`() {
-        val quotas = mutableMapOf(AdMainType.INTER to AdMainTypeQuota(true, 1, 3))
-        checker.policy = AdPolicy(frequency = AdFrequencyPolicy(true, mainTypeQuotas = quotas))
-        val enabledAt = usage.mainTypeUsageEnabledAtMillis
-        quotas[AdMainType.INTER] = AdMainTypeQuota(false)
+        val quotas = mutableMapOf(AdSceneType.INTER to AdSceneQuota(true, 1, 3))
+        checker.policy = AdPolicy(frequency = AdFrequencyPolicy(true, sceneQuotas = quotas))
+        val enabledAt = usage.sceneTypeUsageEnabledAtMillis
+        quotas[AdSceneType.INTER] = AdSceneQuota(false)
         quotas.clear()
-        assertTrue(checker.policy.frequency.mainTypeQuotas!!.getValue(AdMainType.INTER).enabled)
+        assertTrue(checker.policy.frequency.sceneQuotas!!.getValue(AdSceneType.INTER).enabled)
         assertThrows(UnsupportedOperationException::class.java) {
-            (checker.policy.frequency.mainTypeQuotas as MutableMap<AdMainType, AdMainTypeQuota>).clear()
+            (checker.policy.frequency.sceneQuotas as MutableMap<AdSceneType, AdSceneQuota>).clear()
         }
-        checker.impression("stored-inter", AdMainType.INTER)
+        checker.impression("stored-inter", AdSceneType.INTER)
         wall += 1_000L
         usage = AdUsageStore(RuntimeEnvironment.getApplication(), wall)
         checker = newChecker()
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(true, 1, 3))
-        assertEquals(enabledAt, usage.mainTypeUsageEnabledAtMillis)
-        assertEquals(AdUsageStore.DailyUsage(1, 0), usage.dailyUsage(wall, AdMainType.INTER))
-        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdMainType.INTER)))
-        assertPassed(checker.check(typed(AdMainType.OPEN)))
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(true, 1, 3))
+        assertEquals(enabledAt, usage.sceneTypeUsageEnabledAtMillis)
+        assertEquals(AdUsageStore.DailyUsage(1, 0), usage.dailyUsage(wall, AdSceneType.INTER))
+        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdSceneType.INTER)))
+        assertPassed(checker.check(typed(AdSceneType.OPEN)))
     }
 
     @Test
     fun `v2 keeps time conditions and rewarded exemptions independent of quotas`() {
-        checker.policy = typedPolicy(AdMainType.REWARDED to AdMainTypeQuota(true, 5, 0)).copy(
+        checker.policy = typedPolicy(AdSceneType.REWARDED to AdSceneQuota(true, 5, 0)).copy(
             frequency = AdFrequencyPolicy(true, 120, 120,
-                mainTypeQuotas = mapOf(AdMainType.REWARDED to AdMainTypeQuota(true, 5, 0))))
+                sceneQuotas = mapOf(AdSceneType.REWARDED to AdSceneQuota(true, 5, 0))))
         checker.fullscreenClosed()
-        assertBlocked(AdBlockReason.NEW_USER_PROTECTION, checker.check(typed(AdMainType.NATIVE)))
+        assertBlocked(AdBlockReason.NEW_USER_PROTECTION, checker.check(typed(AdSceneType.NATIVE)))
         assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT,
-            checker.check(rewarded.copy(mainType = AdMainType.REWARDED)))
+            checker.check(rewarded.copy(sceneType = AdSceneType.REWARDED)))
         wall += 120_000L
-        assertPassed(checker.check(typed(AdMainType.NATIVE)))
-        assertBlocked(AdBlockReason.FULLSCREEN_GAP, checker.check(auto.copy(mainType = AdMainType.OPEN)))
+        assertPassed(checker.check(typed(AdSceneType.NATIVE)))
+        assertBlocked(AdBlockReason.FULLSCREEN_GAP, checker.check(auto.copy(sceneType = AdSceneType.OPEN)))
         assertPassed(checker.checkLoad())
     }
 
@@ -554,65 +554,65 @@ class AdPolicyCheckerTest {
         checker.impression("old")
         repeat(3) { checker.click() }
         checker.fullscreenClosed()
-        val prefs = RuntimeEnvironment.getApplication().getSharedPreferences("cashcraft_ads_usage", 0)
-        val oldValues = prefs.all.toMap()
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(true, 1, 1))
-        assertPassed(checker.check(typed(AdMainType.INTER)))
-        checker.impression("new", AdMainType.OPEN)
-        checker.click(AdMainType.OPEN)
+        val prefs = ShadowMMKV.values
+        val oldValues = prefs.toMap()
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(true, 1, 1))
+        assertPassed(checker.check(typed(AdSceneType.INTER)))
+        checker.impression("new", AdSceneType.OPEN)
+        checker.click(AdSceneType.OPEN)
         checker.impression("missing") // Broken v2 callback must not contaminate preserved legacy totals.
         checker.click()
-        oldValues.forEach { (key, value) -> assertEquals(value, prefs.all[key]) }
+        oldValues.forEach { (key, value) -> assertEquals(value, prefs[key]) }
         assertEquals(AdUsageStore.DailyUsage(1, 3), usage.dailyUsage(wall))
-        assertEquals(AdUsageStore.DailyUsage(1, 1), usage.dailyUsage(wall, AdMainType.OPEN))
-        assertEquals(AdUsageStore.DailyUsage(0, 0), usage.dailyUsage(wall, AdMainType.INTER))
+        assertEquals(AdUsageStore.DailyUsage(1, 1), usage.dailyUsage(wall, AdSceneType.OPEN))
+        assertEquals(AdUsageStore.DailyUsage(0, 0), usage.dailyUsage(wall, AdSceneType.INTER))
     }
 
     @Test
     fun `v2 blocked diagnostic includes identity counters pending thresholds and version`() {
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(true, 2, 3))
-        checker.impression("actual", AdMainType.INTER)
-        checker.click(AdMainType.INTER)
-        checker.reserve("pending", typed(AdMainType.INTER, "save"))
-        val message = checker.blockedDiagnostic("next", typed(AdMainType.INTER, "back"), AdBlockReason.DAILY_SHOW_LIMIT)
-        listOf("policy_version=2", "mainType=inter", "opportunity_id=next", "position=back",
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(true, 2, 3))
+        checker.impression("actual", AdSceneType.INTER)
+        checker.click(AdSceneType.INTER)
+        checker.reserve("pending", typed(AdSceneType.INTER, "save"))
+        val message = checker.blockedDiagnostic("next", typed(AdSceneType.INTER, "back"), AdBlockReason.DAILY_SHOW_LIMIT)
+        listOf("policy_version=2", "sceneType=inter", "opportunity_id=next", "position=back",
             "shows=1", "clicks=1", "pending=1", "show_threshold=2", "click_threshold=3").forEach {
             assertTrue("Missing $it in $message", message.contains(it))
         }
-        val missing = checker.blockedDiagnostic("unknown", inline, AdBlockReason.INVALID_MAIN_TYPE)
-        assertTrue(missing.contains("mainType=missing"))
+        val missing = checker.blockedDiagnostic("unknown", inline, AdBlockReason.INVALID_SCENE_TYPE)
+        assertTrue(missing.contains("sceneType=missing"))
         assertTrue(missing.contains("shows=0 clicks=0"))
     }
 
     @Test
     fun `v2 counters and pending arithmetic do not overflow large quotas`() {
-        checker.policy = typedPolicy(AdMainType.INTER to AdMainTypeQuota(true, Long.MAX_VALUE, Long.MAX_VALUE))
-        val prefs = RuntimeEnvironment.getApplication().getSharedPreferences("cashcraft_ads_usage", 0)
+        checker.policy = typedPolicy(AdSceneType.INTER to AdSceneQuota(true, Long.MAX_VALUE, Long.MAX_VALUE))
+        val prefs = ShadowMMKV.values
         val day = java.time.Instant.ofEpochMilli(wall).atZone(java.time.ZoneId.systemDefault()).toLocalDate()
-        prefs.edit().putLong("main_type_v2_${day}_inter_shows", Long.MAX_VALUE - 1).commit()
-        assertPassed(checker.reserve("last", typed(AdMainType.INTER)))
-        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.reserve("overflow", typed(AdMainType.INTER)))
-        checker.impression("last", AdMainType.INTER)
-        checker.impression("unsolicited", AdMainType.INTER)
-        assertEquals(Long.MAX_VALUE, usage.dailyUsage(wall, AdMainType.INTER).shows)
+        prefs["scene_type_${day}_inter_shows"] = Long.MAX_VALUE - 1
+        assertPassed(checker.reserve("last", typed(AdSceneType.INTER)))
+        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.reserve("overflow", typed(AdSceneType.INTER)))
+        checker.impression("last", AdSceneType.INTER)
+        checker.impression("unsolicited", AdSceneType.INTER)
+        assertEquals(Long.MAX_VALUE, usage.dailyUsage(wall, AdSceneType.INTER).shows)
     }
 
     @Test
     fun `legacy typed requests still consume shared legacy quota and never activate v2 storage`() {
         checker.policy = limited(shows = 2, clicks = 2)
-        assertPassed(checker.reserve("typed-open", typed(AdMainType.OPEN)))
-        checker.impression("typed-open", AdMainType.OPEN)
-        checker.click(AdMainType.OPEN)
-        assertPassed(checker.reserve("typed-inter", typed(AdMainType.INTER)))
-        checker.impression("typed-inter", AdMainType.INTER)
-        checker.click(AdMainType.INTER)
+        assertPassed(checker.reserve("typed-open", typed(AdSceneType.OPEN)))
+        checker.impression("typed-open", AdSceneType.OPEN)
+        checker.click(AdSceneType.OPEN)
+        assertPassed(checker.reserve("typed-inter", typed(AdSceneType.INTER)))
+        checker.impression("typed-inter", AdSceneType.INTER)
+        checker.click(AdSceneType.INTER)
         assertEquals(AdUsageStore.DailyUsage(2, 2), usage.dailyUsage(wall))
-        assertEquals(AdUsageStore.DailyUsage(0, 0), usage.dailyUsage(wall, AdMainType.OPEN))
-        assertEquals(AdUsageStore.DailyUsage(0, 0), usage.dailyUsage(wall, AdMainType.INTER))
-        assertEquals(null, usage.mainTypeUsageEnabledAtMillis)
-        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdMainType.NATIVE)))
+        assertEquals(AdUsageStore.DailyUsage(0, 0), usage.dailyUsage(wall, AdSceneType.OPEN))
+        assertEquals(AdUsageStore.DailyUsage(0, 0), usage.dailyUsage(wall, AdSceneType.INTER))
+        assertEquals(null, usage.sceneTypeUsageEnabledAtMillis)
+        assertBlocked(AdBlockReason.DAILY_SHOW_LIMIT, checker.check(typed(AdSceneType.NATIVE)))
         checker.policy = limited(shows = 3, clicks = 2)
-        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.check(typed(AdMainType.BANNER)))
+        assertBlocked(AdBlockReason.DAILY_CLICK_LIMIT, checker.check(typed(AdSceneType.BANNER)))
     }
 
     @Test
@@ -622,14 +622,14 @@ class AdPolicyCheckerTest {
             Long::class.javaPrimitiveType, Long::class.javaPrimitiveType, Long::class.javaPrimitiveType,
         ).newInstance(true, 120L, 60L, 20L, 3L)
         assertEquals(AdFrequencyPolicy(true, 120, 60, 20, 3), legacy)
-        assertEquals(null, legacy.mainTypeQuotas)
+        assertEquals(null, legacy.sceneQuotas)
     }
 
-    private fun typed(mainType: AdMainType, position: String = "entry") =
-        AdPolicyRequest(position, mainType = mainType)
+    private fun typed(sceneType: AdSceneType, position: String = "entry") =
+        AdPolicyRequest(position, sceneType = sceneType)
 
-    private fun typedPolicy(vararg quotas: Pair<AdMainType, AdMainTypeQuota>) =
-        AdPolicy(frequency = AdFrequencyPolicy(enabled = true, mainTypeQuotas = mapOf(*quotas)))
+    private fun typedPolicy(vararg quotas: Pair<AdSceneType, AdSceneQuota>) =
+        AdPolicy(frequency = AdFrequencyPolicy(enabled = true, sceneQuotas = mapOf(*quotas)))
 
     private fun newChecker() = AdPolicyChecker(usage, { wall }, { elapsed })
 

@@ -40,7 +40,8 @@ import org.robolectric.util.ReflectionHelpers
 @RunWith(RobolectricTestRunner::class)
 @Config(
     sdk = [33], manifest = Config.NONE,
-    shadows = [ConsentPlatformShadow::class, InitializationMobileAdsShadow::class],
+    shadows = [ConsentPlatformShadow::class, InitializationMobileAdsShadow::class,
+        com.cashcraft.ads.mediation.internal.ShadowMMKV::class],
     instrumentedPackages = ["com.google.android.libraries.ads.mobile.sdk.MobileAds\$Companion"],
 )
 class AdsInitializationTest {

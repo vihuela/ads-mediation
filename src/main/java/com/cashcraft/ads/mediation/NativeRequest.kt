@@ -10,7 +10,7 @@ data class NativeRequest @JvmOverloads constructor(
     /** 有可用缓存时立即选择；两端均无缓存时仍按竞价期限等待。 */
     val preferCachedAds: Boolean = false,
     /** Business entry identity; fallback materials never replace it. */
-    val mainType: AdMainType? = AdMainType.NATIVE,
+    val sceneType: AdSceneType? = AdSceneType.NATIVE,
 ) {
     internal fun failureReason(): String? = when {
         position.isBlank() -> "invalid_position"
@@ -30,7 +30,7 @@ internal data class ResolvedNativeRequest @JvmOverloads constructor(
     val topOnPlacementId: String? = null,
     val bidTimeoutMillis: Long = 7_000,
     val preferCachedAds: Boolean = false,
-    val mainType: AdMainType? = AdMainType.NATIVE,
+    val sceneType: AdSceneType? = AdSceneType.NATIVE,
 ) {
     val isBidding: Boolean get() = platform == null && admobAdUnitId != null && topOnPlacementId != null
 
@@ -44,9 +44,9 @@ internal data class ResolvedNativeRequest @JvmOverloads constructor(
     }
 
     fun candidates(): List<ResolvedNativeRequest> = if (platform != null) listOf(this) else buildList {
-        admobAdUnitId?.let { add(ResolvedNativeRequest(AdPlatform.ADMOB, it, position, preferCachedAds = preferCachedAds, mainType = mainType)) }
+        admobAdUnitId?.let { add(ResolvedNativeRequest(AdPlatform.ADMOB, it, position, preferCachedAds = preferCachedAds, sceneType = sceneType)) }
         topOnPlacementId?.let { add(ResolvedNativeRequest(AdPlatform.TOPON, it, position, topOnTemplateAspectRatio,
-            preferCachedAds = preferCachedAds, mainType = mainType)) }
+            preferCachedAds = preferCachedAds, sceneType = sceneType)) }
     }
 }
 
@@ -68,7 +68,7 @@ internal fun AdProviderConfig.resolveNativeRequest(request: NativeRequest, fullS
         topOnPlacementId = topOnId,
         bidTimeoutMillis = request.bidTimeoutMillis,
         preferCachedAds = request.preferCachedAds,
-        mainType = request.mainType,
+        sceneType = request.sceneType,
     )
 }
 

@@ -52,7 +52,7 @@ internal class AdPolicyAttempt(val request: AdPolicyRequest) {
     fun impression() {
         if (hasImpression) return
         hasImpression = true
-        Ads.policyChecker?.impression(id, request.mainType)
+        Ads.policyChecker?.impression(id, request.sceneType)
         if (completed && request.fullscreen) Ads.policyChecker?.fullscreenClosed()
         Ads.onPolicyUsageChanged()
     }
@@ -60,7 +60,7 @@ internal class AdPolicyAttempt(val request: AdPolicyRequest) {
     /** A real SDK click remains usage even when the page opportunity has completed. */
     @Synchronized
     fun click() {
-        Ads.policyChecker?.click(request.mainType)
+        Ads.policyChecker?.click(request.sceneType)
         Ads.onPolicyUsageChanged()
     }
 

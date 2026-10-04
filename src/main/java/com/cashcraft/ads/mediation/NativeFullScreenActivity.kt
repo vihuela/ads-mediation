@@ -58,7 +58,7 @@ class NativeFullScreenActivity : FragmentActivity() {
         }
         // Only the host Close button may dismiss the ad through user navigation.
         onBackPressedDispatcher.addCallback(this) { /* Consume system back, including gestures. */ }
-        card = AdsNativeView(this, this, NativeRequest(pending.request.position, mainType = pending.policyAttempt?.request?.mainType), pending.layout,
+        card = AdsNativeView(this, this, NativeRequest(pending.request.position, sceneType = pending.policyAttempt?.request?.sceneType), pending.layout,
             onStateChanged = pending::onStateChanged).also { root.addView(it, ViewGroup.LayoutParams(-1, -1)) }
     }
 
@@ -203,7 +203,7 @@ internal class NativeFullScreenSession(
             trace: (String) -> Unit = {},
             onResult: (AdShowResult) -> Unit): NativeFullScreenSession? {
             if (attempt.policy == null) attempt.policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true,
-                mainType = AdMainType.NATIVE_FULLSCREEN))
+                sceneType = AdSceneType.NATIVE_FULLSCREEN))
             fun fail(reason: String): NativeFullScreenSession? {
                 attempt.complete()
                 onResult(attempt.policy!!.result(AdShowResult.Failed(reason)))
@@ -212,7 +212,7 @@ internal class NativeFullScreenSession(
             attempt.policy!!.check().let {
                 if (it is AdPolicyCheckResult.Blocked) return fail(it.reason.code)
             }
-            val request = NativeRequest(position, mainType = attempt.policy!!.request.mainType)
+            val request = NativeRequest(position, sceneType = attempt.policy!!.request.sceneType)
             request.failureReason()?.let { return fail(it) }
             val resolved = Ads.resolveNativeRequest(request, fullScreen = true) ?: return fail("sdk_not_initialized")
             resolved.failureReason()?.let { return fail(it) }

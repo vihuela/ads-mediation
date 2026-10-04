@@ -23,6 +23,7 @@ import com.google.android.libraries.ads.mobile.sdk.common.LoadAdError
 import com.google.android.libraries.ads.mobile.sdk.common.PreloadCallback
 import com.google.android.libraries.ads.mobile.sdk.common.PreloadConfiguration
 import java.lang.reflect.Proxy
+import com.cashcraft.ads.mediation.internal.ShadowMMKV
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -40,6 +41,7 @@ import org.robolectric.util.ReflectionHelpers
 @Config(
     sdk = [33], manifest = Config.NONE,
     shadows = [
+        ShadowMMKV::class,
         PolicyAppOpenPreloaderShadow::class, PolicyInterstitialPreloaderShadow::class,
         PolicyRewardedPreloaderShadow::class, ShadowBannerPreloader::class, ShadowBannerLoader::class,
     ],
@@ -78,7 +80,7 @@ class ProviderPreloadPolicyTest {
         ShadowBannerPreloader.nextAd = null
         ShadowBannerLoader.loads.clear()
         val application = RuntimeEnvironment.getApplication()
-        application.getSharedPreferences("cashcraft_ads_usage", 0).edit().clear().commit()
+        ShadowMMKV.reset()
         checker = AdPolicyChecker(AdUsageStore(application, 0L))
         installChecker(checker)
         ReflectionHelpers.setStaticField(AdMobAds::class.java, "config", AdMobConfig(AdMobIds.TEST))
@@ -214,14 +216,14 @@ class ProviderPreloadPolicyTest {
 
     @Test fun `inter quota exhaustion leaves shared pools available for open fallback`() {
         checker.policy = AdPolicy(frequency = AdFrequencyPolicy(enabled = true,
-            mainTypeQuotas = AdMainType.entries.associateWith {
-                if (it == AdMainType.INTER) AdMainTypeQuota(true, 0, 3) else AdMainTypeQuota()
+            sceneQuotas = AdSceneType.entries.associateWith {
+                if (it == AdSceneType.INTER) AdSceneQuota(true, 0, 3) else AdSceneQuota()
             }))
         startFullScreenPools()
         assertEquals(AdPolicyCheckResult.Blocked(AdBlockReason.DAILY_SHOW_LIMIT),
-            checker.check(AdPolicyRequest("save", mainType = AdMainType.INTER)))
+            checker.check(AdPolicyRequest("save", sceneType = AdSceneType.INTER)))
         assertEquals(AdPolicyCheckResult.Passed,
-            checker.check(AdPolicyRequest("open", mainType = AdMainType.OPEN)))
+            checker.check(AdPolicyRequest("open", sceneType = AdSceneType.OPEN)))
         assertTrue(Ads.canLoadAds(AdPlatform.ADMOB))
         AdMobAds.onPolicyChanged()
         assertEquals(3, PolicyPreloaderCalls.active.size)

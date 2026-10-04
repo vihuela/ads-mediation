@@ -21,7 +21,7 @@ data class BannerRequest @JvmOverloads constructor(
     val adUnitId: String,
     val position: String,
     val size: BannerSize,
-    val mainType: AdMainType? = AdMainType.BANNER,
+    val sceneType: AdSceneType? = AdSceneType.BANNER,
 ) {
     init {
         require(adUnitId.isNotBlank()) { "adUnitId must not be blank" }

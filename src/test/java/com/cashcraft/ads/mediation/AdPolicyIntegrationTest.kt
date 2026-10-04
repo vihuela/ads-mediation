@@ -12,7 +12,7 @@ import org.robolectric.annotation.Config
 import org.robolectric.util.ReflectionHelpers
 
 @RunWith(RobolectricTestRunner::class)
-@Config(manifest = Config.NONE, sdk = [28])
+@Config(manifest = Config.NONE, sdk = [28], shadows = [ShadowMMKV::class])
 class AdPolicyIntegrationTest {
     private val previous = listOf("config", "policyChecker", "policyUpdatePosted").associateWith {
         ReflectionHelpers.getStaticField<Any?>(Ads::class.java, it)
@@ -24,7 +24,7 @@ class AdPolicyIntegrationTest {
 
     @Before fun prepare() {
         val context = RuntimeEnvironment.getApplication()
-        context.getSharedPreferences("cashcraft_ads_usage", 0).edit().clear().commit()
+        ShadowMMKV.reset()
         checker = AdPolicyChecker(AdUsageStore(context, 1), { 1_000_000L }, { 1_000_000L })
         ReflectionHelpers.setStaticField(Ads::class.java, "policyChecker", checker)
         ReflectionHelpers.setStaticField(Ads::class.java, "policyUpdatePosted", true)
@@ -108,7 +108,7 @@ class AdPolicyIntegrationTest {
     }
 
     @Test fun `facade assigns every fullscreen entry its own quota before provider lookup`() {
-        checker.policy = typedPolicy(AdMainType.entries.associateWith { AdMainTypeQuota(true, 0, 3) })
+        checker.policy = typedPolicy(AdSceneType.entries.associateWith { AdSceneQuota(true, 0, 3) })
         val results = mutableListOf<AdShowResult>()
         val unusedHost = android.app.Activity()
         Ads.showOpen("open", onResult = results::add)
@@ -124,18 +124,19 @@ class AdPolicyIntegrationTest {
     @Test fun `missing identity fails closed even when frequency is disabled`() {
         checker.policy = typedPolicy(emptyMap()).let { it.copy(frequency = it.frequency.copy(enabled = false)) }
         val results = mutableListOf<AdShowResult>()
-        Ads.showOpen("open", mainType = null, onResult = results::add)
-        assertEquals(listOf(AdShowResult.Blocked(AdBlockReason.INVALID_MAIN_TYPE)), results)
+        Ads.showNativeFullScreen(android.app.Activity(), "native", NativeLayout.Custom { error("must not render") },
+            sceneType = null, onResult = results::add)
+        assertEquals(listOf(AdShowResult.Blocked(AdBlockReason.INVALID_SCENE_TYPE)), results)
         assertTrue(events.isEmpty())
     }
 
     @Test fun `open served by interstitial preserves origin for impressions and repeated late clicks`() {
         checker.policy = typedPolicy(mapOf(
-            AdMainType.OPEN to AdMainTypeQuota(true, 2, 2),
-            AdMainType.INTER to AdMainTypeQuota(true, 2, 2),
+            AdSceneType.OPEN to AdSceneQuota(true, 2, 2),
+            AdSceneType.INTER to AdSceneQuota(true, 2, 2),
         ))
         val attempt = FullScreenShowAttempt().also {
-            it.policy = AdPolicyAttempt(AdPolicyRequest("cold_start", fullscreen = true, mainType = AdMainType.OPEN))
+            it.policy = AdPolicyAttempt(AdPolicyRequest("cold_start", fullscreen = true, sceneType = AdSceneType.OPEN))
             attempts += it
         }
         assertEquals(AdPolicyCheckResult.Passed, attempt.policy!!.reserve())
@@ -146,20 +147,20 @@ class AdPolicyIntegrationTest {
         session.impression("network", "response")
         session.emit(AdEventName.CLICK)
         assertEquals(AdPolicyCheckResult.Passed,
-            checker.check(AdPolicyRequest("hot_start", mainType = AdMainType.OPEN)))
+            checker.check(AdPolicyRequest("hot_start", sceneType = AdSceneType.OPEN)))
         attempt.complete()
         session.emit(AdEventName.CLICK)
         assertEquals(AdPolicyCheckResult.Blocked(AdBlockReason.DAILY_CLICK_LIMIT),
-            checker.check(AdPolicyRequest("hot_start", mainType = AdMainType.OPEN)))
+            checker.check(AdPolicyRequest("hot_start", sceneType = AdSceneType.OPEN)))
         assertEquals(AdPolicyCheckResult.Passed,
-            checker.check(AdPolicyRequest("save", mainType = AdMainType.INTER)))
+            checker.check(AdPolicyRequest("save", sceneType = AdSceneType.INTER)))
         assertEquals(2, events.count { it.name == AdEventName.CLICK })
         assertEquals(1, events.count { it.name == AdEventName.IMPRESSION })
     }
 
     @Test fun `native fallback adapter counts only the original inter opportunity`() {
-        checker.policy = typedPolicy(mapOf(AdMainType.INTER to AdMainTypeQuota(true, 1, 2)))
-        val original = AdPolicyAttempt(AdPolicyRequest("save", fullscreen = true, mainType = AdMainType.INTER))
+        checker.policy = typedPolicy(mapOf(AdSceneType.INTER to AdSceneQuota(true, 1, 2)))
+        val original = AdPolicyAttempt(AdPolicyRequest("save", fullscreen = true, sceneType = AdSceneType.INTER))
         val fallback = com.cashcraft.ads.mediation.internal.nativeads.NativeCardPolicyAdapter(original, owned = false)
         assertNull(fallback.reserve())
         fallback.impression()
@@ -168,24 +169,41 @@ class AdPolicyIntegrationTest {
         original.complete()
         fallback.click()
         assertEquals(AdPolicyCheckResult.Blocked(AdBlockReason.DAILY_CLICK_LIMIT),
-            checker.check(AdPolicyRequest("back", mainType = AdMainType.INTER)))
-        for (type in listOf(AdMainType.NATIVE, AdMainType.NATIVE_FULLSCREEN, AdMainType.OPEN)) {
-            assertEquals(AdPolicyCheckResult.Passed, checker.check(AdPolicyRequest("other", mainType = type)))
+            checker.check(AdPolicyRequest("back", sceneType = AdSceneType.INTER)))
+        for (type in listOf(AdSceneType.NATIVE, AdSceneType.NATIVE_FULLSCREEN, AdSceneType.OPEN)) {
+            assertEquals(AdPolicyCheckResult.Passed, checker.check(AdPolicyRequest("other", sceneType = type)))
         }
+    }
+
+    @Test fun `开屏原生兜底只消耗开屏场景配额`() {
+        checker.policy = typedPolicy(AdSceneType.entries.associateWith { AdSceneQuota(true, 1, 1) })
+        val original = AdPolicyAttempt(AdPolicyRequest("cold_start", fullscreen = true, sceneType = AdSceneType.OPEN))
+        val fallback = com.cashcraft.ads.mediation.internal.nativeads.NativeCardPolicyAdapter(original, owned = false)
+        assertNull(fallback.reserve())
+        fallback.impression()
+        fallback.impression()
+        fallback.click()
+        original.complete()
+        assertEquals(AdPolicyCheckResult.Blocked(AdBlockReason.DAILY_CLICK_LIMIT),
+            checker.check(AdPolicyRequest("next", sceneType = AdSceneType.OPEN)))
+        for (type in AdSceneType.entries - AdSceneType.OPEN) {
+            assertEquals(AdPolicyCheckResult.Passed, checker.check(AdPolicyRequest("other", sceneType = type)))
+        }
+        assertEquals(AdSceneType.NATIVE, NativeRequest("inline").sceneType)
     }
 
     @Test fun `native platform resolution and candidates retain explicit origin`() {
         val provider = BiddingProviderConfig(AdMobProviderConfig(AdMobIds.TEST),
             TopOnProviderConfig(TopOnIds("app", "key", nativePlacementId = "native")))
-        for (type in listOf(AdMainType.OPEN, AdMainType.INTER, AdMainType.NATIVE_FULLSCREEN)) {
-            val resolved = provider.resolveNativeRequest(NativeRequest("fallback", mainType = type), fullScreen = true)
-            assertEquals(type, resolved.mainType)
-            assertTrue(resolved.candidates().all { it.mainType == type })
+        for (type in listOf(AdSceneType.OPEN, AdSceneType.INTER, AdSceneType.NATIVE_FULLSCREEN)) {
+            val resolved = provider.resolveNativeRequest(NativeRequest("fallback", sceneType = type), fullScreen = true)
+            assertEquals(type, resolved.sceneType)
+            assertTrue(resolved.candidates().all { it.sceneType == type })
         }
     }
 
-    private fun typedPolicy(quotas: Map<AdMainType, AdMainTypeQuota>) = AdPolicy(
+    private fun typedPolicy(quotas: Map<AdSceneType, AdSceneQuota>) = AdPolicy(
         frequency = AdFrequencyPolicy(enabled = true,
-            mainTypeQuotas = AdMainType.entries.associateWith { quotas[it] ?: AdMainTypeQuota() }),
+            sceneQuotas = AdSceneType.entries.associateWith { quotas[it] ?: AdSceneQuota() }),
     )
 }

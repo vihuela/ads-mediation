@@ -48,7 +48,7 @@ import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.cashcraft.ads.mediation.internal.AutoAppOpenController
 import com.cashcraft.ads.mediation.internal.FullScreenShowGate
 import com.cashcraft.ads.mediation.internal.FullScreenShowAttempt
-import com.cashcraft.ads.mediation.AdMainType
+import com.cashcraft.ads.mediation.AdSceneType
 import com.cashcraft.ads.mediation.internal.AdPolicyAttempt
 import com.cashcraft.ads.mediation.internal.AdPolicyRequest
 import com.cashcraft.ads.mediation.internal.admob.AdMobConfig
@@ -184,7 +184,7 @@ object AdMobAds {
                         this.config.ids.appOpenId,
                         attempt = FullScreenShowAttempt().apply {
                             policy = AdPolicyAttempt(AdPolicyRequest(AdMobAds.config.appOpenPosition,
-                                fullscreen = true, mainType = AdMainType.OPEN))
+                                fullscreen = true, sceneType = AdSceneType.OPEN))
                         },
                     )
                 },
@@ -651,7 +651,7 @@ object AdMobAds {
         onResult: (AdMobShowResult) -> Unit,
         session: AdShowSession = events.begin(AdMobFormat.APP_OPEN, position, config.ids.appOpenId,
             FullScreenShowAttempt().apply { policy = AdPolicyAttempt(AdPolicyRequest(position,
-                fullscreen = true, userInitiated = false, mainType = AdMainType.OPEN)) }),
+                fullscreen = true, userInitiated = false, sceneType = AdSceneType.OPEN)) }),
     ) {
         if (!canShow(activity, session, onResult = onResult)) return
         val ad = takeAd(AdMobFormat.APP_OPEN) as? AppOpenAd
@@ -682,7 +682,7 @@ object AdMobAds {
         onResult: (AdMobShowResult) -> Unit,
         session: AdShowSession = events.begin(AdMobFormat.INTERSTITIAL, position, config.ids.interstitialId,
             FullScreenShowAttempt().apply { policy = AdPolicyAttempt(AdPolicyRequest(position,
-                fullscreen = true, userInitiated = false, mainType = AdMainType.INTER)) }),
+                fullscreen = true, userInitiated = false, sceneType = AdSceneType.INTER)) }),
     ) {
         if (!canShow(activity, session, onResult)) return
         val ad = takeAd(AdMobFormat.INTERSTITIAL) as? InterstitialAd
@@ -713,7 +713,7 @@ object AdMobAds {
         onResult: (AdMobRewardResult) -> Unit,
         session: AdShowSession = events.begin(AdMobFormat.REWARDED, position, config.ids.rewardedId,
             FullScreenShowAttempt().apply { policy = AdPolicyAttempt(AdPolicyRequest(position,
-                fullscreen = true, userInitiated = true, mainType = AdMainType.REWARDED)) }),
+                fullscreen = true, userInitiated = true, sceneType = AdSceneType.REWARDED)) }),
     ) {
         val showResultCallback: (AdMobShowResult) -> Unit = { result ->
             onResult(

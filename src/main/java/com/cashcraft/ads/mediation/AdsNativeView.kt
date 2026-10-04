@@ -257,7 +257,7 @@ class AdsNativeView(
             policyAttemptFactory = {
                 if (activity is NativeFullScreenActivity) {
                     activity.policyAttempt?.let { NativeCardPolicyAdapter(it, owned = false) }
-                } else NativeCardPolicyAdapter(AdPolicyAttempt(AdPolicyRequest(request.position, mainType = request.mainType)))
+                } else NativeCardPolicyAdapter(AdPolicyAttempt(AdPolicyRequest(request.position, sceneType = request.sceneType)))
             },
             // 页面只领取共享库存；真实 SDK 准备事件由库存会话记录。
             recordLoadEvents = false,

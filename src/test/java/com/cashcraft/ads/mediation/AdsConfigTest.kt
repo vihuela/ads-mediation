@@ -207,7 +207,7 @@ class AdsConfigTest {
         assertEquals("invalid_native_bid_timeout", page.copy(bidTimeoutMillis = 0).failureReason())
         assertThrows(IllegalArgumentException::class.java) { google.ids.copy(nativeId = " ") }
         assertThrows(IllegalArgumentException::class.java) { topOn.ids.copy(nativePlacementId = " ") }
-        assertEquals(listOf("position", "topOnTemplateAspectRatio", "bidTimeoutMillis", "preferCachedAds", "mainType"),
+        assertEquals(listOf("position", "topOnTemplateAspectRatio", "bidTimeoutMillis", "preferCachedAds", "sceneType"),
             NativeRequest::class.java.declaredFields
                 .filterNot { it.isSynthetic || java.lang.reflect.Modifier.isStatic(it.modifiers) }
                 .map { it.name })

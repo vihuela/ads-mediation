@@ -14,12 +14,12 @@ data class AdFrequencyPolicy @JvmOverloads constructor(
     val fullscreenGapSeconds: Long = 0,
     val dailyMaxShows: Long = Long.MAX_VALUE,
     val dailyMaxClicks: Long = Long.MAX_VALUE,
-    /** Null selects legacy global quotas; even an empty map selects main-type quotas. */
-    val mainTypeQuotas: Map<AdMainType, AdMainTypeQuota>? = null,
+    /** null 使用全局配额；非 null（包括空映射）使用场景配额。 */
+    val sceneQuotas: Map<AdSceneType, AdSceneQuota>? = null,
 )
 
-/** Host entry identity, independent of the provider, position, or eventual ad format. */
-enum class AdMainType(val configKey: String) {
+/** 展示场景的配额归属，与广告平台、位置和最终广告格式无关。 */
+enum class AdSceneType(val configKey: String) {
     OPEN("open"),
     INTER("inter"),
     NATIVE_FULLSCREEN("native_fullscreen"),
@@ -28,7 +28,7 @@ enum class AdMainType(val configKey: String) {
     BANNER("banner"),
 }
 
-data class AdMainTypeQuota(
+data class AdSceneQuota(
     val enabled: Boolean = false,
     val dailyMaxShows: Long? = null,
     val dailyMaxClicks: Long? = null,
@@ -49,5 +49,5 @@ enum class AdBlockReason(val code: String) {
     FULLSCREEN_GAP("fullscreen_gap"),
     DAILY_SHOW_LIMIT("daily_show_limit"),
     DAILY_CLICK_LIMIT("daily_click_limit"),
-    INVALID_MAIN_TYPE("invalid_main_type"),
+    INVALID_SCENE_TYPE("invalid_main_type"),
 }

@@ -27,7 +27,7 @@ import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.cashcraft.ads.mediation.internal.AutoAppOpenController
 import com.cashcraft.ads.mediation.internal.FullScreenShowGate
 import com.cashcraft.ads.mediation.internal.FullScreenShowAttempt
-import com.cashcraft.ads.mediation.AdMainType
+import com.cashcraft.ads.mediation.AdSceneType
 import com.cashcraft.ads.mediation.internal.AdPolicyAttempt
 import com.cashcraft.ads.mediation.internal.AdPolicyRequest
 import com.cashcraft.ads.mediation.internal.dismissedResult
@@ -185,7 +185,7 @@ internal object TopOnAds {
                         this.config.ids.appOpenPlacementId,
                         attempt = FullScreenShowAttempt().apply {
                             policy = AdPolicyAttempt(AdPolicyRequest(TopOnAds.commonConfig.appOpenPosition,
-                                fullscreen = true, mainType = AdMainType.OPEN))
+                                fullscreen = true, sceneType = AdSceneType.OPEN))
                         },
                     )
                 },
@@ -750,7 +750,7 @@ internal object TopOnAds {
         onResult: (AdShowResult) -> Unit,
         session: AdShowSession = events.begin(AdFormat.APP_OPEN, position, config.ids.appOpenPlacementId,
             FullScreenShowAttempt().apply { policy = AdPolicyAttempt(AdPolicyRequest(position,
-                fullscreen = true, userInitiated = false, mainType = AdMainType.OPEN)) }),
+                fullscreen = true, userInitiated = false, sceneType = AdSceneType.OPEN)) }),
     ) {
         if (!canShow(activity, session, onResult = onResult)) return
         if (!appOpenAd.isAdReady) {
@@ -860,7 +860,7 @@ internal object TopOnAds {
         onResult: (AdShowResult) -> Unit,
         session: AdShowSession = events.begin(AdFormat.INTERSTITIAL, position, config.ids.interstitialPlacementId,
             FullScreenShowAttempt().apply { policy = AdPolicyAttempt(AdPolicyRequest(position,
-                fullscreen = true, userInitiated = false, mainType = AdMainType.INTER)) }),
+                fullscreen = true, userInitiated = false, sceneType = AdSceneType.INTER)) }),
     ) {
         if (!canShow(activity, session, onResult)) return
         if (!interstitialAd.isAdReady) {
@@ -892,7 +892,7 @@ internal object TopOnAds {
         onResult: (AdRewardResult) -> Unit,
         session: AdShowSession = events.begin(AdFormat.REWARDED, position, config.ids.rewardedPlacementId,
             FullScreenShowAttempt().apply { policy = AdPolicyAttempt(AdPolicyRequest(position,
-                fullscreen = true, userInitiated = true, mainType = AdMainType.REWARDED)) }),
+                fullscreen = true, userInitiated = true, sceneType = AdSceneType.REWARDED)) }),
     ) {
         val showResultCallback: (AdShowResult) -> Unit = { result ->
             onResult(AdRewardResult(false, result, session.sessionId))
