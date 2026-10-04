@@ -18,6 +18,10 @@ internal class DisplayOpportunityController(
     private var show: ((FullScreenShowAttempt, (AdRewardResult) -> Unit) -> Unit)?,
     private var onCleanup: (() -> Unit)?,
     private var onResult: ((AdRewardResult) -> Unit)?,
+    private val showWhenEmpty: Boolean = false,
+    private val preferAvailableAfterResume: Boolean = true,
+    private val trace: (String) -> Unit = {},
+    private var onLoadingChanged: ((Boolean) -> Unit)? = null,
 ) {
     data class LoadSnapshot(val ready: Boolean, val settled: Boolean)
 
@@ -26,6 +30,7 @@ internal class DisplayOpportunityController(
     private var started = false
     private var loadEnsured = false
     private var attempting = false
+    private var loading = false
     private var pausedAtMillis: Long? = null
     private var pausedMillis = 0L
     private var preferAvailableOnResume = false
@@ -38,6 +43,7 @@ internal class DisplayOpportunityController(
         attempt.handoffGuard = { precondition?.invoke() }
         attempt.onCommitted = {
             state = State.SDK_SHOW
+            trace("已提交展示，等待曝光或结束回调。")
             cleanWaiting()
         }
     }
@@ -62,6 +68,7 @@ internal class DisplayOpportunityController(
         if (state != State.WAITING || pausedAtMillis != null) return
         pausedAtMillis = nowMillis()
         unschedule(check)
+        trace("暂停等待，已等待 ${elapsedMillis()} 毫秒（不含后台时间）。")
     }
 
     fun resume() {
@@ -69,11 +76,19 @@ internal class DisplayOpportunityController(
         val pausedAt = pausedAtMillis ?: return
         pausedMillis += nowMillis() - pausedAt
         pausedAtMillis = null
-        preferAvailableOnResume = true
+        preferAvailableOnResume = preferAvailableAfterResume
+        trace("恢复等待，已等待 ${elapsedMillis()} 毫秒（不含后台时间）。")
         if (started) check()
     }
 
-    private fun elapsedMillis(): Long =
+    /** Wake after an SDK callback without reentering its load/show stack. */
+    fun inventoryChanged() {
+        if (!started || state != State.WAITING || pausedAtMillis != null || attempting) return
+        unschedule(check)
+        schedule(check, 0L)
+    }
+
+    fun elapsedMillis(): Long =
         (pausedAtMillis ?: nowMillis()) - startedAtMillis - pausedMillis
 
     private fun environmentFailure(): String? {
@@ -93,10 +108,14 @@ internal class DisplayOpportunityController(
     }
 
     private fun check() {
+        unschedule(check)
         if (state != State.WAITING || pausedAtMillis != null) return
         val reason = environmentFailure()
         if (state != State.WAITING || pausedAtMillis != null) return
         if (reason != null && reason !in TRANSIENT_REASONS) return fail(reason)
+        if (!attempting) setLoading(true)
+        // A host callback can synchronously cancel or leave the scene.
+        if (state != State.WAITING || pausedAtMillis != null) return
         if (!loadEnsured && elapsedMillis() < timeoutMillis && precondition?.invoke() == null) {
             loadEnsured = true
             ensureLoaded?.invoke()
@@ -106,14 +125,18 @@ internal class DisplayOpportunityController(
         val (ready, settled) = loadSnapshot?.invoke() ?: return
         val useAvailable = preferAvailableOnResume
         if (reason == null) preferAvailableOnResume = false
-        if (!attempting && reason == null && ready && (settled || expired || useAvailable)) {
+        if (!attempting && reason == null && (ready || showWhenEmpty) && (settled || expired || useAvailable)) {
             if (state != State.WAITING) return
             // The deadline limits waiting for bidders, not preparation of the selected ad.
             // Provider guards still recheck cancellation, scene, host, consent and ad validity.
             attempting = true
+            trace("等待结束：${if (expired) "已到等待时限" else if (settled) "候选结果已齐" else "恢复后使用现有缓存"}；${if (ready) "已有可用广告" else "暂无可用广告"}；已等待 ${elapsedMillis()} 毫秒（不含后台时间）。")
+            setLoading(false)
+            if (state != State.WAITING || pausedAtMillis != null) return
             show?.invoke(attempt) { finish(it) }
         }
         if (state != State.WAITING || pausedAtMillis != null) return
+        if (showWhenEmpty && attempting) return
         if (expired) return fail("wait_timeout")
         if (settled && !ready) return fail("ad_load_failed")
         val remaining = timeoutMillis - elapsedMillis()
@@ -141,8 +164,16 @@ internal class DisplayOpportunityController(
         runCatching { callback?.invoke(result) }
     }
 
+    private fun setLoading(value: Boolean) {
+        if (loading == value) return
+        loading = value
+        runCatching { onLoadingChanged?.invoke(value) }
+    }
+
     private fun cleanWaiting() {
         unschedule(check)
+        setLoading(false)
+        onLoadingChanged = null
         precondition = null
         sceneValid = null
         hostFailure = null

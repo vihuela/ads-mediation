@@ -104,15 +104,48 @@ fun AdEvent.appOpenLogLines(): List<String> = buildList {
 
 private fun String.logText(): String = replace('\n', ' ').replace('\r', ' ')
 
+internal fun AdFormat.flowName(): String = when (this) {
+    AdFormat.APP_OPEN -> "开屏"
+    AdFormat.INTERSTITIAL -> "插页"
+    AdFormat.REWARDED -> "激励"
+    AdFormat.NATIVE -> "原生"
+    AdFormat.BANNER -> "横幅"
+}
+
+internal fun AdPlatform?.flowName(): String = when (this) {
+    AdPlatform.ADMOB -> "AdMob"
+    AdPlatform.TOPON -> "TopOn"
+    null -> "无"
+}
+
+internal fun flowQuote(available: Boolean, price: Double?): String =
+    if (available) price.flowPrice() else "无可用广告"
+
 // Do not turn missing prices into zero, or round a real bid down to zero in diagnostics.
 private fun Double?.logPrice(): String = this?.let {
     if (it.isFinite()) BigDecimal.valueOf(it).stripTrailingZeros().toPlainString() else it.toString()
 } ?: "unknown"
 
-private fun Double?.flowPrice(): String =
+internal fun Double?.flowPrice(): String =
     this?.takeIf { it.isFinite() && it >= 0 }?.logPrice() ?: "报价未知"
 
-private fun String?.flowReason(): String = when (this) {
+internal fun String?.flowReason(): String = when (this) {
+    "dismissed" -> "广告已关闭"
+    "invalid_position" -> "业务位置不能为空"
+    "invalid_timeout" -> "等待时长配置无效"
+    "request_in_progress" -> "已有其他广告请求正在等待"
+    "another_full_screen_ad_showing" -> "已有其他全屏广告正在展示"
+    "scene_validation_failed" -> "检查展示场景时发生异常"
+    "activity_awaiting_first_resume" -> "页面尚未首次进入前台"
+    "activity_window_not_attached", "activity_window_not_focused" -> "页面窗口暂时不可展示"
+    "native_layout_not_configured" -> "尚未配置全屏原生布局"
+    "native_layout_invalid", "native_render_failed" -> "全屏原生布局或渲染失败"
+    "native_ad_unavailable", "native_not_ready", "native_session_missing" -> "全屏原生广告已不可用"
+    "native_closed_before_impression" -> "全屏原生关闭前未确认曝光"
+    "native_no_longer_visible" -> "全屏原生已关闭或不可见"
+    "native_handoff_timeout" -> "等待全屏原生页面接收广告超时"
+    "native_activity_start_failed" -> "启动全屏原生页面失败"
+    "show_failed", "sdk_show_failed" -> "广告展示失败"
     "wait_timeout", "show_callback_timeout" -> "等待广告超时"
     "ad_load_failed", "load_failed" -> "广告加载失败"
     "no_fill", "no_preloaded_ad" -> "暂无可用广告"

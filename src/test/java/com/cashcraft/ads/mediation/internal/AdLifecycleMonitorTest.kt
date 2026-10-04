@@ -13,6 +13,41 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33], manifest = Config.NONE)
 class AdLifecycleMonitorTest {
+    @org.junit.Before
+    @org.junit.After
+    fun resetInstallation() {
+        val type = AdLifecycleMonitor::class.java
+        val application = org.robolectric.util.ReflectionHelpers.getStaticField<android.app.Application?>(type, "installedApplication")
+        val callbacks = org.robolectric.util.ReflectionHelpers.getStaticField<android.app.Application.ActivityLifecycleCallbacks>(type, "callbacks")
+        application?.unregisterActivityLifecycleCallbacks(callbacks)
+        org.robolectric.util.ReflectionHelpers.setStaticField(type, "installedApplication", null)
+    }
+
+    @Test
+    fun `onCreate request binds the new Activity even while another Activity remains resumed`() {
+        val application = org.robolectric.RuntimeEnvironment.getApplication()
+        AdLifecycleMonitor.install(application)
+        val old = Robolectric.buildActivity(Activity::class.java).setup()
+        val new = Robolectric.buildActivity(Activity::class.java).create()
+        try {
+            assertSame(old.get(), AdLifecycleMonitor.currentActivity)
+            assertSame(new.get(), AdLifecycleMonitor.requestActivity)
+            new.start().resume()
+            assertSame(new.get(), AdLifecycleMonitor.requestActivity)
+        } finally { new.pause().stop().destroy(); old.pause().stop().destroy() }
+    }
+
+    @Test
+    fun `ambiguous new Activity hosts fail instead of choosing an old foreground Activity`() {
+        val application = org.robolectric.RuntimeEnvironment.getApplication()
+        AdLifecycleMonitor.install(application)
+        val old = Robolectric.buildActivity(Activity::class.java).setup()
+        val a = Robolectric.buildActivity(Activity::class.java).create()
+        val b = Robolectric.buildActivity(Activity::class.java).create()
+        try { org.junit.Assert.assertNull(AdLifecycleMonitor.requestActivity) }
+        finally { a.destroy(); b.destroy(); old.pause().stop().destroy() }
+    }
+
     @Test
     fun `late installation and repeated resume preserve foreground accounting`() {
         val previous = Robolectric.buildActivity(Activity::class.java).setup().pause()

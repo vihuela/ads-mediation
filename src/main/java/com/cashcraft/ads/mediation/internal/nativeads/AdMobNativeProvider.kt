@@ -257,7 +257,8 @@ private class AdMobNativeAdHandle(
         try {
             adView.addView(
                 binding.root,
-                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                    binding.root.layoutParams?.height ?: ViewGroup.LayoutParams.WRAP_CONTENT),
             )
             adView.headlineView = binding.headline
             adView.callToActionView = binding.callToAction

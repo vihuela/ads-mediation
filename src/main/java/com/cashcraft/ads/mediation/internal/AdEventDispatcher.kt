@@ -346,6 +346,7 @@ internal class AdShowSession(
     onCreated: (AdShowSession) -> Unit = {},
 ) {
     private val terminal = AtomicBoolean(false)
+    var onImpressionConfirmed: (() -> Unit)? = null
 
     init {
         onCreated(this)
@@ -357,12 +358,16 @@ internal class AdShowSession(
 
     fun impression(adSource: String?, responseId: String?) {
         if (terminal.compareAndSet(false, true)) {
+            val callback = onImpressionConfirmed
+            onImpressionConfirmed = null
+            runCatching { callback?.invoke() }
             emit(AdEventName.IMPRESSION, adSource = adSource, responseId = responseId)
         }
     }
 
     fun showFailure(reason: String, errorCode: String? = null, cause: Throwable? = null) {
         if (terminal.compareAndSet(false, true)) {
+            onImpressionConfirmed = null
             emit(AdEventName.SHOW_FAIL, reason = reason, errorCode = errorCode)
             cause?.let { error ->
                 logger?.showFailureException(

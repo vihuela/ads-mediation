@@ -6,6 +6,7 @@ import com.cashcraft.ads.mediation.AdEvent
 import com.cashcraft.ads.mediation.AdEventName
 import com.cashcraft.ads.mediation.AdFormat
 import com.cashcraft.ads.mediation.appOpenLogLines
+import com.cashcraft.ads.mediation.flowName
 import java.math.BigDecimal
 import java.math.RoundingMode
 
@@ -53,6 +54,13 @@ internal class AdsModuleLogger(
             debug -> Log.d(tag, text)
             else -> Log.i(tag, text)
         }
+    }
+
+    fun sceneTask(scene: AdFormat, taskId: String, position: String, elapsedMillis: Long, message: String, multiline: Boolean = false) {
+        if (!enabled) return
+        // Only the module-owned auction table may contain newlines; ordinary SDK details stay on one line.
+        val body = if (multiline) message else message.oneLine()
+        Log.i(tag, "[${scene.flowName()}任务][任务=$taskId][位置=${position.oneLine()}][总耗时=${elapsedMillis}毫秒] $body")
     }
 
     fun consent(

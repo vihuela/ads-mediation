@@ -199,6 +199,22 @@ internal object NativeAdCache {
         demand.close()
     }
 
+    /** Exclusively takes existing self-rendered inventory; never waits or starts a load. */
+    fun takeCached(request: ResolvedNativeRequest, callbacks: NativeCallbacks): NativeAdHandle? {
+        if (!Ads.nativeAvailability(request).ready ||
+            !com.cashcraft.ads.mediation.internal.AdLifecycleMonitor.isAppInForeground) return null
+        val ad = inventory.take(request, 0, false)?.also { it.setCallbacks(callbacks) }
+            ?: if (request.platform == AdPlatform.ADMOB) takePreload(request, callbacks)
+            else takeTopOnInventory(request, 0, callbacks)
+        if (ad != null && !runCatching {
+                !ad.isTemplate && ad.isValid && ad.expiresAtMillis?.let { SystemClock.elapsedRealtime() < it } != false
+            }.getOrDefault(false)) {
+            runCatching { ad.destroy() }
+            return null
+        }
+        return ad
+    }
+
     fun load(activity: Activity, request: ResolvedNativeRequest, widthPx: Int,
         allowTemplate: Boolean, callbacks: NativeCallbacks): NativeLoad {
         val key = if (request.platform == AdPlatform.ADMOB)

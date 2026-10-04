@@ -4,6 +4,9 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application>
+        <activity
+            android:name=".NativeFullScreenActivity"
+            android:exported="false" />
         <!-- Required by TopOn TU and several mediated networks on Android 9+. -->
         <uses-library
             android:name="org.apache.http.legacy"

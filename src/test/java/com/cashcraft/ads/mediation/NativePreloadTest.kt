@@ -38,7 +38,7 @@ class NativePreloadTest {
     private val originalState = AdMobAds.state
     private val originalTopOnState = TopOnAds.state
     private val foreground = AdLifecycleMonitor.isAppInForeground
-    private val pending = ReflectionHelpers.getStaticField<MutableMap<AdPlatform, ResolvedNativeRequest>>(
+    private val pending = ReflectionHelpers.getStaticField<MutableMap<Pair<AdPlatform, String>, ResolvedNativeRequest>>(
         Ads::class.java, "pendingNativePreloads")
     private val request = ResolvedNativeRequest(AdPlatform.ADMOB, "native-unit", "page")
 
@@ -89,7 +89,7 @@ class NativePreloadTest {
         Ads.notifyNativeReadiness()
         Ads.preloadNative()
         assertEquals(listOf("start:1"), ShadowNativePreloader.calls)
-        assertEquals(setOf(AdPlatform.TOPON), pending.keys) // AdMob need not wait for the second SDK.
+        assertEquals(setOf(AdPlatform.TOPON), pending.values.map { it.platform }.toSet()) // AdMob need not wait for the second SDK.
         assertSame(observer, ReflectionHelpers.getStaticField(Ads::class.java, "initializationCallback"))
         advance(300_000)
         assertEquals(listOf("start:1", "destroy"), ShadowNativePreloader.calls)

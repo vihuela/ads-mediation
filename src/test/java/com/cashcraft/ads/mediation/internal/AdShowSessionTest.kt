@@ -15,6 +15,43 @@ import org.junit.Test
 
 class AdShowSessionTest {
     @Test
+    fun `scene impression callback runs once only after real impression`() {
+        val events = mutableListOf<AdEvent>()
+        val session = session(events)
+        var impressions = 0
+        session.onImpressionConfirmed = { impressions++ }
+        session.attempt.committed()
+        assertEquals(0, impressions)
+
+        session.impression("Google", "response")
+        session.impression("Google", "duplicate")
+        assertEquals(1, impressions)
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION), events.map(AdEvent::name))
+        assertEquals(null, session.onImpressionConfirmed)
+    }
+
+    @Test
+    fun `failed show never confirms scene impression`() {
+        val events = mutableListOf<AdEvent>()
+        val session = session(events)
+        var impressions = 0
+        session.onImpressionConfirmed = { impressions++ }
+        session.showFailure("sdk_show_failed")
+        session.impression("Google", "late")
+        assertEquals(0, impressions)
+        assertEquals(null, session.onImpressionConfirmed)
+    }
+
+    @Test
+    fun `scene log callback failure does not suppress impression event`() {
+        val events = mutableListOf<AdEvent>()
+        val session = session(events)
+        session.onImpressionConfirmed = { error("logger failed") }
+        session.impression("Google", "response")
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION), events.map(AdEvent::name))
+    }
+
+    @Test
     fun `load session reports one correlated terminal result with latency`() {
         val events = mutableListOf<AdEvent>()
         val loadSession = AdLoadSession(

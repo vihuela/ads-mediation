@@ -35,6 +35,17 @@ internal object AdLifecycleMonitor {
     val currentActivity: Activity?
         get() = resumedActivity.get()
 
+    /** Allows a position-only request in onCreate to bind before the first resume. */
+    val requestActivity: Activity?
+        get() {
+            val creating = awaitingFirstResume.entries.filter { it.value }
+            return when (creating.size) {
+                0 -> currentActivity
+                1 -> creating.single().key
+                else -> null // Never guess which new Activity owns a position-only request.
+            }
+        }
+
     private val callbacks = object : Application.ActivityLifecycleCallbacks {
         override fun onActivityResumed(activity: Activity) {
             awaitingFirstResume[activity] = false

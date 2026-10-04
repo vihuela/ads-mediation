@@ -215,7 +215,8 @@ class AdsNativeView(
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
         }
         private val allowTemplate = layout !is NativeLayout.Custom && request.topOnTemplateAspectRatio != null
-        private val resolvedRequest: ResolvedNativeRequest? get() = Ads.resolveNativeRequest(request)
+        private val resolvedRequest: ResolvedNativeRequest? get() =
+            (activity as? NativeFullScreenActivity)?.nativeRequest ?: Ads.resolveNativeRequest(request)
         val controller = NativeCardController(
             availability = {
                 request.failureReason()?.let { NativeAvailability(failure = it) }
@@ -223,11 +224,14 @@ class AdsNativeView(
                     ?: NativeAvailability()
             },
             canDisplay = { activityResumed && connection?.canDisplay() == true },
-            newSlot = { resolvedRequest?.let { Ads.newNativeSlot(it) } },
+            newSlot = { resolvedRequest?.let {
+                Ads.newNativeSlot(it, (activity as? NativeFullScreenActivity)?.onNativeImpression)
+            } },
             load = {
                 requestedWidth = checkNotNull(connection).contentWidth
                 val resolved = checkNotNull(resolvedRequest)
-                if (resolved.isBidding) NativeBiddingProvider(allowTemplate).load(activity, resolved, requestedWidth, it)
+                if (activity is NativeFullScreenActivity) activity.loadNative(it)
+                else if (resolved.isBidding) NativeBiddingProvider(allowTemplate).load(activity, resolved, requestedWidth, it)
                 else NativeAdCache.load(activity, resolved.candidates().single(), requestedWidth, allowTemplate, it)
             },
             render = { ad, isCurrent ->
@@ -345,7 +349,9 @@ class AdsNativeView(
             }
             require(rendered.parent == null) { "native_view_already_attached" }
             platformView = rendered
-            view.addView(rendered)
+            if (activity is NativeFullScreenActivity) {
+                view.addView(rendered, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+            } else view.addView(rendered)
             Ads.nativeLog(request.position) {
                 "渲染完成：平台容器已挂载，等待平台确认曝光 | 渲染=${SystemClock.elapsedRealtime() - startedAt}ms"
             }

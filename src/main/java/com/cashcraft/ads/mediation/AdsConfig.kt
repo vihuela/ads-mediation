@@ -53,6 +53,8 @@ data class AdMobIds(
     val nativeId: String? = null,
     /** Default for position-only Banner entry points; explicit BannerRequests may use another ID. */
     val bannerId: String? = null,
+    /** Optional separate Native unit for full-screen fallback; otherwise uses nativeId. */
+    val fullScreenNativeId: String? = null,
 ) {
     init {
         require(applicationId.isNotBlank()) { "applicationId must not be blank" }
@@ -61,6 +63,7 @@ data class AdMobIds(
         require(rewardedId.isEmpty() || rewardedId.isNotBlank()) { "rewardedId must not be whitespace" }
         require(nativeId == null || nativeId.isNotBlank()) { "nativeId must not be blank" }
         require(bannerId == null || bannerId.isNotBlank()) { "bannerId must not be blank" }
+        require(fullScreenNativeId == null || fullScreenNativeId.isNotBlank()) { "fullScreenNativeId must not be blank" }
     }
 
     companion object {
@@ -148,6 +151,8 @@ data class TopOnIds(
     val interstitialPlacementId: String = "",
     val rewardedPlacementId: String = "",
     val nativePlacementId: String? = null,
+    /** Optional separate Native placement for full-screen fallback. */
+    val fullScreenNativePlacementId: String? = null,
 ) {
     init {
         require(applicationId.isNotBlank()) { "applicationId must not be blank" }
@@ -156,6 +161,9 @@ data class TopOnIds(
         require(interstitialPlacementId.isEmpty() || interstitialPlacementId.isNotBlank()) { "interstitialPlacementId must not be whitespace" }
         require(rewardedPlacementId.isEmpty() || rewardedPlacementId.isNotBlank()) { "rewardedPlacementId must not be whitespace" }
         require(nativePlacementId == null || nativePlacementId.isNotBlank()) { "nativePlacementId must not be blank" }
+        require(fullScreenNativePlacementId == null || fullScreenNativePlacementId.isNotBlank()) {
+            "fullScreenNativePlacementId must not be blank"
+        }
     }
 }
 
@@ -203,6 +211,12 @@ data class AdsConfig(
     val logTag: String = "AdsMediation",
     val autoShowAppOpen: Boolean = true,
     val appOpenPosition: String = "app_foreground",
+    /** Foreground waiting budget for showOpen; configure position-specific cold/hot budgets once. */
+    val openTimeoutMillis: (position: String) -> Long = { 12_000L },
+    /** Cached Native fallback for showOpen and showInter. The layout must include a visible close action. */
+    val nativeFullScreenLayout: NativeLayout.Custom? = null,
+    /** Waiting budget for showInter; leaving the host cancels instead of pausing this task. */
+    val interTimeoutMillis: (position: String) -> Long = { 3_000L },
 ) {
     init {
         require(logTag.isNotBlank()) { "logTag must not be blank" }

@@ -18,6 +18,7 @@ import com.cashcraft.ads.mediation.TopOnProviderConfig
 import com.cashcraft.ads.mediation.TopOnRevenuePayload
 import com.cashcraft.ads.mediation.isFormatEnabled
 import com.cashcraft.ads.mediation.revenueEventId
+import com.cashcraft.ads.mediation.internal.FullScreenLoadSignals
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdLoadSession
@@ -80,6 +81,7 @@ internal object TopOnAds {
     private fun recordLoadFailure(format: AdFormat) {
         if (!::config.isInitialized || !config.isFormatEnabled(format)) return
         loadFailures[format] = loadFailureVersion(format) + 1
+        FullScreenLoadSignals.changed()
     }
 
     private var appOpenLoading = false
@@ -484,6 +486,7 @@ internal object TopOnAds {
         override fun onInterstitialAdLoaded() = onMain {
             interstitialLoading = false
             interstitialLoadSession?.loadedFrom(interstitialAd.checkValidAdCaches())
+            FullScreenLoadSignals.changed()
         }
 
         override fun onInterstitialAdLoadFail(error: AdError) = onMain {
@@ -648,6 +651,7 @@ internal object TopOnAds {
         override fun onAdLoaded() = onMain {
             appOpenLoading = false
             appOpenLoadSession?.loadedFrom(appOpenAd.checkValidAdCaches())
+            FullScreenLoadSignals.changed()
             autoAppOpenController.onAdAvailable()
         }
 

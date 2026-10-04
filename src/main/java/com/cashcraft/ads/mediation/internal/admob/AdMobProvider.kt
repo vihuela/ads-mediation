@@ -39,6 +39,7 @@ import com.cashcraft.ads.mediation.adUnitId
 import com.cashcraft.ads.mediation.bufferSize
 import com.cashcraft.ads.mediation.isFormatEnabled
 import com.cashcraft.ads.mediation.revenueEventId
+import com.cashcraft.ads.mediation.internal.FullScreenLoadSignals
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdLoadSession
@@ -397,6 +398,7 @@ object AdMobAds {
                         adSource = responseInfo.loadedAdSourceResponseInfo?.name,
                         responseId = responseInfo.responseId,
                     )
+                    FullScreenLoadSignals.changed()
                     if (preloadId == PRELOAD_APP_OPEN) {
                         autoAppOpenController.onAdAvailable()
                     }
@@ -412,6 +414,7 @@ object AdMobAds {
                         reason = adError.message,
                         responseId = adError.responseInfo?.responseId,
                     )
+                    FullScreenLoadSignals.changed()
                 }
             }
 

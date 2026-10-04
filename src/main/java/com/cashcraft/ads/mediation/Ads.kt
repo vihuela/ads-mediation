@@ -20,6 +20,8 @@ import com.cashcraft.ads.mediation.internal.BannerProviderReadiness
 import com.cashcraft.ads.mediation.internal.BannerReadiness
 import com.cashcraft.ads.mediation.internal.BidDecision
 import com.cashcraft.ads.mediation.internal.DisplayOpportunityController
+import com.cashcraft.ads.mediation.internal.FullScreenAdAuction
+import com.cashcraft.ads.mediation.internal.FullScreenLoadSignals
 import com.cashcraft.ads.mediation.internal.FullScreenShowAttempt
 import com.cashcraft.ads.mediation.internal.FullScreenShowGate
 import com.cashcraft.ads.mediation.internal.UmpConsentManager
@@ -52,7 +54,7 @@ object Ads {
     @Volatile
     private var initializationFailure: InitializationFailure? = null
     private val nativeReadinessListeners = CopyOnWriteArrayList<() -> Unit>()
-    private val pendingNativePreloads = linkedMapOf<AdPlatform, ResolvedNativeRequest>()
+    private val pendingNativePreloads = linkedMapOf<Pair<AdPlatform, String>, ResolvedNativeRequest>()
     private val providerInitializationStarted = AtomicBoolean(false)
     private val bannerProviders = BannerProviderReadiness()
 
@@ -469,17 +471,20 @@ object Ads {
      */
     fun preloadNative() = onMain {
         if (!::config.isInitialized) return@onMain
-        val request = config.provider.resolveNativeRequest(NativeRequest("preload_native"))
-        if (request.failureReason() != null) return@onMain
-        request.candidates().forEach { pendingNativePreloads[requireNotNull(it.platform)] = it }
+        listOf(false, true).forEach { fullScreen ->
+            val request = config.provider.resolveNativeRequest(NativeRequest("preload_native"), fullScreen)
+            if (request.failureReason() == null) request.candidates().forEach {
+                pendingNativePreloads[requireNotNull(it.platform) to it.adUnitId] = it
+            }
+        }
         startPendingNativePreloads()
     }
 
     private fun startPendingNativePreloads() {
         if (!AdLifecycleMonitor.isAppInForeground) return
-        pendingNativePreloads.toMap().forEach { (platform, request) ->
-            if (nativeAvailability(platform).ready) {
-                pendingNativePreloads.remove(platform)
+        pendingNativePreloads.toMap().forEach { (key, request) ->
+            if (nativeAvailability(key.first).ready) {
+                pendingNativePreloads.remove(key)
                 runCatching { NativeAdCache.preload(application, request) }.onFailure { error ->
                     nativeLog("预加载", warning = true, error = error) { "原生库存预热失败，页面仍可重试" }
                 }
@@ -635,6 +640,203 @@ object Ads {
     }
 
     /**
+     * One open scene: wait for app-open/interstitial bidders, compare cached USD quotes, then use
+     * cached full-screen Native only when neither format is available. One ad and one final result.
+     * Binds the calling Activity on the main thread. Background time does not consume the budget.
+     * Late loads refill shared caches; they never restart this task. Existing format entry points
+     * keep their own policies. Configure timeout and Native layout once in [AdsConfig].
+     */
+    fun showOpen(position: String, onResult: (AdShowResult) -> Unit = {}): AdTask =
+        showScene(AdFormat.APP_OPEN, position, onResult)
+
+    /**
+     * Wait for interstitial candidates, then use cached full-screen Native only if none is available.
+     * One task, one full-screen owner and one result; Native keeps the original position.
+     * Leaving the host while waiting cancels this task. Shared SDK loads continue for later requests.
+     * [onLoadingChanged] runs on the main thread: true while waiting, false before either ad is
+     * handed off or the wait ends. It may run synchronously; rejected requests never start loading.
+     */
+    fun showInter(
+        position: String,
+        onLoadingChanged: (Boolean) -> Unit = {},
+        onResult: (AdShowResult) -> Unit = {},
+    ): AdTask = showScene(AdFormat.INTERSTITIAL, position, onResult, onLoadingChanged)
+
+    private fun showScene(
+        scene: AdFormat,
+        position: String,
+        onResult: (AdShowResult) -> Unit,
+        onLoadingChanged: ((Boolean) -> Unit)? = null,
+    ): AdTask {
+        val startedAt = SystemClock.elapsedRealtime()
+        var controller: DisplayOpportunityController? = null
+        var nativeSession: NativeFullScreenSession? = null
+        var cancelled = false
+        val task = AdTask {
+            onMain {
+                cancelled = true
+                nativeSession?.finish("opportunity_cancelled") ?: controller?.cancel()
+            }
+        }
+        onMain {
+            val trace: (String) -> Unit = { message ->
+                nativeLogger?.sceneTask(scene, task.id, position, SystemClock.elapsedRealtime() - startedAt, message)
+            }
+            var finished = false
+            fun finish(result: AdShowResult) {
+                if (finished) return
+                finished = true
+                task.detach()
+                trace(when (result) {
+                    AdShowResult.Dismissed -> "任务结束：广告已展示并关闭。"
+                    is AdShowResult.Failed -> "任务结束：未展示广告；${result.reason.flowReason()}（原因码=${result.reason}）。"
+                })
+                runCatching { onResult(result) }
+            }
+            trace("开始${scene.flowName()}广告请求。")
+            if (cancelled) { finish(AdShowResult.Failed("opportunity_cancelled")); return@onMain }
+            if (position.isBlank()) { finish(AdShowResult.Failed("invalid_position")); return@onMain }
+            if (!::config.isInitialized) { finish(AdShowResult.Failed("sdk_not_initialized")); return@onMain }
+            val activity = AdLifecycleMonitor.requestActivity
+            if (activity == null) { finish(AdShowResult.Failed("activity_not_available")); return@onMain }
+            val timeout = runCatching {
+                if (scene == AdFormat.APP_OPEN) config.openTimeoutMillis(position) else config.interTimeoutMillis(position)
+            }.getOrElse {
+                finish(AdShowResult.Failed("invalid_timeout")); return@onMain
+            }
+            trace("绑定展示页面：${activity.javaClass.simpleName}；最多等待 ${timeout} 毫秒。")
+            val formats = if (scene == AdFormat.APP_OPEN) listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL)
+                else listOf(AdFormat.INTERSTITIAL)
+            val failures = formats.associateWith { format ->
+                AdPlatform.entries.associateWith { platform ->
+                    if (platform == AdPlatform.ADMOB) AdMobAds.loadFailureVersion(format)
+                    else TopOnAds.loadFailureVersion(format)
+                }
+            }
+            val auction = FullScreenAdAuction(
+                formats = formats,
+                read = { format, platform ->
+                    val enabled = config.provider.isFormatEnabled(platform, format)
+                    val ready = enabled && if (platform == AdPlatform.ADMOB) AdMobAds.isReady(format) else TopOnAds.isReady(format)
+                    val failed = if (platform == AdPlatform.ADMOB) {
+                        AdMobAds.state == AdMobState.FAILED || AdMobAds.loadFailureVersion(format) != failures[format]?.get(platform)
+                    } else {
+                        TopOnAds.state == TopOnState.FAILED || TopOnAds.loadFailureVersion(format) != failures[format]?.get(platform)
+                    }
+                    FullScreenAdAuction.Inventory(ready, ready || failed || !enabled, enabled)
+                },
+                price = { format, platform ->
+                    if (platform == AdPlatform.ADMOB) AdMobAds.bidPrice(format) else TopOnAds.bidPrice(format)
+                },
+                trace = trace,
+                traceTable = { table ->
+                    nativeLogger?.sceneTask(scene, task.id, position, SystemClock.elapsedRealtime() - startedAt, table, multiline = true)
+                },
+            )
+            lateinit var waiting: DisplayOpportunityController
+            val loadListener: () -> Unit = {
+                auction.snapshot(acceptNewResults = waiting.elapsedMillis() < timeout)
+                waiting.inventoryChanged()
+            }
+            val lifecycle = object : AdLifecycleMonitor.Listener {
+                override fun onActivityPaused(paused: Activity) {
+                    if (paused === activity) {
+                        if (scene == AdFormat.APP_OPEN) waiting.pause() else waiting.cancel("activity_not_resumed")
+                    }
+                }
+                override fun onActivityDestroyed(destroyed: Activity) {
+                    if (destroyed === activity) waiting.cancel("activity_not_available")
+                }
+                override fun onActivityResumed(resumed: Activity) {
+                    if (resumed !== activity) waiting.cancel("activity_not_resumed")
+                    else if (scene == AdFormat.APP_OPEN) waiting.resume()
+                }
+                override fun onAppEnteredBackground() {
+                    if (scene == AdFormat.APP_OPEN) waiting.pause() else waiting.cancel("app_not_in_foreground")
+                }
+            }
+            waiting = DisplayOpportunityController(
+                startedAtMillis = startedAt,
+                timeoutMillis = timeout,
+                nowMillis = SystemClock::elapsedRealtime,
+                schedule = { check, delay -> mainHandler.postDelayed(check, delay) },
+                unschedule = mainHandler::removeCallbacks,
+                precondition = ::fullScreenSceneFailure,
+                sceneValid = { !activity.isFinishing && !activity.isDestroyed },
+                hostFailure = { AdLifecycleMonitor.activityWaitFailureReason(activity) },
+                loadSnapshot = { auction.snapshot(acceptNewResults = waiting.elapsedMillis() < timeout) },
+                ensureLoaded = {
+                    formats.filter { config.provider.isFormatEnabled(AdPlatform.TOPON, it) }.forEach(TopOnAds::ensureLoaded)
+                },
+                show = { attempt, callback ->
+                    FullScreenLoadSignals.remove(loadListener)
+                    val winner = auction.select()
+                    if (winner == null) {
+                        trace("${formats.joinToString("和") { it.flowName() }}无可用广告，尝试全屏原生兜底；仅使用缓存，不追加加载等待。")
+                        val layout = config.nativeFullScreenLayout
+                        if (layout == null) {
+                            callback(AdRewardResult(false, AdShowResult.Failed("native_layout_not_configured")))
+                        } else {
+                            nativeSession = NativeFullScreenSession.start(activity, position, layout,
+                                sceneValid = { !activity.isFinishing && !activity.isDestroyed },
+                                attempt = attempt, trace = trace,
+                            ) { callback(AdRewardResult(false, it)) }
+                        }
+                    } else {
+                        trace("准备展示：${winner.bid.selection!!.winner.flowName()} ${winner.format.flowName()}。")
+                        showSelected(winner.bid.selection.winner, winner.format, activity, position, attempt,
+                            onSessionCreated = {
+                                waiting.sessionStarted(it)
+                                val sessionId = it.sessionId
+                                it.onImpressionConfirmed = {
+                                    trace("已确认广告曝光：${winner.bid.selection.winner.flowName()} ${winner.format.flowName()}；展示记录=$sessionId。")
+                                }
+                                trace("关联展示记录：${winner.bid.selection.winner.flowName()} ${winner.format.flowName()}；展示记录=${it.sessionId}。")
+                            },
+                            onSessionStarted = { session ->
+                                if (config.provider is BiddingProviderConfig) session.bidResult(winner.bid.toEventData(winner.format))
+                            },
+                            onResult = callback,
+                        )
+                    }
+                },
+                onCleanup = {
+                    AdLifecycleMonitor.removeListener(lifecycle)
+                    FullScreenLoadSignals.remove(loadListener)
+                },
+                onResult = { finish(it.showResult) },
+                showWhenEmpty = true,
+                preferAvailableAfterResume = false,
+                trace = trace,
+                onLoadingChanged = onLoadingChanged,
+            )
+            controller = waiting
+            // Capture pre-existing inventory even if posting to main already spent the budget.
+            auction.snapshot(acceptNewResults = true)
+            FullScreenLoadSignals.add(loadListener)
+            AdLifecycleMonitor.addListener(lifecycle)
+            if (scene == AdFormat.APP_OPEN && AdLifecycleMonitor.activityWaitFailureReason(activity) in
+                setOf("activity_not_resumed", "app_not_in_foreground")) waiting.pause()
+            waiting.start()
+        }
+        return task
+    }
+
+    private fun fullScreenSceneFailure(): String? = displayOpportunityFailureReason(
+        commonFailure = when {
+            !::config.isInitialized -> "sdk_not_initialized"
+            !consentSnapshot.canRequestAds -> CONSENT_NOT_OBTAINED
+            !providerInitializationStarted.get() -> "sdk_initializing"
+            initializationStage == InitializationStage.FAILED -> "sdk_initialization_failed"
+            else -> null
+        },
+        state = state,
+        hasReadyBiddingProvider = providerInitializationStarted.get() &&
+            ::config.isInitialized && config.provider is BiddingProviderConfig &&
+            (AdMobAds.state == AdMobState.READY || TopOnAds.state == TopOnState.READY),
+    )
+
+    /**
      * 等待平台结果，截止时使用可用缓存兜底；取消机会不停止底层加载。
      * 开屏等待在宿主暂停时冻结计时，加载继续；恢复后优先展示有效缓存，否则继续剩余等待。
      * 销毁宿主、切换到其他 Activity 或主动 cancel() 仍会结束机会。
@@ -651,16 +853,35 @@ object Ads {
         onResult = { onResult(it.showResult) },
     )
 
-    fun showInterstitialWhenReady(
+    /** Uses cached Native inventory only. The layout must provide a visible close action.
+     * Owns the same full-screen gate as interstitial/app-open/rewarded ads, through Activity teardown.
+     * Native impressions and revenue retain their NATIVE format and supplied business position.
+     */
+    fun showNativeFullScreen(
         activity: Activity,
-        position: String = "manual",
-        timeoutMillis: Long = 5_000L,
+        position: String,
+        layout: NativeLayout.Custom,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdShowResult) -> Unit = {},
-    ): AdDisplayOpportunity = createOpportunity(
-        AdFormat.INTERSTITIAL, activity, position, timeoutMillis, isSceneValid,
-        onResult = { onResult(it.showResult) },
-    )
+    ): AdDisplayOpportunity {
+        var session: NativeFullScreenSession? = null
+        var cancelled = false
+        val opportunity = AdDisplayOpportunity {
+            onMain { cancelled = true; session?.finish("opportunity_cancelled") }
+        }
+        onMain {
+            if (cancelled) {
+                opportunity.detach()
+                onResult(AdShowResult.Failed("opportunity_cancelled"))
+            } else {
+                session = NativeFullScreenSession.start(activity, position, layout, isSceneValid) {
+                    opportunity.detach()
+                    onResult(it)
+                }
+            }
+        }
+        return opportunity
+    }
 
     fun showRewardedWhenReady(
         activity: Activity,
@@ -949,8 +1170,8 @@ object Ads {
         )
     }
 
-    internal fun resolveNativeRequest(request: NativeRequest): ResolvedNativeRequest? =
-        if (::config.isInitialized) config.provider.resolveNativeRequest(request) else null
+    internal fun resolveNativeRequest(request: NativeRequest, fullScreen: Boolean = false): ResolvedNativeRequest? =
+        if (::config.isInitialized) config.provider.resolveNativeRequest(request, fullScreen) else null
 
     internal fun nativeAvailability(request: ResolvedNativeRequest): NativeAvailability {
         request.failureReason()?.let { return NativeAvailability(failure = it) }
@@ -971,12 +1192,17 @@ object Ads {
             config.loggingEnabled, config.logTag).beginLoad(AdFormat.NATIVE, adUnitId, 1)
     }
 
-    internal fun newNativeSlot(request: ResolvedNativeRequest): NativeSlot? {
+    internal fun newNativeSlot(request: ResolvedNativeRequest, onImpression: (() -> Unit)? = null): NativeSlot? {
         if (!::config.isInitialized || request.failureReason() != null) return null
         val platform = requireNotNull(request.candidates().first().platform)
         val mode = if (request.isBidding) AdMediationMode.BIDDING
             else if (platform == AdPlatform.ADMOB) AdMediationMode.ADMOB else AdMediationMode.TOPON
-        return AdEventDispatcher(application, platform, mode, config.eventListener,
+        val listener = AdEventListener { event ->
+            // Observe the confirmed event after binding; NativeCardController rebinds SDK callbacks.
+            if (event.name == AdEventName.IMPRESSION) onImpression?.invoke()
+            config.eventListener.onEvent(event)
+        }
+        return AdEventDispatcher(application, platform, mode, listener,
             config.loggingEnabled, config.logTag).nativeSlot(request, config.revenueListener)
     }
 

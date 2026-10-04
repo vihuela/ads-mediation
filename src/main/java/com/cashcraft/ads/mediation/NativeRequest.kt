@@ -47,15 +47,15 @@ internal data class ResolvedNativeRequest(
     }
 }
 
-internal fun AdProviderConfig.resolveNativeRequest(request: NativeRequest): ResolvedNativeRequest {
+internal fun AdProviderConfig.resolveNativeRequest(request: NativeRequest, fullScreen: Boolean = false): ResolvedNativeRequest {
     val admobId = when (this) {
-        is AdMobProviderConfig -> ids.nativeId
-        is BiddingProviderConfig -> admob.ids.nativeId
+        is AdMobProviderConfig -> if (fullScreen) ids.fullScreenNativeId ?: ids.nativeId else ids.nativeId
+        is BiddingProviderConfig -> if (fullScreen) admob.ids.fullScreenNativeId ?: admob.ids.nativeId else admob.ids.nativeId
         is TopOnProviderConfig -> null
     }
     val topOnId = when (this) {
-        is TopOnProviderConfig -> ids.nativePlacementId
-        is BiddingProviderConfig -> topon.ids.nativePlacementId
+        is TopOnProviderConfig -> if (fullScreen) ids.fullScreenNativePlacementId ?: ids.nativePlacementId else ids.nativePlacementId
+        is BiddingProviderConfig -> if (fullScreen) topon.ids.fullScreenNativePlacementId ?: topon.ids.nativePlacementId else topon.ids.nativePlacementId
         is AdMobProviderConfig -> null
     }
     return ResolvedNativeRequest(

@@ -688,6 +688,75 @@ class DisplayOpportunityControllerTest {
         }
     }
 
+    @Test fun `loading ends before SDK handoff while the request still owns the gate`() {
+        val h = harness()
+        h.controller.start()
+        h.tick()
+        assertEquals(listOf(true), h.loading)
+        var showsAtHide = -1
+        var competingReason: String? = null
+        var competingLoading: List<Boolean>? = null
+        h.onLoading = { loading ->
+            if (!loading) {
+                showsAtHide = h.shows
+                val competing = harness()
+                competing.controller.start()
+                competingReason = competing.reason
+                competingLoading = competing.loading.toList()
+            }
+        }
+        h.ready = true
+        h.tick()
+        assertEquals(listOf(true, false), h.loading)
+        assertEquals(0, showsAtHide)
+        assertEquals("request_in_progress", competingReason)
+        assertEquals(emptyList<Boolean>(), competingLoading)
+        assertEquals(1, h.sdkCalls)
+        assertTrue(h.results.isEmpty())
+        h.finishSdk()
+        assertEquals(listOf(true, false), h.loading)
+    }
+
+    @Test fun `loading callbacks tolerate exceptions and reentrant cancellation without leaking a wait`() {
+        for (cancelOn in listOf(true, false)) {
+            val h = harness()
+            h.onLoading = { if (it == cancelOn) h.controller.cancel() }
+            h.controller.start()
+            h.ready = true
+            h.tick()
+            assertEquals(listOf(true, false), h.loading)
+            assertEquals("opportunity_cancelled", h.reason)
+            assertEquals(0, h.shows)
+            assertEquals(1, h.results.size)
+            assertNull(h.scheduled)
+        }
+        val throwing = harness()
+        throwing.onLoading = { error("host UI error") }
+        throwing.controller.start()
+        throwing.now = 500
+        throwing.tick()
+        assertEquals(listOf(true, false), throwing.loading)
+        assertEquals("wait_timeout", throwing.reason)
+        assertEquals(1, throwing.results.size)
+        assertNull(throwing.scheduled)
+    }
+
+    @Test fun `loading never starts for rejected hosts and clears before a failed result`() {
+        val rejected = harness()
+        rejected.hostFailure = "activity_not_available"
+        rejected.controller.start()
+        assertTrue(rejected.loading.isEmpty())
+        val h = harness()
+        var loadingAtResult: List<Boolean>? = null
+        h.onResult = { loadingAtResult = h.loading.toList() }
+        h.controller.start()
+        h.precondition = "consent_not_obtained"
+        h.tick()
+        assertEquals("consent_not_obtained", h.reason)
+        assertEquals(listOf(true, false), h.loading)
+        assertEquals(listOf(true, false), loadingAtResult)
+    }
+
     private class Harness(timeout: Long, queuedFor: Long) {
         var now = queuedFor
         var ready = false
@@ -700,6 +769,8 @@ class DisplayOpportunityControllerTest {
         var beforeCommit: () -> Unit = {}
         var onEvent: (AdEvent) -> Unit = {}
         var onResult: (AdRewardResult) -> Unit = {}
+        var onLoading: (Boolean) -> Unit = {}
+        val loading = mutableListOf<Boolean>()
         var ensures = 0
         var shows = 0
         var sdkCalls = 0
@@ -727,6 +798,7 @@ class DisplayOpportunityControllerTest {
             show = { attempt, callback -> show(attempt, callback) },
             onCleanup = { cleanups++ },
             onResult = { results += it; onResult(it) },
+            onLoadingChanged = { loading += it; onLoading(it) },
         )
 
         private fun show(attempt: FullScreenShowAttempt, callback: (AdRewardResult) -> Unit) {
