@@ -10,6 +10,10 @@ import androidx.lifecycle.LifecycleOwner
 import com.cashcraft.ads.mediation.admob.AdMobAds
 import com.cashcraft.ads.mediation.internal.admob.AdMobConfig
 import com.cashcraft.ads.mediation.admob.AdMobState
+import com.cashcraft.ads.mediation.internal.AdPolicyAttempt
+import com.cashcraft.ads.mediation.internal.AdPolicyChecker
+import com.cashcraft.ads.mediation.internal.AdPolicyRequest
+import com.cashcraft.ads.mediation.internal.AdUsageStore
 import com.cashcraft.ads.mediation.internal.AdBiddingCoordinator
 import com.cashcraft.ads.mediation.internal.AdBidEventData
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
@@ -57,6 +61,47 @@ object Ads {
     private val pendingNativePreloads = linkedMapOf<Pair<AdPlatform, String>, ResolvedNativeRequest>()
     private val providerInitializationStarted = AtomicBoolean(false)
     private val bannerProviders = BannerProviderReadiness()
+    @Volatile internal var policyChecker: AdPolicyChecker? = null
+        private set
+    private val policyListeners = CopyOnWriteArrayList<() -> Unit>()
+    private var policyUpdatePosted = false
+    private val observedEvents = AdEventListener { event ->
+        config.eventListener.onEvent(event)
+    }
+
+    /** Replace one complete effective policy. Existing SDK displays keep their ownership. */
+    fun updatePolicy(policy: AdPolicy) = onMain {
+        policyChecker?.policy = policy
+        onPolicyUsageChanged()
+    }
+
+    internal fun isPlatformEnabled(platform: AdPlatform): Boolean =
+        policyChecker?.policy?.platforms?.get(platform) != false
+
+    internal fun canLoadAds(platform: AdPlatform): Boolean =
+        isPlatformEnabled(platform) && policyChecker?.checkLoad() !is AdPolicyCheckResult.Blocked
+
+    internal fun addPolicyListener(listener: () -> Unit): () -> Unit {
+        policyListeners += listener
+        return { policyListeners -= listener }
+    }
+
+    internal fun notifyAdBlocked(info: AdBlockInfo) {
+        if (::config.isInitialized) runCatching { config.onAdBlocked(info) }
+    }
+
+    internal fun onPolicyUsageChanged() = onMain {
+        if (policyUpdatePosted || !::config.isInitialized) return@onMain
+        policyUpdatePosted = true
+        mainHandler.post {
+            policyUpdatePosted = false
+            AdMobAds.onPolicyChanged()
+            TopOnAds.onPolicyChanged()
+            notifyNativeReadiness()
+            policyListeners.forEach { runCatching(it) }
+            FullScreenLoadSignals.changed()
+        }
+    }
 
     /** True from SDK handoff until the full-screen ad finishes; waiting alone is not showing. */
     val isFullScreenAdShowing: Boolean
@@ -83,6 +128,7 @@ object Ads {
         override fun onActivityResumed(activity: Activity) {
             gatherConsentIfNeeded(activity)
             startPendingNativePreloads()
+            onPolicyUsageChanged()
         }
     }
 
@@ -236,6 +282,7 @@ object Ads {
             }
             this.application = application
             this.config = config
+            policyChecker = AdPolicyChecker(AdUsageStore(application, config.firstLaunchTimeMillis)).apply { policy = config.policy }
             mediationMode = config.provider.mediationMode
             nativeLogger = com.cashcraft.ads.mediation.internal.AdsModuleLogger(config.loggingEnabled, config.logTag)
             umpConsentManager = UmpConsentManager(
@@ -248,7 +295,7 @@ object Ads {
                 context = application,
                 platform = config.provider.platform,
                 mediationMode = config.provider.mediationMode,
-                listener = config.eventListener,
+                listener = observedEvents,
                 loggingEnabled = config.loggingEnabled,
                 logTag = config.logTag,
             )
@@ -360,7 +407,7 @@ object Ads {
                 config = AdMobConfig(
                     ids = provider.ids,
                     preload = provider.preload,
-                    eventListener = config.eventListener,
+                    eventListener = observedEvents,
                     revenueListener = config.revenueListener,
                     loggingEnabled = config.loggingEnabled,
                     logTag = config.logTag,
@@ -376,7 +423,7 @@ object Ads {
 
             is TopOnProviderConfig -> TopOnAds.initialize(
                 application = application,
-                commonConfig = config,
+                commonConfig = config.copy(eventListener = observedEvents),
                 mediationMode = AdMediationMode.TOPON,
                 onInitialized = { success ->
                     if (token == initializationAttempt) finishSingleProviderInitialization(AdPlatform.TOPON, success)
@@ -390,7 +437,7 @@ object Ads {
                     config = AdMobConfig(
                         ids = provider.admob.ids,
                         preload = provider.admob.preload,
-                        eventListener = config.eventListener,
+                        eventListener = observedEvents,
                         revenueListener = config.revenueListener,
                         loggingEnabled = config.loggingEnabled,
                         logTag = config.logTag,
@@ -406,6 +453,7 @@ object Ads {
                     commonConfig = config.copy(
                         provider = provider.topon,
                         autoShowAppOpen = false,
+                        eventListener = observedEvents,
                     ),
                     mediationMode = AdMediationMode.BIDDING,
                     onInitialized = { success -> if (token == initializationAttempt) finishBiddingProviderInitialization(false, success) },
@@ -497,9 +545,11 @@ object Ads {
      * Bidding configurations use their AdMob Banner, without running a Banner auction.
      * @throws IllegalStateException if initialize has not been called or no AdMob bannerId is configured.
      */
+    @JvmOverloads
     fun bannerRequest(
         position: String,
         size: BannerSize = BannerSize.AnchoredAdaptive,
+        mainType: AdMainType? = AdMainType.BANNER,
     ): BannerRequest {
         require(position.isNotBlank()) { "position must not be blank" }
         check(::config.isInitialized) { "Call Ads.initialize before using a configured Banner" }
@@ -509,7 +559,7 @@ object Ads {
             is TopOnProviderConfig -> error("topon_banner_not_supported")
         }
         val id = checkNotNull(ids.bannerId) { "Configure AdMobIds.bannerId before using a configured Banner" }
-        return BannerRequest(AdPlatform.ADMOB, id, position, size)
+        return BannerRequest(AdPlatform.ADMOB, id, position, size, mainType)
     }
 
     /**
@@ -522,7 +572,7 @@ object Ads {
         contentWidthDp: Int,
         autoRefill: Boolean = true,
     ) = onMain {
-        if (!::config.isInitialized || request.platform != AdPlatform.ADMOB || contentWidthDp <= 0) {
+        if (!::config.isInitialized || !canLoadAds(request.platform) || request.platform != AdPlatform.ADMOB || contentWidthDp <= 0) {
             return@onMain
         }
         val provider = when (val configured = config.provider) {
@@ -551,7 +601,7 @@ object Ads {
 
     internal fun bannerEvents(platform: AdPlatform): AdEventDispatcher? =
         if (!::config.isInitialized) null else AdEventDispatcher(
-            application, platform, config.provider.mediationMode, config.eventListener,
+            application, platform, config.provider.mediationMode, observedEvents,
             config.loggingEnabled, config.logTag,
         )
 
@@ -578,64 +628,50 @@ object Ads {
         activity: Activity,
         position: String,
         onResult: (AdShowResult) -> Unit,
-    ) = onMain {
-        val failure = commonShowFailure(AdFormat.APP_OPEN)
-        if (failure != null) {
-            failShow(AdFormat.APP_OPEN, position, failure, onResult)
-            return@onMain
-        }
-        when (config.provider) {
-            is AdMobProviderConfig -> AdMobAds.showAppOpen(activity, position, onResult)
-            is TopOnProviderConfig -> TopOnAds.showAppOpen(
-                activity = activity,
-                position = position,
-                onResult = onResult,
-            )
-            is BiddingProviderConfig -> bidAndShow(
-                format = AdFormat.APP_OPEN,
-                activity = activity,
-                position = position,
-                onResult = { onResult(it.showResult) },
-            )
-        }
-    }
+    ) = onMain { showImmediate(AdFormat.APP_OPEN, activity, position, AdMainType.OPEN) { onResult(it.showResult) } }
 
     fun showInterstitial(
         activity: Activity,
         position: String,
         onResult: (AdShowResult) -> Unit = {},
-    ) = onMain {
-        val failure = commonShowFailure(AdFormat.INTERSTITIAL)
-        if (failure != null) {
-            failShow(AdFormat.INTERSTITIAL, position, failure, onResult)
-            return@onMain
-        }
-        when (config.provider) {
-            is AdMobProviderConfig -> AdMobAds.showInterstitial(activity, position, onResult)
-            is TopOnProviderConfig -> TopOnAds.showInterstitial(activity, position, onResult)
-            is BiddingProviderConfig -> bidAndShow(
-                format = AdFormat.INTERSTITIAL,
-                activity = activity,
-                position = position,
-                onResult = { onResult(it.showResult) },
-            )
-        }
-    }
+    ) = onMain { showImmediate(AdFormat.INTERSTITIAL, activity, position, AdMainType.INTER) { onResult(it.showResult) } }
 
     fun showRewarded(
         activity: Activity,
         position: String,
         onResult: (AdRewardResult) -> Unit,
-    ) = onMain {
-        val failure = commonShowFailure(AdFormat.REWARDED)
-        if (failure != null) {
-            failRewardedShow(position, failure, onResult)
-            return@onMain
+    ) = onMain { showImmediate(AdFormat.REWARDED, activity, position, AdMainType.REWARDED, onResult) }
+
+    private fun showImmediate(format: AdFormat, activity: Activity, position: String,
+        mainType: AdMainType?,
+        onResult: (AdRewardResult) -> Unit) {
+        val policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true,
+            userInitiated = format == AdFormat.REWARDED, mainType = mainType))
+        val checked = policy.check()
+        if (checked is AdPolicyCheckResult.Blocked) {
+            policy.complete()
+            onResult(AdRewardResult(false, AdShowResult.Blocked(checked.reason)))
+            return
         }
-        when (config.provider) {
-            is AdMobProviderConfig -> AdMobAds.showRewarded(activity, position, onResult)
-            is TopOnProviderConfig -> TopOnAds.showRewarded(activity, position, onResult)
-            is BiddingProviderConfig -> bidAndShow(AdFormat.REWARDED, activity, position, onResult)
+        commonShowFailure(format)?.let { reason ->
+            policy.complete()
+            val id = emitFacadeShowFailure(format, position, reason)
+            onResult(AdRewardResult(false, AdShowResult.Failed(reason), id))
+            return
+        }
+        val result: (AdRewardResult) -> Unit = { value ->
+            policy.complete()
+            onResult(value.copy(showResult = policy.result(value.showResult)))
+        }
+        if (config.provider is BiddingProviderConfig) {
+            bidAndShow(format, activity, position, policy, result)
+        } else {
+            val attempt = FullScreenShowAttempt().also {
+                it.policy = policy
+                it.guard = { commonShowFailure(format) }
+            }
+            showSelected(config.provider.platform, format, activity, position, attempt,
+                onSessionStarted = {}, onResult = result)
         }
     }
 
@@ -647,7 +683,10 @@ object Ads {
      * keep their own policies. Configure timeout and Native layout once in [AdsConfig].
      */
     fun showOpen(position: String, onResult: (AdShowResult) -> Unit = {}): AdTask =
-        showScene(AdFormat.APP_OPEN, position, onResult)
+        showOpen(position, AdMainType.OPEN, onResult)
+
+    fun showOpen(position: String, mainType: AdMainType?, onResult: (AdShowResult) -> Unit = {}): AdTask =
+        showScene(AdFormat.APP_OPEN, position, mainType, onResult)
 
     /**
      * Wait for interstitial candidates, then use cached full-screen Native only if none is available.
@@ -660,13 +699,31 @@ object Ads {
         position: String,
         onLoadingChanged: (Boolean) -> Unit = {},
         onResult: (AdShowResult) -> Unit = {},
-    ): AdTask = showScene(AdFormat.INTERSTITIAL, position, onResult, onLoadingChanged)
+    ): AdTask = showScene(AdFormat.INTERSTITIAL, position, AdMainType.INTER, onResult, onLoadingChanged)
+
+    /** Rechecks the host's business condition while waiting and immediately before SDK handoff. */
+    fun showInter(
+        position: String,
+        isSceneValid: () -> Boolean,
+        onLoadingChanged: (Boolean) -> Unit = {},
+        onResult: (AdShowResult) -> Unit = {},
+    ): AdTask = showScene(AdFormat.INTERSTITIAL, position, AdMainType.INTER, onResult, onLoadingChanged, isSceneValid)
+
+    fun showInter(
+        position: String,
+        mainType: AdMainType?,
+        isSceneValid: () -> Boolean = { true },
+        onLoadingChanged: (Boolean) -> Unit = {},
+        onResult: (AdShowResult) -> Unit = {},
+    ): AdTask = showScene(AdFormat.INTERSTITIAL, position, mainType, onResult, onLoadingChanged, isSceneValid)
 
     private fun showScene(
         scene: AdFormat,
         position: String,
+        mainType: AdMainType?,
         onResult: (AdShowResult) -> Unit,
         onLoadingChanged: ((Boolean) -> Unit)? = null,
+        isSceneValid: () -> Boolean = { true },
     ): AdTask {
         val startedAt = SystemClock.elapsedRealtime()
         var controller: DisplayOpportunityController? = null
@@ -682,13 +739,16 @@ object Ads {
             val trace: (String) -> Unit = { message ->
                 nativeLogger?.sceneTask(scene, task.id, position, SystemClock.elapsedRealtime() - startedAt, message)
             }
+            val policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true, mainType = mainType))
             var finished = false
             fun finish(result: AdShowResult) {
                 if (finished) return
                 finished = true
                 task.detach()
+                policy.complete()
                 trace(when (result) {
                     AdShowResult.Dismissed -> "任务结束：广告已展示并关闭。"
+                    is AdShowResult.Blocked -> "任务结束：策略拦截，原因=${result.reason.code}。"
                     is AdShowResult.Failed -> "任务结束：未展示广告；${result.reason.flowReason()}（原因码=${result.reason}）。"
                 })
                 runCatching { onResult(result) }
@@ -697,6 +757,10 @@ object Ads {
             if (cancelled) { finish(AdShowResult.Failed("opportunity_cancelled")); return@onMain }
             if (position.isBlank()) { finish(AdShowResult.Failed("invalid_position")); return@onMain }
             if (!::config.isInitialized) { finish(AdShowResult.Failed("sdk_not_initialized")); return@onMain }
+            val policyResult = policy.check()
+            if (policyResult is AdPolicyCheckResult.Blocked) {
+                finish(AdShowResult.Blocked(policyResult.reason)); return@onMain
+            }
             val activity = AdLifecycleMonitor.requestActivity
             if (activity == null) { finish(AdShowResult.Failed("activity_not_available")); return@onMain }
             val timeout = runCatching {
@@ -716,7 +780,7 @@ object Ads {
             val auction = FullScreenAdAuction(
                 formats = formats,
                 read = { format, platform ->
-                    val enabled = config.provider.isFormatEnabled(platform, format)
+                    val enabled = (isPlatformEnabled(platform) && config.provider.isFormatEnabled(platform, format))
                     val ready = enabled && if (platform == AdPlatform.ADMOB) AdMobAds.isReady(format) else TopOnAds.isReady(format)
                     val failed = if (platform == AdPlatform.ADMOB) {
                         AdMobAds.state == AdMobState.FAILED || AdMobAds.loadFailureVersion(format) != failures[format]?.get(platform)
@@ -762,11 +826,12 @@ object Ads {
                 schedule = { check, delay -> mainHandler.postDelayed(check, delay) },
                 unschedule = mainHandler::removeCallbacks,
                 precondition = ::fullScreenSceneFailure,
-                sceneValid = { !activity.isFinishing && !activity.isDestroyed },
+                sceneValid = { !activity.isFinishing && !activity.isDestroyed && isSceneValid() },
                 hostFailure = { AdLifecycleMonitor.activityWaitFailureReason(activity) },
                 loadSnapshot = { auction.snapshot(acceptNewResults = waiting.elapsedMillis() < timeout) },
                 ensureLoaded = {
-                    formats.filter { config.provider.isFormatEnabled(AdPlatform.TOPON, it) }.forEach(TopOnAds::ensureLoaded)
+                    AdMobAds.onPolicyChanged()
+                    formats.filter { canLoadAds(AdPlatform.TOPON) && config.provider.isFormatEnabled(AdPlatform.TOPON, it) }.forEach(TopOnAds::ensureLoaded)
                 },
                 show = { attempt, callback ->
                     FullScreenLoadSignals.remove(loadListener)
@@ -778,7 +843,7 @@ object Ads {
                             callback(AdRewardResult(false, AdShowResult.Failed("native_layout_not_configured")))
                         } else {
                             nativeSession = NativeFullScreenSession.start(activity, position, layout,
-                                sceneValid = { !activity.isFinishing && !activity.isDestroyed },
+                                sceneValid = { !activity.isFinishing && !activity.isDestroyed && isSceneValid() },
                                 attempt = attempt, trace = trace,
                             ) { callback(AdRewardResult(false, it)) }
                         }
@@ -809,6 +874,9 @@ object Ads {
                 preferAvailableAfterResume = false,
                 trace = trace,
                 onLoadingChanged = onLoadingChanged,
+                preferCachedImmediately = scene == AdFormat.INTERSTITIAL,
+                policy = policy,
+                excludeWaitingTime = { initializationStage == InitializationStage.WAITING_FOR_UMP },
             )
             controller = waiting
             // Capture pre-existing inventory even if posting to main already spent the budget.
@@ -825,6 +893,7 @@ object Ads {
     private fun fullScreenSceneFailure(): String? = displayOpportunityFailureReason(
         commonFailure = when {
             !::config.isInitialized -> "sdk_not_initialized"
+            initializationStage == InitializationStage.WAITING_FOR_UMP -> "sdk_initializing"
             !consentSnapshot.canRequestAds -> CONSENT_NOT_OBTAINED
             !providerInitializationStarted.get() -> "sdk_initializing"
             initializationStage == InitializationStage.FAILED -> "sdk_initialization_failed"
@@ -850,6 +919,7 @@ object Ads {
         onResult: (AdShowResult) -> Unit = {},
     ): AdDisplayOpportunity = createOpportunity(
         AdFormat.APP_OPEN, activity, position, timeoutMillis, isSceneValid,
+        mainType = AdMainType.OPEN,
         onResult = { onResult(it.showResult) },
     )
 
@@ -863,6 +933,15 @@ object Ads {
         layout: NativeLayout.Custom,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdShowResult) -> Unit = {},
+    ): AdDisplayOpportunity = showNativeFullScreen(activity, position, layout, AdMainType.NATIVE_FULLSCREEN, isSceneValid, onResult)
+
+    fun showNativeFullScreen(
+        activity: Activity,
+        position: String,
+        layout: NativeLayout.Custom,
+        mainType: AdMainType?,
+        isSceneValid: () -> Boolean = { true },
+        onResult: (AdShowResult) -> Unit = {},
     ): AdDisplayOpportunity {
         var session: NativeFullScreenSession? = null
         var cancelled = false
@@ -874,7 +953,10 @@ object Ads {
                 opportunity.detach()
                 onResult(AdShowResult.Failed("opportunity_cancelled"))
             } else {
-                session = NativeFullScreenSession.start(activity, position, layout, isSceneValid) {
+                val attempt = FullScreenShowAttempt().also {
+                    it.policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true, mainType = mainType))
+                }
+                session = NativeFullScreenSession.start(activity, position, layout, isSceneValid, attempt = attempt) {
                     opportunity.detach()
                     onResult(it)
                 }
@@ -886,11 +968,20 @@ object Ads {
     fun showRewardedWhenReady(
         activity: Activity,
         position: String = "manual",
-        timeoutMillis: Long = 5_000L,
+        timeoutMillis: Long = if (::config.isInitialized) config.rewardedTimeoutMillis(position) else 3_000L,
+        isSceneValid: () -> Boolean = { true },
+        onResult: (AdRewardResult) -> Unit = {},
+    ): AdDisplayOpportunity = showRewardedWhenReady(activity, position, AdMainType.REWARDED, timeoutMillis, isSceneValid, onResult)
+
+    fun showRewardedWhenReady(
+        activity: Activity,
+        position: String,
+        mainType: AdMainType?,
+        timeoutMillis: Long = if (::config.isInitialized) config.rewardedTimeoutMillis(position) else 3_000L,
         isSceneValid: () -> Boolean = { true },
         onResult: (AdRewardResult) -> Unit = {},
     ): AdDisplayOpportunity = createOpportunity(
-        AdFormat.REWARDED, activity, position, timeoutMillis, isSceneValid, onResult = onResult,
+        AdFormat.REWARDED, activity, position, timeoutMillis, isSceneValid, mainType, onResult,
     )
 
     private fun createOpportunity(
@@ -899,6 +990,7 @@ object Ads {
         position: String,
         timeoutMillis: Long,
         isSceneValid: () -> Boolean,
+        mainType: AdMainType?,
         onResult: (AdRewardResult) -> Unit,
     ): AdDisplayOpportunity {
         require(format != AdFormat.BANNER) { "Banner does not use full-screen display opportunities" }
@@ -943,8 +1035,8 @@ object Ads {
             hostFailure = { AdLifecycleMonitor.activityWaitFailureReason(activity) },
             loadSnapshot = {
                 // SDK caches can change between calls; reuse each readiness sample for both decisions.
-                val admobEnabled = config.provider.isFormatEnabled(AdPlatform.ADMOB, format)
-                val topOnEnabled = config.provider.isFormatEnabled(AdPlatform.TOPON, format)
+                val admobEnabled = (isPlatformEnabled(AdPlatform.ADMOB) && config.provider.isFormatEnabled(AdPlatform.ADMOB, format))
+                val topOnEnabled = (isPlatformEnabled(AdPlatform.TOPON) && config.provider.isFormatEnabled(AdPlatform.TOPON, format))
                 val admobReady = admobEnabled && AdMobAds.isReady(format)
                 val topOnReady = topOnEnabled && TopOnAds.isReady(format)
                 val admobFinished = !admobEnabled || admobReady || AdMobAds.state == AdMobState.FAILED ||
@@ -961,7 +1053,8 @@ object Ads {
                 }
             },
             ensureLoaded = {
-                if (config.provider.isFormatEnabled(AdPlatform.TOPON, format)) TopOnAds.ensureLoaded(format)
+                AdMobAds.onPolicyChanged()
+                if ((isPlatformEnabled(AdPlatform.TOPON) && config.provider.isFormatEnabled(AdPlatform.TOPON, format))) TopOnAds.ensureLoaded(format)
             },
             show = { attempt, callback ->
                 val decision = if (config.provider is BiddingProviderConfig) {
@@ -990,6 +1083,10 @@ object Ads {
                 handle.detach()
             },
             onResult = onResult,
+            preferCachedImmediately = format != AdFormat.APP_OPEN,
+            policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true,
+                userInitiated = format == AdFormat.REWARDED, mainType = mainType)),
+            excludeWaitingTime = { initializationStage == InitializationStage.WAITING_FOR_UMP },
         )
         onMain {
             admobFailureVersion = AdMobAds.loadFailureVersion(format)
@@ -1004,12 +1101,15 @@ object Ads {
     }
 
     private fun opportunityPrecondition(format: AdFormat): String? = displayOpportunityFailureReason(
-        commonFailure = commonShowFailure(format),
+        commonFailure = commonShowFailure(format).let { failure ->
+            if (failure == CONSENT_NOT_OBTAINED && initializationStage == InitializationStage.WAITING_FOR_UMP)
+                "sdk_initializing" else failure
+        },
         state = state,
         hasReadyBiddingProvider = providerInitializationStarted.get() &&
             ::config.isInitialized && config.provider is BiddingProviderConfig &&
-            ((config.provider.isFormatEnabled(AdPlatform.ADMOB, format) && AdMobAds.state == AdMobState.READY) ||
-                (config.provider.isFormatEnabled(AdPlatform.TOPON, format) && TopOnAds.state == TopOnState.READY)),
+            (((isPlatformEnabled(AdPlatform.ADMOB) && config.provider.isFormatEnabled(AdPlatform.ADMOB, format)) && AdMobAds.state == AdMobState.READY) ||
+                ((isPlatformEnabled(AdPlatform.TOPON) && config.provider.isFormatEnabled(AdPlatform.TOPON, format)) && TopOnAds.state == TopOnState.READY)),
     )
 
     /** Both waiting and immediate bidding pass the same owner all the way to SDK show(). */
@@ -1023,6 +1123,8 @@ object Ads {
         onSessionStarted: (AdShowSession) -> Unit,
         onResult: (AdRewardResult) -> Unit,
     ) {
+        val originalGuard = attempt.handoffGuard
+        attempt.handoffGuard = { originalGuard?.invoke() ?: if (!isPlatformEnabled(winner)) "ad_platform_disabled" else null }
         var sessionId: String? = null
         val created: (AdShowSession) -> Unit = {
             sessionId = it.sessionId
@@ -1074,10 +1176,14 @@ object Ads {
         format: AdFormat,
         activity: Activity,
         position: String,
+        policy: AdPolicyAttempt,
         onResult: (AdRewardResult) -> Unit,
     ) {
         require(format != AdFormat.BANNER) { "Banner does not use full-screen bidding" }
-        val attempt = FullScreenShowAttempt().apply { guard = { commonShowFailure(format) } }
+        val attempt = FullScreenShowAttempt().apply {
+            this.policy = policy
+            guard = { commonShowFailure(format) }
+        }
         FullScreenShowGate.reserve(attempt)?.let { reason ->
             val sessionId = emitFacadeShowFailure(format, position, reason)
             onResult(AdRewardResult(false, AdShowResult.Failed(reason), sessionId))
@@ -1114,31 +1220,6 @@ object Ads {
         )
     }
 
-    private fun failShow(
-        format: AdFormat,
-        position: String,
-        reason: String,
-        onResult: (AdShowResult) -> Unit,
-    ) {
-        emitFacadeShowFailure(format, position, reason)
-        onResult(AdShowResult.Failed(reason))
-    }
-
-    private fun failRewardedShow(
-        position: String,
-        reason: String,
-        onResult: (AdRewardResult) -> Unit,
-    ) {
-        val sessionId = emitFacadeShowFailure(AdFormat.REWARDED, position, reason)
-        onResult(
-            AdRewardResult(
-                rewardEarned = false,
-                showResult = AdShowResult.Failed(reason),
-                sessionId = sessionId,
-            ),
-        )
-    }
-
     private fun emitFacadeShowFailure(
         format: AdFormat,
         position: String,
@@ -1160,7 +1241,7 @@ object Ads {
     internal fun nativeAvailability(platform: AdPlatform): NativeAvailability {
         if (!::config.isInitialized) return NativeAvailability(failure = "sdk_not_initialized")
         return nativeAvailability(
-            platformConfigured = config.provider is BiddingProviderConfig || config.provider.platform == platform,
+            platformConfigured = isPlatformEnabled(platform) && (config.provider is BiddingProviderConfig || config.provider.platform == platform),
             consentPending = initializationStage == InitializationStage.WAITING_FOR_UMP,
             consentAllowed = consentSnapshot.canRequestAds,
             providerState = when (platform) {
@@ -1188,7 +1269,7 @@ object Ads {
 
     internal fun beginNativeInventoryLoad(platform: AdPlatform, adUnitId: String): com.cashcraft.ads.mediation.internal.AdLoadSession {
         val mode = if (platform == AdPlatform.ADMOB) AdMediationMode.ADMOB else AdMediationMode.TOPON
-        return AdEventDispatcher(application, platform, mode, config.eventListener,
+        return AdEventDispatcher(application, platform, mode, observedEvents,
             config.loggingEnabled, config.logTag).beginLoad(AdFormat.NATIVE, adUnitId, 1)
     }
 
@@ -1200,7 +1281,7 @@ object Ads {
         val listener = AdEventListener { event ->
             // Observe the confirmed event after binding; NativeCardController rebinds SDK callbacks.
             if (event.name == AdEventName.IMPRESSION) onImpression?.invoke()
-            config.eventListener.onEvent(event)
+            observedEvents.onEvent(event)
         }
         return AdEventDispatcher(application, platform, mode, listener,
             config.loggingEnabled, config.logTag).nativeSlot(request, config.revenueListener)

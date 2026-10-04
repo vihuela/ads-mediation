@@ -349,6 +349,7 @@ internal class AdShowSession(
     var onImpressionConfirmed: (() -> Unit)? = null
 
     init {
+        attempt.policy?.logMaterial(format, platform)
         onCreated(this)
         emit(AdEventName.POSITION)
     }
@@ -357,6 +358,8 @@ internal class AdShowSession(
         get() = terminal.get()
 
     fun impression(adSource: String?, responseId: String?) {
+        // Actual callbacks still count if teardown/failure reached the main queue first.
+        attempt.policy?.impression()
         if (terminal.compareAndSet(false, true)) {
             val callback = onImpressionConfirmed
             onImpressionConfirmed = null
@@ -368,6 +371,8 @@ internal class AdShowSession(
     fun showFailure(reason: String, errorCode: String? = null, cause: Throwable? = null) {
         if (terminal.compareAndSet(false, true)) {
             onImpressionConfirmed = null
+            // A policy block has its own typed notification; never report it as an SDK failure.
+            if (attempt.policy?.blocked != null) return
             emit(AdEventName.SHOW_FAIL, reason = reason, errorCode = errorCode)
             cause?.let { error ->
                 logger?.showFailureException(
@@ -421,6 +426,7 @@ internal class AdShowSession(
         mediationAdapterClassName: String? = null,
         precisionType: String? = null,
     ) {
+        if (name == AdEventName.CLICK) attempt.policy?.click()
         val event = AdEvent(
             name = name,
             platform = platform,

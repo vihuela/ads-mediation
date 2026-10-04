@@ -61,7 +61,7 @@ class DisplayOpportunityControllerTest {
     }
 
     @Test fun `invalid parameters and permanent failures never load or create show events`() {
-        for (timeout in listOf(0L, -1L)) {
+        for (timeout in listOf(-1L)) {
             val h = harness(timeout)
             h.controller.start()
             assertEquals("invalid_timeout", h.reason)
@@ -334,7 +334,7 @@ class DisplayOpportunityControllerTest {
     }
 
     @Test fun `pause before start still validates and reserves but waits for resume to check`() {
-        for (timeout in listOf(0L, -1L)) {
+        for (timeout in listOf(-1L)) {
             val invalid = harness(timeout)
             invalid.controller.pause()
             invalid.controller.start()
@@ -757,6 +757,43 @@ class DisplayOpportunityControllerTest {
         assertEquals(listOf(true, false), loadingAtResult)
     }
 
+    @Test fun `zero wait uses cache immediately and never requests loading`() {
+        val cached = harness(timeout = 0)
+        cached.ready = true
+        cached.settled = false
+        cached.controller.start()
+        assertEquals(1, cached.sdkCalls)
+        assertEquals(0, cached.ensures)
+        cached.finishSdk()
+        val empty = harness(timeout = 0)
+        empty.controller.start()
+        assertEquals("wait_timeout", empty.reason)
+        assertEquals(0, empty.ensures)
+        empty.ready = true
+        empty.tick()
+        assertEquals(0, empty.sdkCalls)
+        assertEquals(1, empty.results.size)
+    }
+
+    @Test fun `consent interaction is excluded but subsequent SDK wait shares one deadline`() {
+        val h = harness()
+        h.excludeWait = true
+        h.precondition = "sdk_initializing"
+        h.controller.start()
+        h.now = 50_000
+        h.tick()
+        assertTrue(h.results.isEmpty())
+        assertEquals(0L, h.controller.elapsedMillis())
+        h.excludeWait = false
+        h.tick()
+        h.now += 499
+        h.tick()
+        assertTrue(h.results.isEmpty())
+        h.now += 1
+        h.tick()
+        assertEquals("wait_timeout", h.reason)
+    }
+
     private class Harness(timeout: Long, queuedFor: Long) {
         var now = queuedFor
         var ready = false
@@ -765,6 +802,7 @@ class DisplayOpportunityControllerTest {
         var precondition: String? = null
         var hostFailure: String? = null
         var scene: () -> Boolean = { true }
+        var excludeWait = false
         var ensure: () -> Unit = {}
         var beforeCommit: () -> Unit = {}
         var onEvent: (AdEvent) -> Unit = {}
@@ -799,6 +837,7 @@ class DisplayOpportunityControllerTest {
             onCleanup = { cleanups++ },
             onResult = { results += it; onResult(it) },
             onLoadingChanged = { loading += it; onLoading(it) },
+            excludeWaitingTime = { excludeWait },
         )
 
         private fun show(attempt: FullScreenShowAttempt, callback: (AdRewardResult) -> Unit) {

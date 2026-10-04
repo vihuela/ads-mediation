@@ -2,6 +2,7 @@ package com.cashcraft.ads.mediation.internal
 
 import com.cashcraft.ads.mediation.AdFormat
 import com.cashcraft.ads.mediation.AdPlatform
+import com.cashcraft.ads.mediation.Ads
 import com.cashcraft.ads.mediation.admob.AdMobAds
 import com.cashcraft.ads.mediation.internal.topon.TopOnAds
 
@@ -61,7 +62,7 @@ internal object AdBiddingCoordinator {
         require(format != AdFormat.NATIVE) { "unsupported_ad_format" }
         // Match each standalone provider's show semantics: this opportunity never waits for a
         // network load. TopOn still starts a background fill for the next opportunity.
-        TopOnAds.ensureLoaded(format)
+        if (Ads.canLoadAds(AdPlatform.TOPON)) TopOnAds.ensureLoaded(format)
         return selectAvailable(format)
     }
 
@@ -69,13 +70,13 @@ internal object AdBiddingCoordinator {
     fun selectAvailable(format: AdFormat): BidDecision {
         require(format != AdFormat.BANNER) { "Banner does not use full-screen bidding" }
         require(format != AdFormat.NATIVE) { "unsupported_ad_format" }
-        val admobAvailable = AdMobAds.isReady(format)
-        val topOnAvailable = TopOnAds.isReady(format)
+        val admobAvailable = Ads.isPlatformEnabled(AdPlatform.ADMOB) && AdMobAds.isReady(format)
+        val topOnAvailable = Ads.isPlatformEnabled(AdPlatform.TOPON) && TopOnAds.isReady(format)
         val selection = BidCandidateSelector.select(
             admobAvailable = admobAvailable,
-            admobPriceUsd = AdMobAds.bidPrice(format),
+            admobPriceUsd = if (admobAvailable) AdMobAds.bidPrice(format) else null,
             toponAvailable = topOnAvailable,
-            toponPriceUsd = TopOnAds.bidPrice(format),
+            toponPriceUsd = if (topOnAvailable) TopOnAds.bidPrice(format) else null,
         )
         return BidDecision(
             selection = selection,

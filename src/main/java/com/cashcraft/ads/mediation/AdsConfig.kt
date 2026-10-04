@@ -217,6 +217,12 @@ data class AdsConfig(
     val nativeFullScreenLayout: NativeLayout.Custom? = null,
     /** Waiting budget for showInter; leaving the host cancels instead of pausing this task. */
     val interTimeoutMillis: (position: String) -> Long = { 3_000L },
+    val rewardedTimeoutMillis: (position: String) -> Long = { 3_000L },
+    /** Runtime policy is replaced atomically with Ads.updatePolicy. */
+    val policy: AdPolicy = AdPolicy(),
+    /** Host's persisted first app launch, not the time the ad SDK was initialized. */
+    val firstLaunchTimeMillis: Long = System.currentTimeMillis(),
+    val onAdBlocked: (AdBlockInfo) -> Unit = {},
 ) {
     init {
         require(logTag.isNotBlank()) { "logTag must not be blank" }

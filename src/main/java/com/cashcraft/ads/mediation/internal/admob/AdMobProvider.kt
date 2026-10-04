@@ -32,6 +32,7 @@ import com.google.android.libraries.ads.mobile.sdk.interstitial.InterstitialAdPr
 import com.google.android.libraries.ads.mobile.sdk.rewarded.RewardedAdEventCallback
 import com.google.android.libraries.ads.mobile.sdk.rewarded.RewardedAdPreloader
 import com.cashcraft.ads.mediation.AdPlatform
+import com.cashcraft.ads.mediation.Ads
 import com.cashcraft.ads.mediation.BannerRequest
 import com.cashcraft.ads.mediation.AdMobRevenuePayload
 import com.cashcraft.ads.mediation.AdShowResult
@@ -47,6 +48,9 @@ import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.cashcraft.ads.mediation.internal.AutoAppOpenController
 import com.cashcraft.ads.mediation.internal.FullScreenShowGate
 import com.cashcraft.ads.mediation.internal.FullScreenShowAttempt
+import com.cashcraft.ads.mediation.AdMainType
+import com.cashcraft.ads.mediation.internal.AdPolicyAttempt
+import com.cashcraft.ads.mediation.internal.AdPolicyRequest
 import com.cashcraft.ads.mediation.internal.admob.AdMobConfig
 import com.cashcraft.ads.mediation.internal.admob.AdMobEventName
 import com.cashcraft.ads.mediation.internal.admob.AdMobFormat
@@ -89,6 +93,7 @@ object AdMobAds {
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mobileAdsInitializationStarted = AtomicBoolean(false)
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
+    private var removePolicyListener: (() -> Unit)? = null
 
     @Volatile
     var state: AdMobState = AdMobState.NOT_INITIALIZED
@@ -163,7 +168,10 @@ object AdMobAds {
                 logTag = config.logTag,
             )
             autoAppOpenController = AutoAppOpenController(
-                isEnabled = { this.config.autoShowAppOpen && isFormatEnabled(AdMobFormat.APP_OPEN) },
+                isEnabled = {
+                    Ads.isPlatformEnabled(AdPlatform.ADMOB) &&
+                        this.config.autoShowAppOpen && isFormatEnabled(AdMobFormat.APP_OPEN)
+                },
                 isProviderReady = { state == AdMobState.READY },
                 providerFailureReason = {
                     state.takeUnless { it == AdMobState.READY }?.showFailureReason()
@@ -174,6 +182,10 @@ object AdMobAds {
                         AdMobFormat.APP_OPEN,
                         this.config.appOpenPosition,
                         this.config.ids.appOpenId,
+                        attempt = FullScreenShowAttempt().apply {
+                            policy = AdPolicyAttempt(AdPolicyRequest(AdMobAds.config.appOpenPosition,
+                                fullscreen = true, mainType = AdMainType.OPEN))
+                        },
                     )
                 },
                 show = { activity, session ->
@@ -192,6 +204,9 @@ object AdMobAds {
         // Application.onCreate normally runs on the main thread. Register synchronously there so
         // a fast cold start cannot resume its first Activity before this callback is installed.
         onMain {
+            if (removePolicyListener == null) {
+                removePolicyListener = Ads.addPolicyListener(::onPolicyChanged)
+            }
             AdLifecycleMonitor.install(application, initialActivity)
             beginMobileAdsInitialization()
         }
@@ -225,6 +240,7 @@ object AdMobAds {
         ::config.isInitialized && config.ids.isFormatEnabled(format, config.preload)
 
     fun isReady(format: AdMobFormat): Boolean {
+        if (!Ads.isPlatformEnabled(AdPlatform.ADMOB)) return false
         if (format == AdMobFormat.BANNER || format == AdMobFormat.NATIVE || !isFormatEnabled(format)) return false
         if (state != AdMobState.READY) return false
         if (pendingAd(format) != null) return true
@@ -267,6 +283,7 @@ object AdMobAds {
     }
 
     internal fun pollBanner(request: BannerRequest, size: AdSize): BannerAd? {
+        if (!Ads.isPlatformEnabled(AdPlatform.ADMOB)) return null
         if (state != AdMobState.READY || request.platform != AdPlatform.ADMOB || config.preload.banner == 0) {
             return null
         }
@@ -380,9 +397,65 @@ object AdMobAds {
     }
 
     private fun startPreloading() {
+        preloadDescriptors.clear()
+        AdMobFormat.entries.filter {
+            it != AdMobFormat.BANNER && it != AdMobFormat.NATIVE && isFormatEnabled(it)
+        }.forEach { format ->
+            preloadDescriptors[format.preloadId()] = PreloadDescriptor(
+                format, config.ids.adUnitId(format), config.preload.bufferSize(format),
+            )
+        }
+        onPolicyChanged()
+    }
+
+    /** Stops SDK-owned automatic retries/refills, then starts fresh pools when loading is allowed. */
+    internal fun onPolicyChanged() = onMain {
+        if (state != AdMobState.READY) return@onMain
+        if (Ads.canLoadAds(AdPlatform.ADMOB)) {
+            preloadDescriptors.forEach { (preloadId, descriptor) ->
+                startFullScreenPreloading(preloadId, descriptor)
+            }
+            bannerPreloadDescriptors.values.toList().forEach(::startBannerPreloading)
+        } else {
+            preloadDescriptors.forEach { (preloadId, descriptor) ->
+                if (descriptor.started) {
+                    descriptor.started = false
+                    descriptor.generation++
+                    when (descriptor.format) {
+                        AdMobFormat.APP_OPEN -> AppOpenAdPreloader.destroy(preloadId)
+                        AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.destroy(preloadId)
+                        AdMobFormat.REWARDED -> RewardedAdPreloader.destroy(preloadId)
+                        AdMobFormat.BANNER, AdMobFormat.NATIVE -> Unit
+                    }
+                    preloadLoadSessions.remove(preloadId)
+                    preloadStartedAt.remove(preloadId)
+                }
+            }
+            bannerPreloadDescriptors.values.toList().forEach { descriptor ->
+                if (descriptor.started) {
+                    descriptor.started = false
+                    descriptor.settled = false
+                    descriptor.generation++
+                    if (descriptor.autoRefill) BannerAdPreloader.destroy(descriptor.preloadId)
+                    descriptor.ad?.ad?.destroy()
+                    descriptor.ad = null
+                }
+            }
+        }
+    }
+
+    private fun startFullScreenPreloading(preloadId: String, descriptor: PreloadDescriptor) {
+        if (descriptor.started || !Ads.canLoadAds(AdPlatform.ADMOB)) return
+        descriptor.started = true
+        val generation = ++descriptor.generation
         val preloadCallback = object : PreloadCallback {
             override fun onAdPreloaded(preloadId: String, responseInfo: ResponseInfo) {
                 mainHandler.post {
+                    if (!descriptor.started || descriptor.generation != generation) return@post
+                    if (!Ads.canLoadAds(AdPlatform.ADMOB)) {
+                        onPolicyChanged()
+                        return@post
+                    }
                     // Matching is by response ID, never by callback/poll order.
                     // ponytail: preload-start age discards later fills early; use a public
                     // per-ad load timestamp if the SDK eventually exposes one.
@@ -407,6 +480,11 @@ object AdMobAds {
 
             override fun onAdFailedToPreload(preloadId: String, adError: LoadAdError) {
                 mainHandler.post {
+                    if (!descriptor.started || descriptor.generation != generation) return@post
+                    if (!Ads.canLoadAds(AdPlatform.ADMOB)) {
+                        onPolicyChanged()
+                        return@post
+                    }
                     loadFailures[preloadId] = (loadFailures[preloadId] ?: 0L) + 1
                     preloadLoadSessions[preloadId]?.failed(
                         result = adError.analyticsLoadResult(),
@@ -419,30 +497,32 @@ object AdMobAds {
             }
 
             override fun onAdsExhausted(preloadId: String) {
-                mainHandler.post { beginPreloadCycle(preloadId) }
+                mainHandler.post {
+                    if (!descriptor.started || descriptor.generation != generation) return@post
+                    if (Ads.canLoadAds(AdPlatform.ADMOB)) beginPreloadCycle(preloadId)
+                    else onPolicyChanged()
+                }
             }
         }
-        preloadDescriptors.clear()
-        AdMobFormat.entries.filter { it != AdMobFormat.BANNER && isFormatEnabled(it) }.forEach { format ->
-            val preloadId = format.preloadId()
-            val descriptor = PreloadDescriptor(format, config.ids.adUnitId(format), config.preload.bufferSize(format))
-            preloadDescriptors[preloadId] = descriptor
-            beginPreloadCycle(preloadId)
-            preloadStartedAt[preloadId] = SystemClock.elapsedRealtime()
-            val configuration = preloadConfiguration(descriptor.adUnitId, descriptor.bufferSize)
-            when (format) {
-                AdMobFormat.APP_OPEN -> AppOpenAdPreloader.start(preloadId, configuration, preloadCallback)
-                AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.start(preloadId, configuration, preloadCallback)
-                AdMobFormat.REWARDED -> RewardedAdPreloader.start(preloadId, configuration, preloadCallback)
-                AdMobFormat.BANNER, AdMobFormat.NATIVE -> Unit
-            }
+        beginPreloadCycle(preloadId)
+        if (!descriptor.started || descriptor.generation != generation || !Ads.canLoadAds(AdPlatform.ADMOB)) {
+            onPolicyChanged()
+            return
         }
-        bannerPreloadDescriptors.values.forEach(::startBannerPreloading)
+        preloadStartedAt[preloadId] = SystemClock.elapsedRealtime()
+        val configuration = preloadConfiguration(descriptor.adUnitId, descriptor.bufferSize)
+        when (descriptor.format) {
+            AdMobFormat.APP_OPEN -> AppOpenAdPreloader.start(preloadId, configuration, preloadCallback)
+            AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.start(preloadId, configuration, preloadCallback)
+            AdMobFormat.REWARDED -> RewardedAdPreloader.start(preloadId, configuration, preloadCallback)
+            AdMobFormat.BANNER, AdMobFormat.NATIVE -> Unit
+        }
     }
 
     private fun startBannerPreloading(descriptor: BannerPreloadDescriptor) {
-        if (descriptor.started) return
+        if (descriptor.started || !Ads.canLoadAds(AdPlatform.ADMOB)) return
         descriptor.started = true
+        val generation = ++descriptor.generation
         val request = BannerAdRequest.Builder(descriptor.adUnitId, descriptor.size).build()
         if (descriptor.autoRefill) {
             BannerAdPreloader.start(descriptor.preloadId, PreloadConfiguration(request, descriptor.bufferSize))
@@ -453,7 +533,8 @@ object AdMobAds {
         BannerAd.load(request, object : AdLoadCallback<BannerAd> {
             override fun onAdLoaded(ad: BannerAd) = onMain {
                 if (bannerPreloadDescriptors[descriptor.adUnitId to descriptor.position] !== descriptor ||
-                    descriptor.settled
+                    descriptor.settled || descriptor.generation != generation ||
+                    !Ads.canLoadAds(AdPlatform.ADMOB)
                 ) {
                     ad.destroy()
                     return@onMain
@@ -465,6 +546,7 @@ object AdMobAds {
             }
 
             override fun onAdFailedToLoad(adError: LoadAdError) = onMain {
+                if (descriptor.generation != generation) return@onMain
                 descriptor.settled = true // No retry or replenishment, including after a failure.
             }
         })
@@ -474,6 +556,7 @@ object AdMobAds {
         "cashcraft_banner:${request.adUnitId}:${request.position}:${size.width}x${size.height}"
 
     private fun beginPreloadCycle(preloadId: String) {
+        if (!Ads.canLoadAds(AdPlatform.ADMOB)) return
         val descriptor = preloadDescriptors[preloadId] ?: return
         preloadLoadSessions[preloadId] = events.beginLoad(
             format = descriptor.format,
@@ -495,6 +578,7 @@ object AdMobAds {
     )
 
     internal fun bidPrice(format: AdMobFormat): Double? {
+        if (!Ads.isPlatformEnabled(AdPlatform.ADMOB)) return null
         if (format == AdMobFormat.BANNER || format == AdMobFormat.NATIVE || !isFormatEnabled(format)) return null
         pendingAd(format)?.let { return it.priceUsd }
         if (!isReady(format)) return null
@@ -510,6 +594,7 @@ object AdMobAds {
     }
 
     private fun takeAd(format: AdMobFormat): Ad? {
+        if (!Ads.isPlatformEnabled(AdPlatform.ADMOB)) return null
         // Remove atomically before use: an off-main isReady() may expire a retained entry.
         val pending = synchronized(pendingAds) { pendingAds.remove(format) }
         if (pending != null) {
@@ -564,7 +649,9 @@ object AdMobAds {
         activity: Activity,
         position: String,
         onResult: (AdMobShowResult) -> Unit,
-        session: AdShowSession = events.begin(AdMobFormat.APP_OPEN, position, config.ids.appOpenId),
+        session: AdShowSession = events.begin(AdMobFormat.APP_OPEN, position, config.ids.appOpenId,
+            FullScreenShowAttempt().apply { policy = AdPolicyAttempt(AdPolicyRequest(position,
+                fullscreen = true, userInitiated = false, mainType = AdMainType.OPEN)) }),
     ) {
         if (!canShow(activity, session, onResult = onResult)) return
         val ad = takeAd(AdMobFormat.APP_OPEN) as? AppOpenAd
@@ -593,11 +680,9 @@ object AdMobAds {
         activity: Activity,
         position: String,
         onResult: (AdMobShowResult) -> Unit,
-        session: AdShowSession = events.begin(
-            AdMobFormat.INTERSTITIAL,
-            position,
-            config.ids.interstitialId,
-        ),
+        session: AdShowSession = events.begin(AdMobFormat.INTERSTITIAL, position, config.ids.interstitialId,
+            FullScreenShowAttempt().apply { policy = AdPolicyAttempt(AdPolicyRequest(position,
+                fullscreen = true, userInitiated = false, mainType = AdMainType.INTER)) }),
     ) {
         if (!canShow(activity, session, onResult)) return
         val ad = takeAd(AdMobFormat.INTERSTITIAL) as? InterstitialAd
@@ -626,7 +711,9 @@ object AdMobAds {
         activity: Activity,
         position: String,
         onResult: (AdMobRewardResult) -> Unit,
-        session: AdShowSession = events.begin(AdMobFormat.REWARDED, position, config.ids.rewardedId),
+        session: AdShowSession = events.begin(AdMobFormat.REWARDED, position, config.ids.rewardedId,
+            FullScreenShowAttempt().apply { policy = AdPolicyAttempt(AdPolicyRequest(position,
+                fullscreen = true, userInitiated = true, mainType = AdMainType.REWARDED)) }),
     ) {
         val showResultCallback: (AdMobShowResult) -> Unit = { result ->
             onResult(
@@ -686,6 +773,10 @@ object AdMobAds {
         session: AdShowSession,
         onResult: (AdMobShowResult) -> Unit,
     ): Boolean {
+        if (!Ads.isPlatformEnabled(AdPlatform.ADMOB)) {
+            failBeforeShow(session, "ad_platform_disabled", onResult)
+            return false
+        }
         if (!isFormatEnabled(session.format)) {
             failBeforeShow(session, "ad_format_disabled", onResult)
             return false
@@ -726,7 +817,9 @@ object AdMobAds {
             session.attempt,
             finalCheck = {
                 val taken = takenAds[ad]
-                if (taken?.wasRetained == true && !taken.isUsable(SystemClock.elapsedRealtime())) {
+                if (!Ads.isPlatformEnabled(AdPlatform.ADMOB)) {
+                    "ad_platform_disabled"
+                } else if (taken?.wasRetained == true && !taken.isUsable(SystemClock.elapsedRealtime())) {
                     NO_AD_AVAILABLE
                 } else null
             },
@@ -734,6 +827,14 @@ object AdMobAds {
         if (reason != null) {
             session.attempt.invalidate(reason)
             failBeforeShow(session, reason, onResult)
+            return
+        }
+        // Reservation/onCommitted can invoke host code. The reserved opportunity is allowed
+        // when canLoadAds becomes false, but a platform toggle still prevents the SDK handoff.
+        if (!Ads.isPlatformEnabled(AdPlatform.ADMOB)) {
+            takenAds.remove(ad)
+            ad.destroy()
+            failBeforeShow(session, "ad_platform_disabled", onResult)
             return
         }
         takenAds.remove(ad)
@@ -831,7 +932,10 @@ object AdMobAds {
         val format: AdMobFormat,
         val adUnitId: String,
         val bufferSize: Int,
-    )
+    ) {
+        var started = false
+        var generation = 0L
+    }
 
     private data class BannerPreloadDescriptor(
         val preloadId: String,
@@ -842,6 +946,7 @@ object AdMobAds {
         val autoRefill: Boolean,
     ) {
         var started = false
+        var generation = 0L
         var settled = false
         var ad: RetainedAd<BannerAd>? = null
     }

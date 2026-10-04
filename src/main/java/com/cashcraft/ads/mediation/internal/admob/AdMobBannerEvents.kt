@@ -17,9 +17,14 @@ internal class AdMobBannerEvents(
     private val slot: BannerSlot,
     private val load: AdLoadSession,
     private val logger: AdsModuleLogger? = null,
+    private val policyImpression: () -> Unit = {},
+    private val policyClick: () -> Unit = {},
 ) {
     private val displays = LinkedHashMap<String, BannerDisplaySession>()
     private var ended = false
+    private var initialResponseId: String? = null
+    private var policyImpressionRecorded = false
+    private val impressions = mutableSetOf<String?>()
     private var loadFinished = false
     private var trackLoad = true
 
@@ -28,12 +33,16 @@ internal class AdMobBannerEvents(
 
     @Synchronized
     fun prepareLoaded(response: BannerResponse) {
-        if (!ended) remember(response, if (loadFinished || !trackLoad) null else load.requestId)
+        if (!ended) {
+            rememberInitialResponse(response)
+            remember(response, if (loadFinished || !trackLoad) null else load.requestId)
+        }
     }
 
     @Synchronized
     fun loaded(response: BannerResponse) {
         if (ended) return
+        rememberInitialResponse(response)
         remember(response, if (loadFinished || !trackLoad) null else load.requestId)
         loadFinished = true
         if (trackLoad) load.loaded(response.source, response.id)
@@ -58,12 +67,25 @@ internal class AdMobBannerEvents(
 
     @Synchronized
     fun impression(response: BannerResponse) {
-        if (!ended) find(response)?.impression()
+        // Only the host-loaded Banner consumes daily show quota. SDK refreshes retain their
+        // reporting identity, but never create another policy impression in this show cycle.
+        // A queued initial exposure still counts if release won the main-thread race.
+        if (!policyImpressionRecorded && initialResponseId != null && response.id == initialResponseId) {
+            policyImpressionRecorded = true
+            policyImpression()
+        }
+        if (ended) return
+        val display = find(response) ?: return
+        if (!impressions.add(response.id)) return
+        display.impression()
     }
 
     @Synchronized
     fun click(response: BannerResponse) {
-        if (!ended) find(response)?.click()
+        // The captured opportunity owns every real click, including refresh and late callbacks.
+        policyClick()
+        val display = find(response)
+        if (!ended && !slot.isEnded && display != null) display.click()
     }
 
     @Synchronized
@@ -78,6 +100,10 @@ internal class AdMobBannerEvents(
 
     @Synchronized
     fun end() { ended = true }
+
+    private fun rememberInitialResponse(response: BannerResponse) {
+        if (initialResponseId == null) initialResponseId = response.id?.takeIf(String::isNotBlank)
+    }
 
     private fun remember(response: BannerResponse, requestId: String?): BannerDisplaySession? {
         val id = response.id?.takeIf(String::isNotBlank) ?: return find(response)

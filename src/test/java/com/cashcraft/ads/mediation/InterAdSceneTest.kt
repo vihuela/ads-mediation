@@ -139,7 +139,7 @@ class InterAdSceneTest {
 
     @Test fun `consent invalid timeout and competing wait never trigger native fallback`() {
         cacheNative()
-        config = config.copy(interTimeoutMillis = { 0 })
+        config = config.copy(interTimeoutMillis = { -1 })
         start()
         assertEquals(listOf(AdShowResult.Failed("invalid_timeout")), results)
         assertTrue(loading.isEmpty())
@@ -159,6 +159,20 @@ class InterAdSceneTest {
         assertEquals(listOf(AdShowResult.Failed("consent_not_obtained")), results)
         assertEquals(listOf(true, false), loading)
         assertNull(NativeFullScreenSession.current)
+    }
+
+    @Test fun `business condition changing during wait prevents native fallback`() {
+        cacheNative()
+        var valid = true
+        tasks += Ads.showInter("save_record", isSceneValid = { valid },
+            onLoadingChanged = loading::add, onResult = results::add)
+        assertEquals(listOf(true), loading)
+        valid = false
+        advance(3_000)
+        assertEquals(listOf(AdShowResult.Failed("scene_invalid")), results)
+        assertEquals(listOf(true, false), loading)
+        assertNull(NativeFullScreenSession.current)
+        assertFalse(Ads.isFullScreenAdShowing)
     }
 
     private fun start(): AdTask {

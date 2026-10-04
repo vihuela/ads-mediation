@@ -47,6 +47,9 @@ internal class NativeSlot(
         if (!attempted) emit(AdEventName.SHOW_FAIL, reason)
     }
 
+    /** A policy block has its own notification, never SHOW_FAIL. */
+    fun block() { ended = true; attempted = true }
+
     fun attempt(clock: () -> Long, recordLoadEvents: Boolean = true): NativeAttempt {
         attempted = true
         val requestId = UUID.randomUUID().toString()
@@ -146,6 +149,10 @@ internal class NativeAttempt(
     fun fail(reason: String, errorCode: String? = null) {
         if (started) finishLoads(if (reason == "no_fill") "no_fill" else "failed", errorCode, reason)
         showFailure(reason, errorCode)
+    }
+    fun block() {
+        failed = true
+        if (started) finishLoads("cancelled", null, "native_cancelled")
     }
     fun cancel(reason: String) {
         if (started) finishLoads("cancelled", null, reason)

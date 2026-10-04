@@ -1,6 +1,7 @@
 package com.cashcraft.ads.mediation
 
 sealed interface AdShowResult {
+    data class Blocked(val reason: AdBlockReason) : AdShowResult, BannerState
     /** The full-screen ad was displayed and then dismissed by the user. */
     data object Dismissed : AdShowResult
 

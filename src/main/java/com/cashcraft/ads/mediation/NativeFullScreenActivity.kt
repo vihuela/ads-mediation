@@ -15,6 +15,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.FragmentActivity
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
+import com.cashcraft.ads.mediation.internal.AdPolicyAttempt
+import com.cashcraft.ads.mediation.internal.AdPolicyRequest
 import com.cashcraft.ads.mediation.internal.BidCandidateSelector
 import com.cashcraft.ads.mediation.internal.BidDecision
 import com.cashcraft.ads.mediation.internal.FullScreenShowAttempt
@@ -30,6 +32,7 @@ class NativeFullScreenActivity : FragmentActivity() {
     /** Original business position, available to the host's custom layout factory. */
     val adPosition: String? get() = session?.request?.position
     internal val nativeRequest: ResolvedNativeRequest? get() = session?.request
+    internal val policyAttempt: AdPolicyAttempt? get() = session?.policyAttempt
     internal val onNativeImpression: (() -> Unit)? get() = session?.let { { it.onImpression() } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -55,7 +58,7 @@ class NativeFullScreenActivity : FragmentActivity() {
         }
         // Only the host Close button may dismiss the ad through user navigation.
         onBackPressedDispatcher.addCallback(this) { /* Consume system back, including gestures. */ }
-        card = AdsNativeView(this, this, NativeRequest(pending.request.position), pending.layout,
+        card = AdsNativeView(this, this, NativeRequest(pending.request.position, mainType = pending.policyAttempt?.request?.mainType), pending.layout,
             onStateChanged = pending::onStateChanged).also { root.addView(it, ViewGroup.LayoutParams(-1, -1)) }
     }
 
@@ -90,6 +93,7 @@ internal class NativeFullScreenSession(
     },
     private val trace: (String) -> Unit = {},
 ) {
+    val policyAttempt: AdPolicyAttempt? get() = attempt.policy
     val id = UUID.randomUUID().toString()
     private val host = WeakReference(host)
     private var presenter = WeakReference<NativeFullScreenActivity>(null)
@@ -139,6 +143,7 @@ internal class NativeFullScreenSession(
     }
 
     fun onImpression() {
+        attempt.policy?.impression()
         if (impression.compareAndSet(false, true)) trace("全屏原生已确认曝光，交接记录=$id。")
     }
 
@@ -146,6 +151,7 @@ internal class NativeFullScreenSession(
         when (state) {
             NativeState.Loaded -> handler.removeCallbacks(deadline)
             is NativeState.Failed -> finish(state.reason)
+            is NativeState.Blocked -> finish(state.reason.code)
             // DESTROY_ON_HIDE and SDK close both release the only ad. Do not leave an empty Activity.
             NativeState.Idle -> if (delivered) finish("native_no_longer_visible")
             else -> Unit
@@ -177,7 +183,8 @@ internal class NativeFullScreenSession(
         val endMessage = "全屏原生结束：${if (shown) "已确认曝光" else "未确认曝光"}；${endReason.flowReason()}（原因码=$endReason）；交接记录=$id。"
         trace(endMessage)
         Ads.nativeLog(request.position) { endMessage }
-        runCatching { callback?.invoke(if (shown) AdShowResult.Dismissed else AdShowResult.Failed(failure)) }
+        val result = if (shown) AdShowResult.Dismissed else AdShowResult.Failed(failure)
+        runCatching { callback?.invoke(attempt.policy?.result(result) ?: result) }
     }
 
     private fun sceneFailure(): String? = when {
@@ -195,12 +202,17 @@ internal class NativeFullScreenSession(
             attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
             trace: (String) -> Unit = {},
             onResult: (AdShowResult) -> Unit): NativeFullScreenSession? {
+            if (attempt.policy == null) attempt.policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true,
+                mainType = AdMainType.NATIVE_FULLSCREEN))
             fun fail(reason: String): NativeFullScreenSession? {
                 attempt.complete()
-                onResult(AdShowResult.Failed(reason))
+                onResult(attempt.policy!!.result(AdShowResult.Failed(reason)))
                 return null
             }
-            val request = NativeRequest(position)
+            attempt.policy!!.check().let {
+                if (it is AdPolicyCheckResult.Blocked) return fail(it.reason.code)
+            }
+            val request = NativeRequest(position, mainType = attempt.policy!!.request.mainType)
             request.failureReason()?.let { return fail(it) }
             val resolved = Ads.resolveNativeRequest(request, fullScreen = true) ?: return fail("sdk_not_initialized")
             resolved.failureReason()?.let { return fail(it) }

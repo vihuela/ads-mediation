@@ -14,6 +14,7 @@ import com.cashcraft.ads.mediation.AdPlatform
 import com.cashcraft.ads.mediation.AdRewardResult
 import com.cashcraft.ads.mediation.AdShowResult
 import com.cashcraft.ads.mediation.AdsConfig
+import com.cashcraft.ads.mediation.Ads
 import com.cashcraft.ads.mediation.TopOnProviderConfig
 import com.cashcraft.ads.mediation.TopOnRevenuePayload
 import com.cashcraft.ads.mediation.isFormatEnabled
@@ -26,6 +27,9 @@ import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.cashcraft.ads.mediation.internal.AutoAppOpenController
 import com.cashcraft.ads.mediation.internal.FullScreenShowGate
 import com.cashcraft.ads.mediation.internal.FullScreenShowAttempt
+import com.cashcraft.ads.mediation.AdMainType
+import com.cashcraft.ads.mediation.internal.AdPolicyAttempt
+import com.cashcraft.ads.mediation.internal.AdPolicyRequest
 import com.cashcraft.ads.mediation.internal.dismissedResult
 import com.thinkup.core.api.AdError
 import com.thinkup.core.api.TUAdConst
@@ -56,6 +60,7 @@ internal enum class TopOnState {
 internal object TopOnAds {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
+    private var removePolicyListener: (() -> Unit)? = null
 
     @Volatile
     var state: TopOnState = TopOnState.NOT_INITIALIZED
@@ -165,18 +170,23 @@ internal object TopOnAds {
             )
             autoAppOpenController = AutoAppOpenController(
                 isEnabled = {
-                    this.commonConfig.autoShowAppOpen && this.config.isFormatEnabled(AdFormat.APP_OPEN)
+                    Ads.isPlatformEnabled(AdPlatform.TOPON) &&
+                        this.commonConfig.autoShowAppOpen && this.config.isFormatEnabled(AdFormat.APP_OPEN)
                 },
                 isProviderReady = { state == TopOnState.READY },
                 providerFailureReason = {
                     state.takeUnless { it == TopOnState.READY }?.showFailureReason()
                 },
-                isAdAvailable = { ::appOpenAd.isInitialized && appOpenAd.isAdReady },
+                isAdAvailable = { isReady(AdFormat.APP_OPEN) },
                 beginOpportunity = {
                     events.begin(
                         AdFormat.APP_OPEN,
                         this.commonConfig.appOpenPosition,
                         this.config.ids.appOpenPlacementId,
+                        attempt = FullScreenShowAttempt().apply {
+                            policy = AdPolicyAttempt(AdPolicyRequest(TopOnAds.commonConfig.appOpenPosition,
+                                fullscreen = true, mainType = AdMainType.OPEN))
+                        },
                     )
                 },
                 show = { activity, session ->
@@ -194,6 +204,9 @@ internal object TopOnAds {
         }
 
         onMain {
+            if (removePolicyListener == null) {
+                removePolicyListener = Ads.addPolicyListener(::onPolicyChanged)
+            }
             AdLifecycleMonitor.install(application, initialActivity)
             TUSDK.setNetworkLogDebug(commonConfig.loggingEnabled)
             runCatching {
@@ -223,6 +236,7 @@ internal object TopOnAds {
     }
 
     fun isReady(format: AdFormat): Boolean {
+        if (!Ads.isPlatformEnabled(AdPlatform.TOPON)) return false
         if (state != TopOnState.READY || !::config.isInitialized || !config.isFormatEnabled(format)) {
             return false
         }
@@ -247,6 +261,14 @@ internal object TopOnAds {
                 AdFormat.NATIVE -> Unit
             }
         }
+    }
+
+    /** Existing SDK requests may finish; every new request checks the current policy below. */
+    internal fun onPolicyChanged() = onMain {
+        if (state != TopOnState.READY || !Ads.canLoadAds(AdPlatform.TOPON)) return@onMain
+        loadAppOpen()
+        loadInterstitial()
+        loadRewarded()
     }
 
     fun bidPrice(format: AdFormat): Double? {
@@ -429,6 +451,7 @@ internal object TopOnAds {
     }
 
     private fun loadAppOpen(afterShow: Boolean = false) {
+        if (!Ads.canLoadAds(AdPlatform.TOPON)) return
         if (!::config.isInitialized || !config.isFormatEnabled(AdFormat.APP_OPEN) ||
             !::appOpenAd.isInitialized
         ) return
@@ -439,6 +462,11 @@ internal object TopOnAds {
             config.ids.appOpenPlacementId,
             TOPON_BUFFER_SIZE,
         )
+        // beginLoad invokes host listeners, which can synchronously change policy.
+        if (!Ads.canLoadAds(AdPlatform.TOPON)) {
+            appOpenLoading = false
+            return
+        }
         runCatching(appOpenAd::loadAd).onFailure { error ->
             appOpenLoading = false
             recordLoadFailure(AdFormat.APP_OPEN)
@@ -447,6 +475,7 @@ internal object TopOnAds {
     }
 
     private fun loadInterstitial(afterShow: Boolean = false) {
+        if (!Ads.canLoadAds(AdPlatform.TOPON)) return
         if (!::config.isInitialized || !config.isFormatEnabled(AdFormat.INTERSTITIAL) ||
             !::interstitialAd.isInitialized
         ) return
@@ -457,6 +486,10 @@ internal object TopOnAds {
             config.ids.interstitialPlacementId,
             TOPON_BUFFER_SIZE,
         )
+        if (!Ads.canLoadAds(AdPlatform.TOPON)) {
+            interstitialLoading = false
+            return
+        }
         runCatching(interstitialAd::load).onFailure { error ->
             interstitialLoading = false
             recordLoadFailure(AdFormat.INTERSTITIAL)
@@ -465,6 +498,7 @@ internal object TopOnAds {
     }
 
     private fun loadRewarded(afterShow: Boolean = false) {
+        if (!Ads.canLoadAds(AdPlatform.TOPON)) return
         if (!::config.isInitialized || !config.isFormatEnabled(AdFormat.REWARDED) ||
             !::rewardedAd.isInitialized
         ) return
@@ -475,6 +509,10 @@ internal object TopOnAds {
             config.ids.rewardedPlacementId,
             TOPON_BUFFER_SIZE,
         )
+        if (!Ads.canLoadAds(AdPlatform.TOPON)) {
+            rewardedLoading = false
+            return
+        }
         runCatching(rewardedAd::load).onFailure { error ->
             rewardedLoading = false
             recordLoadFailure(AdFormat.REWARDED)
@@ -710,11 +748,9 @@ internal object TopOnAds {
         activity: Activity,
         position: String,
         onResult: (AdShowResult) -> Unit,
-        session: AdShowSession = events.begin(
-            AdFormat.APP_OPEN,
-            position,
-            config.ids.appOpenPlacementId,
-        ),
+        session: AdShowSession = events.begin(AdFormat.APP_OPEN, position, config.ids.appOpenPlacementId,
+            FullScreenShowAttempt().apply { policy = AdPolicyAttempt(AdPolicyRequest(position,
+                fullscreen = true, userInitiated = false, mainType = AdMainType.OPEN)) }),
     ) {
         if (!canShow(activity, session, onResult = onResult)) return
         if (!appOpenAd.isAdReady) {
@@ -822,11 +858,9 @@ internal object TopOnAds {
         activity: Activity,
         position: String,
         onResult: (AdShowResult) -> Unit,
-        session: AdShowSession = events.begin(
-            AdFormat.INTERSTITIAL,
-            position,
-            config.ids.interstitialPlacementId,
-        ),
+        session: AdShowSession = events.begin(AdFormat.INTERSTITIAL, position, config.ids.interstitialPlacementId,
+            FullScreenShowAttempt().apply { policy = AdPolicyAttempt(AdPolicyRequest(position,
+                fullscreen = true, userInitiated = false, mainType = AdMainType.INTER)) }),
     ) {
         if (!canShow(activity, session, onResult)) return
         if (!interstitialAd.isAdReady) {
@@ -856,11 +890,9 @@ internal object TopOnAds {
         activity: Activity,
         position: String,
         onResult: (AdRewardResult) -> Unit,
-        session: AdShowSession = events.begin(
-            AdFormat.REWARDED,
-            position,
-            config.ids.rewardedPlacementId,
-        ),
+        session: AdShowSession = events.begin(AdFormat.REWARDED, position, config.ids.rewardedPlacementId,
+            FullScreenShowAttempt().apply { policy = AdPolicyAttempt(AdPolicyRequest(position,
+                fullscreen = true, userInitiated = true, mainType = AdMainType.REWARDED)) }),
     ) {
         val showResultCallback: (AdShowResult) -> Unit = { result ->
             onResult(AdRewardResult(false, result, session.sessionId))
@@ -894,6 +926,10 @@ internal object TopOnAds {
         session: AdShowSession,
         onResult: (AdShowResult) -> Unit,
     ): Boolean {
+        if (!Ads.isPlatformEnabled(AdPlatform.TOPON)) {
+            failBeforeShow(session, "ad_platform_disabled", onResult)
+            return false
+        }
         if (::config.isInitialized && !config.isFormatEnabled(session.format)) {
             failBeforeShow(session, "ad_format_disabled", onResult)
             return false
@@ -932,10 +968,18 @@ internal object TopOnAds {
             activity = activity,
             providerFailureReason = state.takeUnless { it == TopOnState.READY }?.showFailureReason(),
             attempt = session.attempt,
-            finalCheck = finalCheck,
+            finalCheck = {
+                if (!Ads.isPlatformEnabled(AdPlatform.TOPON)) "ad_platform_disabled"
+                else finalCheck()
+            },
         )
         if (reason != null) {
             failBeforeShow(session, reason, onResult)
+            return false
+        }
+        // Do not re-check canLoadAds here: this show's own reservation occupies pending quota.
+        if (!Ads.isPlatformEnabled(AdPlatform.TOPON)) {
+            failBeforeShow(session, "ad_platform_disabled", onResult)
             return false
         }
         return true

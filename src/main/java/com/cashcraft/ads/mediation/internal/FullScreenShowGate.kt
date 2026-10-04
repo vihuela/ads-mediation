@@ -1,6 +1,7 @@
 package com.cashcraft.ads.mediation.internal
 
 import android.app.Activity
+import com.cashcraft.ads.mediation.AdPolicyCheckResult
 
 /** All entry points share one owner, including the time spent waiting for an ad. */
 internal object FullScreenShowGate {
@@ -39,6 +40,7 @@ internal object FullScreenShowGate {
     fun commit(attempt: FullScreenShowAttempt): String? {
         attempt.handoffFailure()?.let { return it }
         if (owner !== attempt) return "opportunity_cancelled"
+        attempt.policy?.reserve()?.let { if (it is AdPolicyCheckResult.Blocked) return it.reason.code }
         showing = true
         attempt.committed()
         return null
@@ -54,6 +56,7 @@ internal object FullScreenShowGate {
 
 /** Carries a waiting owner's final guard into the provider's actual SDK call. Main thread only. */
 internal class FullScreenShowAttempt(val isWaitingOpportunity: Boolean = false) {
+    var policy: AdPolicyAttempt? = null
     var guard: (() -> String?)? = null
     var handoffGuard: (() -> String?)? = null
     var onCommitted: (() -> Unit)? = null
@@ -65,6 +68,7 @@ internal class FullScreenShowAttempt(val isWaitingOpportunity: Boolean = false) 
 
     fun failureReason(): String? {
         invalidReason?.let { return it }
+        policy?.check()?.let { if (it is AdPolicyCheckResult.Blocked) return it.reason.code }
         val reason = guard?.invoke()
         // A host predicate may synchronously cancel this attempt.
         return invalidReason ?: reason
@@ -100,6 +104,7 @@ internal class FullScreenShowAttempt(val isWaitingOpportunity: Boolean = false) 
         onAborted = null
         if (!isCommitted) cleanup?.invoke()
         FullScreenShowGate.release(this)
+        policy?.complete()
         return true
     }
 }

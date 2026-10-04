@@ -12,6 +12,9 @@ import android.widget.FrameLayout
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import com.cashcraft.ads.mediation.internal.AdPolicyAttempt
+import com.cashcraft.ads.mediation.internal.AdPolicyRequest
+import com.cashcraft.ads.mediation.internal.nativeads.NativeCardPolicyAdapter
 import com.cashcraft.ads.mediation.internal.nativeads.NativeAdCache
 import com.cashcraft.ads.mediation.internal.nativeads.NativeAdHandle
 import com.cashcraft.ads.mediation.internal.nativeads.NativeAvailability
@@ -190,6 +193,7 @@ class AdsNativeView(
         private var started = false
         private var destroyed = false
         private var subscription: AutoCloseable? = null
+        private var removePolicyListener: (() -> Unit)? = null
         private val handler = Handler(Looper.getMainLooper())
         private var platformView: View? = null
         private var requestedWidth = 0
@@ -248,6 +252,13 @@ class AdsNativeView(
             interaction = NativeInteractions::onInteraction,
             onStateChanged = { next -> connection?.callback?.invoke(next) },
             retentionPolicy = policy,
+            canBindAd = { ad -> ad.platform?.let(Ads::isPlatformEnabled) != false },
+            privacyAllowed = { Ads.consentSnapshot.canRequestAds },
+            policyAttemptFactory = {
+                if (activity is NativeFullScreenActivity) {
+                    activity.policyAttempt?.let { NativeCardPolicyAdapter(it, owned = false) }
+                } else NativeCardPolicyAdapter(AdPolicyAttempt(AdPolicyRequest(request.position, mainType = request.mainType)))
+            },
             // 页面只领取共享库存；真实 SDK 准备事件由库存会话记录。
             recordLoadEvents = false,
             schedule = { action, delay -> handler.postDelayed(action, delay) },
@@ -269,6 +280,8 @@ class AdsNativeView(
             if (destroyed) return
             activity.application.registerActivityLifecycleCallbacks(activityObserver)
             subscription = Ads.observeNativeReadiness { NativeMainThread.run { refresh() } }
+            val remove = Ads.addPolicyListener { NativeMainThread.run { refresh() } }
+            if (destroyed) remove() else removePolicyListener = remove
             if (owner.lifecycle.currentState == Lifecycle.State.DESTROYED || activity.isDestroyed || activity.isFinishing) destroy()
         }
 
@@ -313,6 +326,8 @@ class AdsNativeView(
             view?.finishConnection()
             subscription?.let { runCatching { it.close() } }
             subscription = null
+            removePolicyListener?.invoke()
+            removePolicyListener = null
             runCatching { owner.lifecycle.removeObserver(ownerObserver) }
             runCatching { activity.application.unregisterActivityLifecycleCallbacks(activityObserver) }
             controller.destroy()

@@ -54,7 +54,7 @@ internal object NativeAdCache {
     private fun updateEnvironment() {
         control.updateEnvironment(
             com.cashcraft.ads.mediation.internal.AdLifecycleMonitor.isAppInForeground,
-            AdPlatform.entries.filter { Ads.nativeAvailability(it).ready }.toSet(),
+            AdPlatform.entries.filter { Ads.nativeAvailability(it).ready && Ads.canLoadAds(it) }.toSet(),
         )
         inventoryChanged()
     }
@@ -63,6 +63,7 @@ internal object NativeAdCache {
         if (environmentInstalled) return
         environmentInstalled = true
         Ads.observeNativeReadiness(::updateEnvironment)
+        Ads.addPolicyListener { handler.post { updateEnvironment() } }
         com.cashcraft.ads.mediation.internal.AdLifecycleMonitor.addListener(
             object : com.cashcraft.ads.mediation.internal.AdLifecycleMonitor.Listener {
                 override fun onAppEnteredForeground(activity: Activity) = updateEnvironment()
@@ -74,7 +75,7 @@ internal object NativeAdCache {
             schedule = { action, delay -> handler.postDelayed(action, delay) },
             unschedule = { handler.removeCallbacks(it) },
             prepare = { key, deadline, complete ->
-                check(Ads.nativeAvailability(key.platform).ready) { "native_not_ready" }
+                check(Ads.nativeAvailability(key.platform).ready && Ads.canLoadAds(key.platform)) { "native_not_ready" }
                 Ads.nativeLog(key.platform.name) { "库存准备：首次需求或消费补货" }
                 val events = Ads.beginNativeInventoryLoad(key.platform, key.id)
                 loadEvents[key] = events
@@ -116,7 +117,7 @@ internal object NativeAdCache {
     // 测试零价同样走生产库存；报价读取失败保持未知，选择器使用实际领取对象。
     fun acquirePreload(request: ResolvedNativeRequest): AutoCloseable {
         require(request.platform == AdPlatform.ADMOB)
-        check(Ads.nativeAvailability(request).ready) { "native_not_ready" }
+        check(Ads.nativeAvailability(request).ready && Ads.canLoadAds(requireNotNull(request.platform))) { "native_not_ready" }
         installEnvironment()
         updateEnvironment()
         return control.acquire(NativeInventoryKey(AdPlatform.ADMOB, request.adUnitId))
@@ -125,7 +126,7 @@ internal object NativeAdCache {
     fun acquireTopOnInventory(context: android.content.Context, request: ResolvedNativeRequest,
         widthPx: Int): AutoCloseable {
         require(request.platform == AdPlatform.TOPON)
-        check(Ads.nativeAvailability(request).ready) { "native_not_ready" }
+        check(Ads.nativeAvailability(request).ready && Ads.canLoadAds(requireNotNull(request.platform))) { "native_not_ready" }
         val key = topOnKey(request, widthPx)
         // 同 placement 的 SDK 库存共享；未完成不同尺寸证据前明确拒绝并行不兼容 key。
         check(!control.hasIncompatibleKey(key)) {
@@ -145,7 +146,7 @@ internal object NativeAdCache {
 
     fun takeTopOnInventory(request: ResolvedNativeRequest, widthPx: Int,
         callbacks: NativeCallbacks): NativeAdHandle? {
-        if (!Ads.nativeAvailability(request).ready ||
+        if (!Ads.isPlatformEnabled(requireNotNull(request.platform)) || !Ads.nativeAvailability(request).ready ||
             !com.cashcraft.ads.mediation.internal.AdLifecycleMonitor.isAppInForeground) return null
         val key = topOnKey(request, widthPx)
         if (!control.isReady(key)) return null
@@ -177,7 +178,7 @@ internal object NativeAdCache {
     }
 
     fun takePreload(request: ResolvedNativeRequest, callbacks: NativeCallbacks): NativeAdHandle? {
-        if (!Ads.nativeAvailability(request).ready ||
+        if (!Ads.isPlatformEnabled(requireNotNull(request.platform)) || !Ads.nativeAvailability(request).ready ||
             !com.cashcraft.ads.mediation.internal.AdLifecycleMonitor.isAppInForeground) return null
         val key = NativeInventoryKey(AdPlatform.ADMOB, request.adUnitId)
         if (!control.isReady(key)) return null
@@ -201,7 +202,7 @@ internal object NativeAdCache {
 
     /** Exclusively takes existing self-rendered inventory; never waits or starts a load. */
     fun takeCached(request: ResolvedNativeRequest, callbacks: NativeCallbacks): NativeAdHandle? {
-        if (!Ads.nativeAvailability(request).ready ||
+        if (!Ads.isPlatformEnabled(requireNotNull(request.platform)) || !Ads.nativeAvailability(request).ready ||
             !com.cashcraft.ads.mediation.internal.AdLifecycleMonitor.isAppInForeground) return null
         val ad = inventory.take(request, 0, false)?.also { it.setCallbacks(callbacks) }
             ?: if (request.platform == AdPlatform.ADMOB) takePreload(request, callbacks)
@@ -225,7 +226,7 @@ internal object NativeAdCache {
             else acquireTopOnInventory(activity, request, widthPx)
         // 新页面不重置另一页面仍在等待的失败轮；无活跃需求后的显式获取可重新尝试。
         if (!hadDemand) control.retry(key)
-        val cached = inventory.take(request, widthPx, allowTemplate)
+        val cached = if (Ads.isPlatformEnabled(requireNotNull(request.platform))) inventory.take(request, widthPx, allowTemplate) else null
         if (cached != null) {
             try {
                 cached.setCallbacks(callbacks)
@@ -250,6 +251,7 @@ internal object NativeAdCache {
         }
         receive = Runnable {
             if (settled || cancelled || !callbacks.isActive) return@Runnable
+            if (!Ads.isPlatformEnabled(requireNotNull(request.platform))) return@Runnable
             try {
                 val ad = inventory.take(request, widthPx, allowTemplate)?.also { it.setCallbacks(callbacks) }
                     ?: if (request.platform == AdPlatform.ADMOB) takePreload(request, callbacks)
@@ -293,7 +295,7 @@ internal object NativeAdCache {
 
     fun retain(request: ResolvedNativeRequest, widthPx: Int, ad: NativeAdHandle, requestGeneration: Long) {
         // 撤回许可后迟到的旧请求不能重新填回已经清理的库存。
-        if (!Ads.nativeAvailability(request).ready) {
+        if (!Ads.nativeAvailability(request).ready || !Ads.canLoadAds(requireNotNull(request.platform))) {
             runCatching { ad.destroy() }
             return
         }

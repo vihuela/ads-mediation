@@ -12,6 +12,9 @@ import androidx.core.view.doOnLayout
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import com.cashcraft.ads.mediation.internal.AdPolicyAttempt
+import com.cashcraft.ads.mediation.internal.AdPolicyRequest
+import com.cashcraft.ads.mediation.internal.logMaterial
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.BannerReadiness
@@ -56,11 +59,19 @@ class AdsBannerView(
     private var events: AdMobBannerEvents? = null
     private var adView: AdView? = null
     private var bannerAd: BannerAd? = null
+    // The loader stays off-screen. SDK auto-refresh belongs to the same show cycle
+    // and does not consume additional daily show quota.
+    private var loadView: AdView? = null
+    private var policyAttempt: AdPolicyAttempt? = null
+    private var policyReserved = false
+    private var policyBlocked: AdBlockReason? = null
+    private var releasing = false
     private var generation = 0L
     private var requestedSize: RequestSize? = null
     private var failed = false
     private var state: BannerState? = null
     private var removeReadinessObserver: (() -> Unit)? = null
+    private var removePolicyObserver: (() -> Unit)? = null
     private var stateCallback: (BannerState) -> Unit = onState
     private var destroyListener: (() -> Unit)? = null
 
@@ -93,6 +104,8 @@ class AdsBannerView(
                 // Registration can call back synchronously; dispose it if that callback destroys us.
                 val remove = Ads.observeBannerReadiness(request.platform, ::evaluate)
                 if (destroyed) remove() else removeReadinessObserver = remove
+                val removePolicy = Ads.addPolicyListener { main.post { evaluate() } }
+                if (destroyed) removePolicy() else removePolicyObserver = removePolicy
             }
         }
     }
@@ -102,6 +115,14 @@ class AdsBannerView(
         if (destroyed || businessActive == active) return
         businessActive = active
         if (!active) endSlot()
+        evaluate()
+    }
+
+    /** A host-controlled new opportunity; SDK refresh never creates a policy opportunity. */
+    fun refresh() {
+        requireMain()
+        if (destroyed) return
+        endSlot()
         evaluate()
     }
 
@@ -118,6 +139,8 @@ class AdsBannerView(
         endSlot()
         removeReadinessObserver?.invoke()
         removeReadinessObserver = null
+        removePolicyObserver?.invoke()
+        removePolicyObserver = null
         owner?.lifecycle?.removeObserver(pageObserver)
         owner = null
         AdLifecycleMonitor.removeListener(activityObserver)
@@ -188,7 +211,7 @@ class AdsBannerView(
     private fun pixelsCoveringDp(dp: Int): Int = ceil(dp * resources.displayMetrics.density.toDouble()).toInt()
 
     private fun evaluate() {
-        if (!constructed || destroyed) return
+        if (!constructed || destroyed || releasing) return
         requireMain()
         if (evaluating) { evaluateAgain = true; return }
         evaluating = true
@@ -202,6 +225,8 @@ class AdsBannerView(
 
     private fun evaluateOnce() {
         if (!businessActive) { updateState(BannerState.Inactive); return }
+        if (policyBlocked != null) return
+        if (!checkPolicy()) return
         request.supportError()?.let { updateState(AdShowResult.Failed(it)); return }
         val readiness = Ads.bannerReadiness(request.platform)
         if (readiness == BannerReadiness.NOT_CONFIGURED || readiness == BannerReadiness.FAILED) {
@@ -258,6 +283,7 @@ class AdsBannerView(
     }
 
     private fun load(size: AdSize) {
+        if (!checkPolicy()) return
         val currentSlot = slot?.takeUnless { it.isEnded } ?: return
         val currentGeneration = ++generation
         val currentSize = requestedSize
@@ -269,7 +295,11 @@ class AdsBannerView(
             view.minimumHeight = pixelsCoveringDp(size.height)
             val sdkRequest = BannerAdRequest.Builder(request.adUnitId, size).build()
             val load = checkNotNull(dispatcher).createBannerLoad(currentSlot)
-            val relay = AdMobBannerEvents(currentSlot, load, Ads.bannerLogger())
+            val currentPolicy = checkNotNull(policyAttempt)
+            currentPolicy.logMaterial(AdFormat.BANNER, request.platform)
+            val relay = AdMobBannerEvents(currentSlot, load, Ads.bannerLogger(),
+                policyImpression = currentPolicy::impression,
+                policyClick = currentPolicy::click)
             events = relay
             updateState(BannerState.Loading)
             if (!isCurrent(currentGeneration)) return
@@ -280,16 +310,25 @@ class AdsBannerView(
                 view.post {
                     if (!isCurrent(currentGeneration)) return@post
                     if (!eligible()) { releaseAd(); return@post }
+                    if (!checkPolicy(reserve = true) || !isCurrent(currentGeneration)) return@post
                     val preloadedAd = AdMobAds.pollBanner(request, size)
-                    val callback = if (preloadedAd == null) {
-                        loadCallback(WeakReference(this), currentGeneration, relay)
-                    } else {
-                        loadCallback(WeakReference(this), currentGeneration, relay) { ad ->
+                    val loader = if (preloadedAd == null) AdView(context as Activity).also { loadView = it } else null
+                    val callback = loadCallback(WeakReference(this), currentGeneration, relay) { ad ->
+                        // Public AdView contract: unregister cancels in-progress loadAd requests; destroy
+                        // the empty loader before this ad can enter the visible display container.
+                        val detached = loader?.unregisterBannerAd()
+                        if (loader != null && detached !== ad) {
+                            detached?.destroy()
+                            error("banner_transfer_identity_changed")
+                        }
+                        loader?.destroy()
+                        if (loadView === loader) loadView = null
+                        if (isCurrent(currentGeneration) && checkPolicy(reserve = true)) {
                             view.registerBannerAd(ad, context as Activity)
                         }
                     }
                     val error = runCatching {
-                        if (preloadedAd == null) view.loadAd(sdkRequest, callback)
+                        if (preloadedAd == null) checkNotNull(loader).loadAd(sdkRequest, callback)
                         else {
                             relay.suppressLoadTracking()
                             callback.onAdLoaded(preloadedAd)
@@ -329,11 +368,11 @@ class AdsBannerView(
 
     private fun onFailed(generation: Long, reason: String) {
         if (!isCurrent(generation)) return
+        val size = requestedSize
+        releaseAd()
+        requestedSize = size
         failed = true
         updateState(AdShowResult.Failed(reason))
-        // An empty failed AdView remains in the legal placeholder so SDK-configured refresh can
-        // recover. Its later successful callback still installs revenue listeners before use.
-        if (isCurrent(generation)) showIfEligible()
     }
 
     private fun onConfigurationFailed(generation: Long) {
@@ -349,6 +388,7 @@ class AdsBannerView(
         val view = adView ?: return
         if (!eligible()) { view.visibility = INVISIBLE; return }
         if (bannerAd == null && !failed) return
+        if (!checkPolicy(reserve = true)) return
         if (view.parent == null) addView(view, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER))
         if (view.visibility != VISIBLE) {
             view.visibility = VISIBLE
@@ -358,16 +398,48 @@ class AdsBannerView(
 
     private fun isCurrent(value: Long): Boolean = !destroyed && businessActive && generation == value && adView != null
 
+    private fun checkPolicy(reserve: Boolean = false): Boolean {
+        val current = policyAttempt ?: AdPolicyAttempt(AdPolicyRequest(request.position, mainType = request.mainType)).also { policyAttempt = it }
+        if (current.hasImpression) return true
+        // Reuse the same reservation, excluding this opportunity from its own pending quota.
+        val result = if (reserve || policyReserved) current.reserve() else current.check()
+        if (result is AdPolicyCheckResult.Blocked) {
+            policyBlocked = result.reason
+            releaseAd()
+            slot?.end()
+            updateState(AdShowResult.Blocked(result.reason))
+            return false
+        }
+        if (!Ads.isPlatformEnabled(request.platform)) {
+            slot?.end()
+            slot = null
+            releaseAd()
+            failed = true
+            updateState(AdShowResult.Failed("ad_platform_disabled"))
+            return false
+        }
+        if (reserve) policyReserved = true
+        return true
+    }
+
     private fun endSlot() {
         slot?.end()
         slot = null
         releaseAd()
+        policyBlocked = null
     }
 
     private fun releaseAd() {
+        releasing = true
         generation++
         events?.end()
         events = null
+        val previousPolicy = policyAttempt
+        policyAttempt = null
+        policyReserved = false
+        val previousLoader = loadView
+        loadView = null
+        runCatching { previousLoader?.destroy() }
         val previous = adView
         adView = null
         bannerAd = null
@@ -377,6 +449,7 @@ class AdsBannerView(
             if (previous.parent === this) removeView(previous)
             runCatching { previous.destroy() }
         }
+        try { previousPolicy?.complete() } finally { releasing = false }
     }
 
     private fun updateState(value: BannerState) {
@@ -413,23 +486,22 @@ class AdsBannerView(
             object : AdLoadCallback<BannerAd> {
                 override fun onAdLoaded(ad: BannerAd) {
                     val response = snapshot(ad)
-                    relay.prepareLoaded(response)
-                    val configurationError = runCatching {
-                        installCallbacks(ad, relay, owner, generation)
-                        registerBanner?.invoke(ad)
-                    }.exceptionOrNull()
-                    if (configurationError != null) {
-                        main.post {
-                            relay.failed("callback_configuration_failed", configurationError.message, response.id)
-                            owner.get()?.onConfigurationFailed(generation)
-                            runCatching { ad.destroy() }
-                        }
-                        return
-                    }
                     main.post {
-                        relay.loaded(response)
                         val host = owner.get()
-                        if (host == null) ad.destroy() else host.onLoaded(generation, ad)
+                        if (host == null || !host.isCurrent(generation)) { ad.destroy(); return@post }
+                        relay.prepareLoaded(response)
+                        val configurationError = runCatching {
+                            installCallbacks(ad, relay, owner, generation)
+                            registerBanner?.invoke(ad)
+                        }.exceptionOrNull()
+                        if (configurationError != null) {
+                            relay.failed("callback_configuration_failed", configurationError.message, response.id)
+                            host.onConfigurationFailed(generation)
+                            runCatching { ad.destroy() }
+                            return@post
+                        }
+                        relay.loaded(response)
+                        host.onLoaded(generation, ad)
                     }
                 }
 
@@ -475,7 +547,6 @@ class AdsBannerView(
                     val response = snapshot(weakAd.get())
                     main.post {
                         relay.refreshed(response)
-                        // Refreshed SDK content can stay at 0x0 while the visible slot keeps its size.
                         owner.get()?.takeIf { it.isCurrent(generation) }?.adView?.requestLayout()
                     }
                 }

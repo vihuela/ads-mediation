@@ -1,5 +1,9 @@
 package com.cashcraft.ads.mediation.internal.nativeads
 
+import com.cashcraft.ads.mediation.AdBlockReason
+import com.cashcraft.ads.mediation.AdPolicyCheckResult
+import com.cashcraft.ads.mediation.internal.AdPolicyAttempt
+import com.cashcraft.ads.mediation.internal.logMaterial
 import com.cashcraft.ads.mediation.NativeState
 import com.cashcraft.ads.mediation.NativeRetentionPolicy
 import com.cashcraft.ads.mediation.AdsState
@@ -19,6 +23,37 @@ internal fun nativeAvailability(
     else -> NativeAvailability(ready = providerState == AdsState.READY)
 }
 
+/** Injectable policy effects keep controller tests independent of the Ads singleton. */
+internal interface NativeCardPolicyAttempt {
+    val hasImpression: Boolean
+    fun check(): AdBlockReason?
+    fun reserve(): AdBlockReason?
+    fun impression()
+    fun click()
+    fun materialSelected(platform: com.cashcraft.ads.mediation.AdPlatform?) = Unit
+    fun complete()
+}
+
+internal class NativeCardPolicyAdapter(
+    private val attempt: AdPolicyAttempt,
+    private val owned: Boolean = true,
+) : NativeCardPolicyAttempt {
+    private var reserved = false
+    override val hasImpression: Boolean get() = attempt.hasImpression
+    override fun check(): AdBlockReason? = if (!owned) null else if (reserved) reserve()
+        else (attempt.check() as? AdPolicyCheckResult.Blocked)?.reason
+    override fun reserve(): AdBlockReason? {
+        val reason = (attempt.reserve() as? AdPolicyCheckResult.Blocked)?.reason
+        if (reason == null) reserved = true
+        return reason
+    }
+    override fun impression() = attempt.impression()
+    override fun click() = attempt.click()
+    override fun materialSelected(platform: com.cashcraft.ads.mediation.AdPlatform?) =
+        attempt.logMaterial(com.cashcraft.ads.mediation.AdFormat.NATIVE, platform)
+    override fun complete() { if (owned) attempt.complete() }
+}
+
 /** Main-thread state, with injected SDK/View effects so lifecycle races can be checked on the JVM. */
 internal class NativeCardController(
     private val availability: () -> NativeAvailability,
@@ -36,6 +71,9 @@ internal class NativeCardController(
     private val recordLoadEvents: Boolean = true,
     private val schedule: (Runnable, Long) -> Unit = { _, _ -> },
     private val unschedule: (Runnable) -> Unit = {},
+    private val policyAttemptFactory: () -> NativeCardPolicyAttempt? = { null },
+    private val canBindAd: (NativeAdHandle) -> Boolean = { true },
+    private val privacyAllowed: () -> Boolean = { true },
 ) {
     var state: NativeState = NativeState.Idle
         private set
@@ -44,10 +82,12 @@ internal class NativeCardController(
     private var generation = 0L
     private var slot: NativeSlot? = null
     private var attempt: NativeAttempt? = null
+    private var policyAttempt: NativeCardPolicyAttempt? = null
     private var delivery: NativeDelivery? = null
     private var loading: NativeLoad? = null
     private var ad: NativeAdHandle? = null
     private var closed = false
+    private var releasing = false
     private var retained = false
     private var automaticRetries = 0
     private var retryTask: Runnable? = null
@@ -75,9 +115,11 @@ internal class NativeCardController(
     }
 
     fun refresh() {
-        if (state == NativeState.Destroyed || closed) return
+        if (releasing || state == NativeState.Destroyed || state is NativeState.Blocked || closed) return
+        // Business policy precedes provider resolution and SDK loading. A shown ad keeps its quota.
+        if (active && state !is NativeState.Failed && !checkPolicy()) return
         // 许可撤回仍结束保留对象，不能因页面 inactive 而绕过清理。
-        val gate = availability()
+        val gate = currentAvailability()
         if (retained && gate.failure != null) { fail(gate.failure); return }
         if (!active) return
         if (slot == null) {
@@ -120,9 +162,11 @@ internal class NativeCardController(
     }
 
     fun retry() {
-        if (state !is NativeState.Failed || !eligible() || closed) return
+        if (releasing) return
+        if ((state !is NativeState.Failed && state !is NativeState.Blocked) || !eligible() || closed) return
         cancelRetry()
         automaticRetries = 0
+        if (state is NativeState.Blocked) slot = null
         transition(NativeState.Idle)
         refresh()
     }
@@ -191,22 +235,64 @@ internal class NativeCardController(
         runCatching { onRetentionFallback(reason) }
     }
 
-    private fun eligible(): Boolean {
+    private fun currentAvailability(): NativeAvailability {
         val gate = availability()
+        // Transitional compatibility: platform policy may still be folded into availability.
+        // It must not tear down a shown object; privacy and lifecycle still govern retention.
+        return if (policyAttempt?.hasImpression == true &&
+            gate.failure == "native_platform_not_configured" && privacyAllowed()) NativeAvailability(ready = true)
+        else gate
+    }
+
+    private fun eligible(): Boolean {
+        val gate = currentAvailability()
         return active && visible && !closed && state != NativeState.Destroyed &&
             gate.ready && gate.failure == null && canDisplay()
     }
 
+    private fun bindingAllowed(result: NativeAdHandle): Boolean {
+        if (policyAttempt?.hasImpression == true || canBindAd(result)) return true
+        val failed = NativeState.Failed("native_platform_not_configured")
+        state = failed
+        val events = attempt
+        slot?.block()
+        val released = release("native_cancelled", reportCancellation = false)
+        events?.block()
+        if (generation == released && state == failed) runCatching { onStateChanged(failed) }
+        return false
+    }
+
+    private fun checkPolicy(reserve: Boolean = false): Boolean {
+        val current = policyAttempt ?: policyAttemptFactory()?.also { policyAttempt = it } ?: return true
+        if (current.hasImpression) return true
+        val reason = if (reserve) current.reserve() else current.check()
+        if (reason == null) return true
+        block(reason)
+        return false
+    }
+
+    private fun block(reason: AdBlockReason) {
+        if (state == NativeState.Destroyed || state is NativeState.Blocked) return
+        val blocked = NativeState.Blocked(reason)
+        state = blocked // Commit before completion can synchronously trigger policy listeners.
+        val events = attempt
+        slot?.block()
+        val released = release("native_cancelled", reportCancellation = false)
+        events?.block()
+        if (generation == released && state == blocked) runCatching { onStateChanged(blocked) }
+    }
+
     private fun start() {
+        if (!checkPolicy()) return
         val owner = slot ?: return
         val token = ++generation
         val events = owner.attempt(clock, recordLoadEvents)
         attempt = events
-        val callbacks = NativeDelivery(events, dispatch, interaction)
+        val callbacks = NativeDelivery(events, dispatch, interaction, policyAttempt)
         delivery = callbacks
         callbacks.current = { generation == token && state != NativeState.Destroyed && !closed }
         callbacks.interactive = { eligible() && !retained }
-        callbacks.onLoaded = { result ->
+        callbacks.onLoaded = onLoaded@{ result ->
             if (result === ad) {
                 // 保留期间的同对象重复交付不能销毁仍归本位置的广告。
             } else if (ad != null && generation == token) {
@@ -224,8 +310,10 @@ internal class NativeCardController(
                     if (result.expiresAtMillis?.let { clock() >= it } == true) {
                         if (releaseToIdle("native_ad_expired")) refresh()
                     } else {
+                        if (!bindingAllowed(result) || !checkPolicy(reserve = true)) return@onLoaded
+                        policyAttempt?.materialSelected(result.platform)
                         // 胜出后将事件直连展示交付，取消比价/库存需求不能切断原对象的事件。
-                        runCatching { result.setCallbacks(callbacks); render(result) { generation == token && eligible() } }.fold(
+                        runCatching { result.setCallbacks(callbacks); render(result) { generation == token && eligible() && bindingAllowed(result) && checkPolicy(reserve = true) } }.fold(
                             onSuccess = {
                                 if (generation == token) {
                                     if (eligible()) {
@@ -261,6 +349,7 @@ internal class NativeCardController(
         events.start()
         if (generation != token) return
         if (!eligible()) { refresh(); return }
+        if (!checkPolicy()) return
         try {
             val operation = load(callbacks)
             if (generation == token && eligible() && !retained) loading = operation else runCatching { operation.cancel() }
@@ -303,12 +392,15 @@ internal class NativeCardController(
     }
 
     private fun release(reason: String, reportCancellation: Boolean = true): Long {
+        releasing = true
         cancelRetry()
         val released = ++generation
         val oldDelivery = delivery
         val oldLoad = loading
         val oldAd = ad
         val oldAttempt = attempt
+        val oldPolicy = policyAttempt
+        policyAttempt = null
         delivery = null
         loading = null
         ad = null
@@ -319,6 +411,7 @@ internal class NativeCardController(
         runCatching(removeView)
         runCatching { oldAd?.destroy() }
         if (reportCancellation) oldAttempt?.cancel(reason)
+        try { oldPolicy?.complete() } finally { releasing = false }
         return released
     }
 
@@ -341,6 +434,7 @@ private class NativeDelivery(
     private val events: NativeAttempt,
     private val dispatch: (() -> Unit) -> Unit,
     private val interaction: (String, NativeInteraction) -> Unit,
+    private val policy: NativeCardPolicyAttempt?,
 ) : NativeCallbacks {
     var current: (() -> Boolean)? = null
     var interactive: (() -> Boolean)? = null
@@ -369,9 +463,13 @@ private class NativeDelivery(
         if (current?.invoke() == true) onFailed?.invoke(reason, errorCode)
     }
     override fun impression(adSource: String?, responseId: String?) = dispatch {
-        if (current?.invoke() == true) events.impression(adSource, responseId)
+        policy?.impression()
+        if (current?.invoke() == true) {
+            events.impression(adSource, responseId)
+        }
     }
     override fun clicked(adSource: String?, responseId: String?) = dispatch {
+        policy?.click()
         if (current?.invoke() == true && interactive?.invoke() == true) {
             interaction(events.id, NativeInteraction.CLICK)
             events.click(adSource, responseId)

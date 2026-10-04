@@ -1,7 +1,7 @@
 package com.cashcraft.ads.mediation
 
 /** 页面只提供业务位置和展示参数，平台与广告位由初始化配置决定。 */
-data class NativeRequest(
+data class NativeRequest @JvmOverloads constructor(
     val position: String,
     /** 已确认的 TopOn 模板宽高比；自渲染广告不需要。 */
     val topOnTemplateAspectRatio: Float? = null,
@@ -9,6 +9,8 @@ data class NativeRequest(
     val bidTimeoutMillis: Long = 7_000,
     /** 有可用缓存时立即选择；两端均无缓存时仍按竞价期限等待。 */
     val preferCachedAds: Boolean = false,
+    /** Business entry identity; fallback materials never replace it. */
+    val mainType: AdMainType? = AdMainType.NATIVE,
 ) {
     internal fun failureReason(): String? = when {
         position.isBlank() -> "invalid_position"
@@ -19,7 +21,7 @@ data class NativeRequest(
 }
 
 /** 仅内部加载、库存和事件链路持有真实广告位。 */
-internal data class ResolvedNativeRequest(
+internal data class ResolvedNativeRequest @JvmOverloads constructor(
     val platform: AdPlatform? = null,
     val adUnitId: String = "",
     val position: String,
@@ -28,6 +30,7 @@ internal data class ResolvedNativeRequest(
     val topOnPlacementId: String? = null,
     val bidTimeoutMillis: Long = 7_000,
     val preferCachedAds: Boolean = false,
+    val mainType: AdMainType? = AdMainType.NATIVE,
 ) {
     val isBidding: Boolean get() = platform == null && admobAdUnitId != null && topOnPlacementId != null
 
@@ -41,9 +44,9 @@ internal data class ResolvedNativeRequest(
     }
 
     fun candidates(): List<ResolvedNativeRequest> = if (platform != null) listOf(this) else buildList {
-        admobAdUnitId?.let { add(ResolvedNativeRequest(AdPlatform.ADMOB, it, position, preferCachedAds = preferCachedAds)) }
+        admobAdUnitId?.let { add(ResolvedNativeRequest(AdPlatform.ADMOB, it, position, preferCachedAds = preferCachedAds, mainType = mainType)) }
         topOnPlacementId?.let { add(ResolvedNativeRequest(AdPlatform.TOPON, it, position, topOnTemplateAspectRatio,
-            preferCachedAds = preferCachedAds)) }
+            preferCachedAds = preferCachedAds, mainType = mainType)) }
     }
 }
 
@@ -65,6 +68,7 @@ internal fun AdProviderConfig.resolveNativeRequest(request: NativeRequest, fullS
         topOnPlacementId = topOnId,
         bidTimeoutMillis = request.bidTimeoutMillis,
         preferCachedAds = request.preferCachedAds,
+        mainType = request.mainType,
     )
 }
 
@@ -73,6 +77,7 @@ sealed interface NativeState {
     data object Loading : NativeState
     /** Loaded is not an impression. Only the platform can confirm exposure. */
     data object Loaded : NativeState
+    data class Blocked(val reason: AdBlockReason) : NativeState
     data class Failed(val reason: String, val errorCode: String? = null) : NativeState
     data object Destroyed : NativeState
 }

@@ -22,6 +22,9 @@ internal class DisplayOpportunityController(
     private val preferAvailableAfterResume: Boolean = true,
     private val trace: (String) -> Unit = {},
     private var onLoadingChanged: ((Boolean) -> Unit)? = null,
+    private val preferCachedImmediately: Boolean = false,
+    policy: AdPolicyAttempt? = null,
+    private val excludeWaitingTime: () -> Boolean = { false },
 ) {
     data class LoadSnapshot(val ready: Boolean, val settled: Boolean)
 
@@ -35,10 +38,13 @@ internal class DisplayOpportunityController(
     private var pausedMillis = 0L
     private var preferAvailableOnResume = false
     private var sessionId: String? = null
+    private var excludedAtMillis: Long? = null
+    private var excludedMillis = 0L
     val attempt = FullScreenShowAttempt(isWaitingOpportunity = true)
     private val check = Runnable { check() }
 
     init {
+        attempt.policy = policy
         attempt.guard = ::finalFailure
         attempt.handoffGuard = { precondition?.invoke() }
         attempt.onCommitted = {
@@ -51,7 +57,10 @@ internal class DisplayOpportunityController(
     fun start() {
         if (started || state != State.WAITING) return
         started = true
-        if (timeoutMillis <= 0) return fail("invalid_timeout")
+        if (timeoutMillis < 0) return fail("invalid_timeout")
+        attempt.policy?.check()?.let {
+            if (it is com.cashcraft.ads.mediation.AdPolicyCheckResult.Blocked) return fail(it.reason.code)
+        }
         precondition?.invoke()?.takeUnless { it == "sdk_initializing" }?.let { return fail(it) }
         FullScreenShowGate.reserve(attempt)?.let { return fail(it) }
         check()
@@ -88,10 +97,21 @@ internal class DisplayOpportunityController(
         schedule(check, 0L)
     }
 
-    fun elapsedMillis(): Long =
-        (pausedAtMillis ?: nowMillis()) - startedAtMillis - pausedMillis
+    fun elapsedMillis(): Long {
+        val foregroundMillis = (pausedAtMillis ?: nowMillis()) - startedAtMillis - pausedMillis
+        if (timeoutMillis > 0 && excludeWaitingTime()) {
+            if (excludedAtMillis == null) excludedAtMillis = foregroundMillis
+        } else {
+            excludedAtMillis?.let { excludedMillis += foregroundMillis - it }
+            excludedAtMillis = null
+        }
+        return ((excludedAtMillis ?: foregroundMillis) - excludedMillis).coerceAtLeast(0)
+    }
 
     private fun environmentFailure(): String? {
+        attempt.policy?.check()?.let {
+            if (it is com.cashcraft.ads.mediation.AdPolicyCheckResult.Blocked) return it.reason.code
+        }
         precondition?.invoke()?.takeUnless { it == "sdk_initializing" }?.let { return it }
         val valid = try { sceneValid?.invoke() == true } catch (_: Exception) {
             return "scene_validation_failed"
@@ -123,7 +143,7 @@ internal class DisplayOpportunityController(
         if (state != State.WAITING || pausedAtMillis != null) return
         val expired = elapsedMillis() >= timeoutMillis
         val (ready, settled) = loadSnapshot?.invoke() ?: return
-        val useAvailable = preferAvailableOnResume
+        val useAvailable = preferAvailableOnResume || (ready && preferCachedImmediately)
         if (reason == null) preferAvailableOnResume = false
         if (!attempting && reason == null && (ready || showWhenEmpty) && (settled || expired || useAvailable)) {
             if (state != State.WAITING) return
@@ -161,7 +181,9 @@ internal class DisplayOpportunityController(
         val callback = onResult
         onResult = null
         cleanWaiting()
-        runCatching { callback?.invoke(result) }
+        val resolved = attempt.policy?.result(result.showResult) ?: result.showResult
+        attempt.policy?.complete()
+        runCatching { callback?.invoke(result.copy(showResult = resolved)) }
     }
 
     private fun setLoading(value: Boolean) {
