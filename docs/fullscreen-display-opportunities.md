@@ -4,7 +4,9 @@
 
 ## API
 
-插屏和激励默认等待 5 秒，开屏默认等待 12 秒；外部传入 `timeoutMillis` 覆盖默认值，且必须为正数，从调用时开始计时；排队等待主线程的时间也计入期限。`position` 默认为 `"manual"`，用于业务归因。`isSceneValid` 在主线程执行，应快速读取当前场景状态且不产生副作用。
+插页使用 `Ads.showInter(position)`，默认等待 3 秒，通过 `AdsConfig.interTimeoutMillis(position)` 配置，并通过 `nativeFullScreenLayout` 配置原生兜底布局，返回 `AdTask`。position 必填且非空。两平台插页结果全部返回或超时后择优展示；无插页则直接取全屏原生缓存，没有缓存就结束。插页和原生之间不比价，原生保留原始 position。旧插页等待入口已移除。
+
+以下开屏、激励 `WhenReady` 入口保持单类型行为：激励默认 5 秒，开屏默认 12 秒，可传入 `timeoutMillis`（必须为正数）、position（默认 `"manual"`）及 `isSceneValid`。所有期限从调用开始计时，包括主线程排队时间。开屏场景 `showOpen` 的跨类型比价与暂停恢复规则另见 [README](../README.md#开屏场景任务)。
 
 开屏等待只累计宿主可恢复等待期间的时间：宿主 `onPause` 或应用切后台时暂停计时与展示检查，底层加载继续，不返回结束结果。回到同一个 Activity 的 `onResume` 后，已有有效缓存就优先展示（竞价选择当前可用候选）；否则继续剩余等待，不重置整个期限。窗口尚未附着或获得焦点时仍须等待展示条件满足。例如 15 秒预算前台已等 3 秒，后台停留多久，恢复后都只剩 12 秒。广告缓存有效期仍按真实经过时间判断，不随等待计时暂停。
 
@@ -13,9 +15,11 @@
 以下列出调用签名，省略函数实现和内部构造参数；句柄由 `Ads` 返回。
 
 ```kotlin
-class AdDisplayOpportunity internal constructor(/* 由 SDK 创建 */) {
-    fun cancel() // 取消句柄的唯一公开操作
+open class AdTask internal constructor(/* 由 SDK 创建 */) {
+    val id: String
+    fun cancel()
 }
+// 旧开屏/激励单类型等待入口仍返回 AdDisplayOpportunity（继承 AdTask）。
 
 object Ads {
     fun showAppOpenWhenReady(
@@ -26,13 +30,11 @@ object Ads {
         onResult: (AdShowResult) -> Unit = {},
     ): AdDisplayOpportunity
 
-    fun showInterstitialWhenReady(
-        activity: Activity,
-        position: String = "manual",
-        timeoutMillis: Long = 5_000L,
-        isSceneValid: () -> Boolean = { true },
+    fun showInter(
+        position: String,
+        onLoadingChanged: (Boolean) -> Unit = {},
         onResult: (AdShowResult) -> Unit = {},
-    ): AdDisplayOpportunity
+    ): AdTask
 
     fun showRewardedWhenReady(
         activity: Activity,
@@ -46,13 +48,13 @@ object Ads {
 
 开屏不接收外部容器。TopOn 由 SDK 内部选择 Activity 的 `android.R.id.content`，回退到 `decorView`，创建并清理广告子容器。
 
-`cancel()` 是幂等的。它只在 SDK 交接展示前取消机会；一旦 SDK 已经收到 `show()`，后续取消不会撤回广告，也不会屏蔽关闭、失败、奖励或收益回调。一个机会只交付一次最终结果。
+`cancel()` 是幂等的。它可取消等待和本库全屏原生；一旦 SDK 已经收到 `show()`，后续取消不会撤回广告，也不会屏蔽关闭、失败、奖励或收益回调。一个机会只交付一次最终结果。
 
 已有的 `showAppOpen`、`showInterstitial` 和 `showRewarded` 仍然是立即尝试入口：没有可用广告时按原语义立即失败，不会因为调用了旧 API 而留下等待资格。
 
 ## 结果和事件
 
-等待机会结束时常见的 `AdShowResult.Failed.reason` 包括：
+单类型等待入口结束时常见的 `AdShowResult.Failed.reason` 包括：
 
 | 原因 | 含义 |
 | --- | --- |
@@ -68,6 +70,8 @@ object Ads {
 | `activity_not_available`、`activity_not_resumed`、`app_not_in_foreground` | Activity 或应用当前不具备展示条件 |
 | `consent_not_obtained`、初始化失败原因 | 请求许可或 SDK 初始化前置条件未满足 |
 
+`showInter` 在无插页时尝试原生，因此通常以 `no_preloaded_ad` 表示兜底也没有缓存；未配置原生布局则为 `native_layout_not_configured`。取消、许可、初始化、并发、宿主失败不会触发兜底；选定广告的展示失败直接结束。
+
 实际展示交接后，结果按原展示链路处理；此时等待计时停止。激励广告仍只能在 `rewardEarned == true` 时发奖。若激励机会在纯等待阶段超时、取消或因场景失效结束，没有创建展示会话，因此 `sessionId == null`。
 
 纯等待结束不会创建 `ad_position`、`ad_bid_result` 或 `ad_show_fail`。这些展示事件只在真正选择候选并开始展示尝试后产生；加载请求继续使用自己的 `request_id` 和加载事件。业务若要统计等待漏斗，应在创建机会和结果回调处自行记录。
@@ -75,15 +79,12 @@ object Ads {
 示例：
 
 ```kotlin
-private var interstitialOpportunity: AdDisplayOpportunity? = null
+private var interstitialOpportunity: AdTask? = null
 
-fun onLevelCompleted(activity: Activity) {
+fun onLevelCompleted() {
     interstitialOpportunity?.cancel()
-    interstitialOpportunity = Ads.showInterstitialWhenReady(
-        activity = activity,
+    interstitialOpportunity = Ads.showInter(
         position = "level_complete",
-        timeoutMillis = 3_000,
-        isSceneValid = { !activity.isFinishing && !activity.isDestroyed },
         onResult = { result ->
             when (result) {
                 AdShowResult.Dismissed -> continueLevelFlow()
@@ -104,9 +105,9 @@ fun leaveLevel() {
 
 ## Activity 生命周期和加载复用
 
-机会绑定创建时传入的 Activity。原 Activity 销毁、结束或被其他 Activity 实例替换时，结束尚未交接的机会，SDK 不会将机会迁移到新 Activity。开屏在原 Activity 暂停或应用退后台时保留机会并暂停计时，恢复后继续；插屏和激励在暂停或退后台时结束机会。首次 Resume 或窗口尚未 ready 时可以继续等待展示条件。
+`showInter` 绑定调用时 SDK 识别的宿主 Activity，旧单类型等待入口绑定传入的 Activity。原 Activity 销毁、结束或被其他 Activity 实例替换时，结束尚未交接的机会，SDK 不会将机会迁移到新 Activity。开屏在原 Activity 暂停或应用退后台时保留机会并暂停计时，恢复后继续；插屏和激励在暂停或退后台时结束机会。首次 Resume 或窗口尚未 ready 时可以继续等待展示条件。
 
-机会取消或超时不会停止 AdMob Preloader、TopOn 的既有加载/重试，也不会清空有效缓存。后续兼容的新机会可以复用在途请求或缓存；新的业务 `position` 不会单独隔离广告缓存。竞价模式只比较本次请求广告类型的候选：两家成功立即比价，一家成功另一家明确失败立即展示，两家失败立即结束；仍有平台未完成则继续等待。截止时从当前有效缓存选择，有候选且展示条件满足就展示，否则返回超时。已有缓存视为成功。单平台模式成功即展示、明确失败即结束。新等待入口在一个平台初始化成功后即可开始加载等待，但另一平台仍在初始化时会继续给它参与竞价的机会；`Ads.state` 和 `onInitialized` 仍按两家平台的整体初始化进度报告。
+任务取消或等待阶段结束不会停止 AdMob Preloader、TopOn 的既有加载/重试，也不会清空有效缓存。后续兼容的新机会可以复用在途请求或缓存；新的业务 `position` 不会单独隔离广告缓存。旧单类型等待入口的竞价只比较本次请求广告类型的候选：两家成功立即比价，一家成功另一家明确失败立即展示，两家失败立即结束；仍有平台未完成则继续等待。截止时从当前有效缓存选择，有候选且展示条件满足就展示，否则返回超时。已有缓存视为成功。单平台模式成功即展示、明确失败即结束。新等待入口在一个平台初始化成功后即可开始加载等待，但另一平台仍在初始化时会继续给它参与竞价的机会；`Ads.state` 和 `onInitialized` 仍按两家平台的整体初始化进度报告。
 
 新接入应在 `AdsConfig` 中关闭旧自动开屏，由业务场景显式创建开屏机会：
 
@@ -142,41 +143,39 @@ Fragment 可把页面可见性或 View 销毁作为兜底；Navigation 页面 en
 ### 多 Activity：在原 Activity 保存句柄
 
 ```kotlin
-private var opportunity: AdDisplayOpportunity? = null
+private var opportunity: AdTask? = null
 
 fun onBusinessTrigger() {
     opportunity?.cancel()
-    opportunity = Ads.showInterstitialWhenReady(
-        activity = this,
+    opportunity = Ads.showInter(
         position = "activity_a_done",
-        timeoutMillis = 3_000,
         onResult = ::handleAdResult,
     )
 }
 
 fun openActivityB() {
-    opportunity?.cancel() // 明确退出时立即取消；onPause 是额外兜底。
+    opportunity?.cancel() // 明确退出时立即取消；SDK 会处理等待阶段的 onPause。
     opportunity = null
     startActivity(Intent(this, ActivityB::class.java))
 }
 
-override fun onPause() {
+override fun onDestroy() {
     opportunity?.cancel()
     opportunity = null
-    super.onPause()
+    super.onDestroy()
 }
 ```
 
-SDK 交接后 `cancel()` 无效，因此广告自身造成的暂停不会改写展示结果。返回 Activity A 后不要在 `onResume` 自动重发同一业务触发。
+SDK 自动处理等待阶段的暂停；不要因广告自身导致 Activity 暂停而主动取消任务，否则会关闭本库承载的全屏原生。返回 Activity A 后不要在 `onResume` 自动重发同一业务触发。
 
 ### Navigation / Fragment：绑定 entry 和页面 View
 
 ```kotlin
 // 在 Fragment 的 onViewCreated 中安装；entry 是当前页面自己的 NavBackStackEntry。
 val entry = findNavController().currentBackStackEntry ?: return
-var opportunity: AdDisplayOpportunity? = null
+var opportunity: AdTask? = null
 val leaveObserver = LifecycleEventObserver { _, event ->
-    if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_DESTROY) {
+    if (event == Lifecycle.Event.ON_DESTROY) {
         opportunity?.cancel()
         opportunity = null
     }
@@ -190,25 +189,21 @@ viewLifecycleOwner.lifecycle.addObserver(object : DefaultLifecycleObserver {
 })
 
 button.setOnClickListener {
+    if (findNavController().currentBackStackEntry !== entry) return@setOnClickListener
     opportunity?.cancel()
-    opportunity = Ads.showInterstitialWhenReady(
-        activity = requireActivity(),
+    opportunity = Ads.showInter(
         position = "detail_action",
-        timeoutMillis = 3_000,
-        isSceneValid = {
-            findNavController().currentBackStackEntry === entry &&
-                entry.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
-        },
         onResult = ::handleAdResult,
     )
 }
-// 主动导航时先 cancel 再 navigate；entry 生命周期也覆盖系统返回/手势完成切页。
+// 主动导航、系统返回和手势完成离场时先 cancel；entry 销毁额外清理。
+// 不要无条件在 ON_PAUSE 取消：全屏原生会正常暂停宿主。
 ```
 
 ### 保留 Tab：在切换事件中取消
 
 ```kotlin
-private var opportunity: AdDisplayOpportunity? = null
+private var opportunity: AdTask? = null
 private var selectedTabId = "home"
 
 fun selectTab(next: String) {
@@ -219,13 +214,9 @@ fun selectTab(next: String) {
 }
 
 fun onTabBusinessTrigger() {
-    val tabAtTrigger = selectedTabId
     opportunity?.cancel()
-    opportunity = Ads.showInterstitialWhenReady(
-        activity = activity,
+    opportunity = Ads.showInter(
         position = "tab_action",
-        timeoutMillis = 3_000,
-        isSceneValid = { selectedTabId == tabAtTrigger },
         onResult = ::handleAdResult,
     )
 }
@@ -235,9 +226,9 @@ fun onTabBusinessTrigger() {
 
 ## Compose 接入
 
-展示调用必须来自明确的业务事件，例如按钮点击、一次完成回调或页面 entry 的业务触发。不要在 Composable 函数体直接调用 `show...WhenReady`，也不要用每次 `ON_RESUME`、回调更新或 `isCurrentScene` 重新变为 `true` 来自动重发同一次触发。
+展示调用必须来自明确的业务事件，例如按钮点击、一次完成回调或页面 entry 的业务触发。不要在 Composable 函数体直接调用 `showInter` 或 `show...WhenReady`，也不要用每次 `ON_RESUME`、回调更新或 `isCurrentScene` 重新变为 `true` 来自动重发同一次触发。
 
-下面的模式用页面实例作为稳定 key，用 `rememberUpdatedState` 让等待中的回调和场景检查读取同一页面实例的最新值；这些 State 也通过 `key(hostActivity, pageInstanceId)` 隔离，已交接广告的迟到结果仍交给原页面的回调。机会只在 `triggerInterstitial()` 被明确调用时创建。`DisposableEffect` 负责最终清理，但实际导航/Tab 离开仍应先调用 `leaveScene()`，因为保留页面的 Composition 可能不会立即销毁。
+下面的模式用页面实例作为稳定 key，用 `rememberUpdatedState` 让回调和触发资格检查读取同一页面实例的最新值；这些 State 也通过 `key(hostActivity, pageInstanceId)` 隔离，已交接广告的迟到结果仍交给原页面的回调。机会只在 `triggerInterstitial()` 被明确调用时创建。`DisposableEffect` 负责最终清理，但实际导航/Tab 离开仍应先调用 `leaveScene()`，因为保留页面的 Composition 可能不会立即销毁。
 
 ```kotlin
 @Composable
@@ -249,7 +240,7 @@ fun LevelScreen(
     navigateAway: () -> Unit,
 ) {
     val opportunityState = remember(hostActivity, pageInstanceId) {
-        mutableStateOf<AdDisplayOpportunity?>(null)
+        mutableStateOf<AdTask?>(null)
     }
     var opportunity by opportunityState
     val latestIsCurrentPage by key(hostActivity, pageInstanceId) {
@@ -266,12 +257,10 @@ fun LevelScreen(
     }
 
     fun triggerInterstitial() {
+        if (!latestIsCurrentPage) return
         opportunity?.cancel()
-        opportunity = Ads.showInterstitialWhenReady(
-            activity = hostActivity,
+        opportunity = Ads.showInter(
             position = "level_complete",
-            timeoutMillis = 3_000,
-            isSceneValid = { latestIsCurrentPage },
             onResult = { result -> latestOnAdResult(result) },
         )
     }
@@ -290,7 +279,7 @@ fun LevelScreen(
 }
 ```
 
-`pageInstanceId` 必须代表页面 entry 或页面实例，而不是一个会在 A → B → A 之间复用的全局路由名。若使用保留 Tab，应把当前选中的 Tab 和对应页面实例作为场景状态；`isSceneValid` 变为 `false` 时仍应在离开事件中主动 `cancel()`，不能依赖它稍后恢复为 `true` 来复活机会。
+`pageInstanceId` 必须代表页面 entry 或页面实例，而不是一个会在 A → B → A 之间复用的全局路由名。若使用保留 Tab，应把当前选中的 Tab 和对应页面实例作为场景状态；页面不再是当前场景时在离开事件中主动 `cancel()`；重新选中页面不会复活旧任务。
 
 核心库不需要 Compose 或 Navigation 依赖；以上只是宿主侧接入示例。没有 Compose 的宿主使用同样的原则保存句柄，并在页面 entry/Fragment/Activity 的明确离开点调用 `cancel()`。
 
@@ -309,9 +298,11 @@ loading 使用当前 Activity 页面内的 View/Compose 覆盖层，避免独立
 
 插屏和激励等待期间切后台或离开页面会取消机会，底层加载与缓存保留。返回前台后不恢复已取消的等待、不补弹广告。开屏切后台只暂停等待与计时，回到原 Activity 后继续，不触发结果回调；真正销毁或主动取消仍会终止。业务应在原页面恢复前台且仍有效时清理 loading，并且只继续一次被阻塞的业务；原页面已失效则丢弃继续动作。取消可能同步交付回调，应先标记场景失效再取消，避免取消回调误导航。
 
-`onResult` 在等待失败或广告最终关闭/失败时交付；当前没有新增展示交接回调。页面内 loading 可由全屏广告覆盖，最终结果时清理。交给 SDK 后等待计时停止，不限制广告播放时长。
+插页通过 `onLoadingChanged` 管理页面遮罩：主线程通知 `true` 后可延迟显示，收到 `false` 时立即取消延迟显示并移除。`false` 在插页或原生交接展示前、以及等待失败或取消时发送，不必等广告关闭。未进入等待的请求不通知 `true`；每个请求应持有自己的遮罩，兼容同步回调。
 
-每次机会只主动确保加载一次；明确失败来自平台整体加载失败或初始化失败，而不是聚合平台内部单个广告源失败。本次机会开始前的加载失败记录不会直接导致新机会失败。TopOn 新机会仍可按需发起加载，AdMob 仍依赖持续预加载；本层不增加循环重试。竞价仅等待已启用当前格式的平台，已关闭的参与方不占等待时间。主线程调度可能使截止检查稍晚执行，最终决策使用该次检查时的有效缓存，不再开启新的等待窗口。
+`onResult` 在等待失败或广告最终关闭/失败时交付，用于业务收尾；loading 消失不代表任务完成。交给 SDK 后等待计时停止，不限制广告播放时长。开屏与激励的回调接口不变。
+
+每次机会只主动确保加载一次；明确失败来自平台整体加载失败或初始化失败，而不是聚合平台内部单个广告源失败。本次机会开始前的加载失败记录不会直接导致新机会失败。TopOn 新机会仍可按需发起加载，AdMob 仍依赖持续预加载；本层不增加循环重试。竞价仅等待已启用当前格式的平台，已关闭的参与方不占等待时间。主线程调度可能使截止检查稍晚执行；`showInter` / `showOpen` 仅使用截止前已接收且决策时仍有效的候选，迟到加载保留给后续任务，不再开启新的等待窗口。旧单类型等待入口仍使用检查时有效缓存。
 
 
 等待期限限制的是等待平台结果的阶段。若在截止前已满足决策条件并选出候选，随后展示准备跨过截止时间，不会仅因此返回超时；截止时选出的兜底候选也遵循同一规则。选定候选不等于交给 SDK：交接前取消、场景失效、许可撤销、宿主不可展示或广告失效仍会阻止展示。

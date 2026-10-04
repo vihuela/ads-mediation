@@ -194,7 +194,7 @@ Activity、owner、等值 request、layout 对象和 retentionPolicy 组成配�
 - position 使用业务位置的 `_native` 后缀，页面加载不是全局 preload。每个有效周期一次 ad_position、每次本层加载一对 request/result；取消有独立原因，曝光前失败按尝试去重。
 - 曝光/点击以平台回调为准；Loaded、挂载和可见度不伪造曝光。合法多次点击保留，页面释放和覆盖层关闭不伪装成 ad_close。
 - 沿用 `AdEventListener` 与 `AdRevenueListener`。单平台请求的 mediationMode 为 ADMOB/TOPON；双 ID 请求为 BIDDING，每端有独立获取 requestId；SDK 库存准备的加载事件与页面获取分开，在最终取得有效胜出对象后产生一次 ad_bid_result，记录候选可用性、价格可用性和胜出平台。后续曝光/点击/收益沿用获胜候选的 requestId、平台和广告位 ID。paid 与 impression 不要求先后；合法零收入保留，旧广告迟到收益仍按原身份归因，平台销毁后是否继续发回调不作保证。
-- Native 不占全屏锁、也不参与全屏等待/竞价。`Ads.isReady(NATIVE)` 恒为 false，查询卡片自己的 state。已启用的旧自动开屏路径有 Native 交互抑制；手动页面机会仍通过 `isSceneValid` 表达当前业务是否允许全屏，覆盖层期间不要主动创建机会。
+- Native 不占全屏锁、也不参与全屏等待/竞价。`Ads.isReady(NATIVE)` 恒为 false，查询卡片自己的 state。已启用的旧自动开屏路径有 Native 交互抑制；手动插页在业务允许时调用 `Ads.showInter`，离场或业务条件失效时取消任务；覆盖层期间不要主动创建任务。
 - 自动开屏统一排除锁定广告 SDK 的 Activity，并在最终调度前再次检查；Pangle 内置浏览器从 Chrome 返回不被当作业务展示宿主。普通点击窗口仍为5秒，覆盖层缺少关闭回调的兜底仍为120秒，不靠延长期限屏蔽以后合法机会。此过滤只作用自动路径，不代替手动入口的场景资格。
 
 手动页面机会示例（在页面主线程使用，`owner` 是 Fragment View 或具体导航 entry 的 owner）：
@@ -203,7 +203,7 @@ Activity、owner、等值 request、layout 对象和 retentionPolicy 组成配�
 var pageActive = true
 var dialogVisible = false
 var manualAllowed = false
-var pending: AdDisplayOpportunity? = null
+var pending: AdTask? = null
 
 fun cancelManualOpportunity() {
     manualAllowed = false
@@ -228,15 +228,13 @@ fun onBusinessActionCompleted() {
     cancelManualOpportunity()
     if (!sceneValid()) return
     manualAllowed = true
-    pending = Ads.showInterstitialWhenReady(
-        activity = activity,
+    pending = Ads.showInter(
         position = "task_complete",
-        isSceneValid = { manualAllowed && sceneValid() },
     )
 }
 ```
 
-页面暂停、离页、打开业务 Dialog 或销毁时调用 `cancelManualOpportunity()`；同时更新 `pageActive` / `dialogVisible`。`onResume` 和 Native 落地页返回时不自动调用 `onBusinessActionCompleted()`，所以本次返回不会紧接手动全屏；下一次合资格的业务操作才建立新机会。宿主在销毁时也须移除对页面的事件转发。已交给 SDK 展示的全屏不能靠取消句柄撤销；`isSceneValid` 在交接前持续检查资格。
+明确离页、打开业务 Dialog 或销毁时调用 `cancelManualOpportunity()`；同时更新 `pageActive` / `dialogVisible`。`onResume` 和 Native 落地页返回时不自动调用 `onBusinessActionCompleted()`，所以本次返回不会紧接手动全屏；下一次合资格的业务操作才建立新机会。宿主在销毁时也须移除对页面的事件转发。已交给广告 SDK 展示的全屏不能靠取消句柄撤销；本库全屏原生可以取消关闭。SDK 会取消等待阶段的页面暂停，不要因广告自身导致页面暂停而再次主动取消原生。
 - 公共枚举新增项会影响宿主穷举 when；`AdEvent` 尾部新增可选 slotId，不据此宣称所有已编译调用方都二进制兼容。升级时同步编译宿主。
 
 ## 失败与验证
@@ -333,3 +331,21 @@ Pangle官方调试Video2新增附着时暂停隔离：调用 `pauseVideo()` / `o
 模块原生日志沿用 loggingEnabled/logTag，普通日志使用中文业务位置与关键结果，平台真实回调才记曝光/收益。未渲染落选对象保留仅在 DEBUG；DEBUG 保留 requestId/sessionId/responseId 关联，原始 AdEvent 对外字段继续可用。日志关闭不构造诊断消息。`slotId` 语义迁移需宿主适配；本轮仅验证源码接入，不承诺旧已编译二进制兼容。
 
 2026-10-01 最新来源状态：Google 图片 AdMobAdapter 已支持同对象/平台 View 保留并通过 Debug 真机；文中历史“全部降级”只描述旧阶段。视频、其他适配器、TopOn及完整来源矩阵仍未通过。
+
+
+## 全屏原生兜底
+
+当前工作树新增 `Ads.showNativeFullScreen(activity, position, layout, isSceneValid, onResult)`。
+宿主仅在主广告无库存、加载失败或等待超时时调用；后台、场景失效、许可拒绝、格式关闭及全屏冲突不应触发兜底。
+该入口只独占领取现有自渲染库存，无库存立即返回 `Failed("no_preloaded_ad")`，不会先开空 Activity 或再等待网络加载。
+有库存时使用库内 `NativeFullScreenActivity`，和其他全屏广告共用互斥锁；关闭、返回、隐藏后释放、SDK 关闭、宿主销毁及启动失败均收口一次。
+进程恢复或 Activity 重建不会重新获取另一条广告。只有 SDK 已确认曝光才返回 `Dismissed`；`Loaded` 不代表曝光。
+
+`layout` 使用 `NativeLayout.Custom`，工厂中的 Context 是当前全屏 Activity。
+根布局设置 `MATCH_PARENT`；提供清晰、立即可用的宿主关闭按钮，点击时调用当前 Activity 的 `finish()`。
+该关闭按钮不填入 `NativeLayoutBinding.close`，也不注册为 SDK 点击素材。
+全屏页面负责系统栏/刘海 insets；素材、AdChoices、点击注册和收益仍沿用既有 Native 渲染链路，事件格式仍为 `NATIVE`。
+
+初始化时可通过 `AdMobIds.fullScreenNativeId` / `TopOnIds.fullScreenNativePlacementId` 配置独立广告位，未指定时沿用普通 Native ID。
+`Ads.preloadNative()` 同时预热这两类库存，按平台和广告位去重；相同 ID 共享库存，不会因不同业务 position 变成独立广告单元。
+激励场景的奖励资格仍由原有奖励契约决定，全屏原生不产生激励奖励。

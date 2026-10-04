@@ -11,12 +11,12 @@
 | 广告形式 | AdMob 直连 | TopOn | 双平台模式 | 宿主入口 |
 | --- | --- | --- | --- | --- |
 | 开屏 | 支持 | 支持 | 比较已启用平台的候选 | `Ads.showAppOpenWhenReady` |
-| 插屏 | 支持 | 支持 | 比较已启用平台的候选 | `Ads.showInterstitialWhenReady` |
+| 插屏 | 支持 | 支持 | 比较已启用平台的候选 | `Ads.showInter` |
 | 激励 | 支持 | 支持 | 比较已启用平台的候选 | `Ads.showRewardedWhenReady` |
 | Banner | 支持 | 当前不支持 | 使用 AdMob 配置，不做 Banner 竞价 | `bindBanner` / `AdsBannerView` / `AdsBanner` |
 | Native | 支持 | 支持 | 双 ID 时对实际广告对象比价 | `AdsNativeView` / `AdsNative` |
 
-全屏广告也保留 `showAppOpen`、`showInterstitial`、`showRewarded` 立即尝试接口。页面可以等待广告时使用 `WhenReady`；业务不允许等待时使用立即尝试接口，并处理无缓存的失败结果。
+全屏广告也保留 `showAppOpen`、`showInterstitial`、`showRewarded` 立即尝试接口。插页使用 `showInter` 完成等待和原生兜底；开屏/激励的单类型等待入口使用 `WhenReady`；业务不允许等待时使用立即尝试接口，并处理无缓存的失败结果。
 
 ### 工程基线
 
@@ -243,6 +243,41 @@ val stopObserving = Ads.observeInitialization { success ->
 
 在页面超时或销毁时调用返回的 `stopObserving()`。这只解绑监听，不取消 SDK 初始化。**库仅保留一个待完成的初始化监听，新监听会替换旧监听**，包括 Application 传入的 `onInitialized`。已处于终态时会同步通知，页面自身的初始化等待上限需要由宿主管理。
 
+### 初始化失败恢复
+
+在主线程使用持续状态监听管理恢复。`addInitializationStateListener` 注册后立即通知当前状态，随后通知状态变化；它独立于 `observeInitialization`，不会替换 Splash 的一次性观察者。返回的函数用于解绑持续监听。
+
+```kotlin
+val stopListening = Ads.addInitializationStateListener { state ->
+    if (state == AdsState.FAILED && Ads.canRetryInitialization) {
+        // 由宿主排定下一次有限重试；不要在此同步递归调用 retryInitialization。
+    }
+}
+
+// 宿主的退避任务触发时，在主线程调用：
+if (Ads.canRetryInitialization) {
+    Ads.retryInitialization(activity = null)
+}
+
+// 宿主结束监听时调用：
+stopListening()
+```
+
+`retryInitialization` 复用已经安装的 Application 和 AdsConfig，不接受新配置。`activity = null` 使用当前 resumed host；没有合法 host 时等待下一次 resume。显式传入的 Activity 必须存活、属于原 Application，且已验证为 RESUMED。只有可重试的 FAILED 才开始恢复；NOT_INITIALIZED、INITIALIZING、READY 及不可重试失败均不重启，重复调用不会并发初始化。已成功的平台保持可用，整体 READY 后网络变化不得重新初始化。
+
+当前恢复范围：
+
+| 失败来源 | 可重试范围 |
+|---|---|
+| UMP 请求或表单 | `INTERNET_ERROR`、`INTERNAL_ERROR`、`TIME_OUT` 且 `canRequestAds` 为 false |
+| UMP 非暂态结果 | `INVALID_OPERATION`、未知错误、无错误但未获得广告请求许可均不可重试 |
+| GMA Next-Gen 初始化 | 仅直接抛出的 `IOException`；配置异常及其他未知异常不可重试 |
+| TopOn 初始化 | 当前 `TUSDK.init` 失败只有字符串原因，未确认可靠错误分类及失败后重试合同，保留为不可重试 |
+
+恢复不重置用户同意，不绕过 `canRequestAds`。UMP 更新后仍使用 SDK 的 `loadAndShowConsentFormIfRequired`，只在需要时展示表单；若请求报错但 SDK 保留的同意已允许广告，则继续初始化平台。GMA 使用官方支持的重复 `initialize` 调用，不重置 SDK 内部状态。参见 [UMP 同意检查](https://developers.google.com/admob/android/privacy)、[UMP 错误码](https://developers.google.com/admob/android/reference/privacy/com/google/android/ump/FormError.ErrorCode) 和 [MobileAds 初始化 API](https://developers.google.com/ad-manager/mobile-ads-sdk/android/next-gen/reference/com/google/android/libraries/ads/mobile/sdk/MobileAds)。
+
+库不负责计时或网络监听。宿主可在前台按 2/5/15 秒有限退避，并在默认网络身份变化或 VALIDATED 从 false 变为 true 时重新评估；每次触发前检查 `canRetryInitialization`，避免无限重试。
+
 ## 4 展示全屏广告
 
 以下片段中的 `activity`、页面有效状态和业务继续/发奖函数由宿主提供。SDK 类型均来自 `com.cashcraft.ads.mediation`。展示前完成初始化和许可流程；调用及页面状态维护统一放在主线程，避免生命周期与业务事件交错。
@@ -273,19 +308,22 @@ TopOn 开屏容器由库创建并清理，宿主不用传容器。保留旧自�
 ### 插屏广告
 
 ```kotlin
-val interstitialOpportunity = Ads.showInterstitialWhenReady(
-    activity = activity,
+val interstitialOpportunity = Ads.showInter(
     position = "level_complete",
-    timeoutMillis = 3_000L,
-    isSceneValid = { isLevelPageActive },
+    onLoadingChanged = { loading ->
+        // true：进入等待，可安排延迟显示遮罩；false：取消延迟显示并立即移除遮罩。
+        // 在当前 Activity 内显示，不启动另一个 Activity 或抢占窗口焦点。
+    },
     onResult = { result ->
         // Dismissed 或 Failed 都表示本次机会结束。
-        // 页面仍有效时清理 loading，并且只继续一次原业务流程。
+        // 页面仍有效时只继续一次原业务流程。
     },
 )
 ```
 
-插屏默认等待 `5_000ms`。退出页面、切换 Tab 或导航前显式取消；Activity 暂停或应用退后台也会结束尚未交接的机会。回到页面不会自动补弹，需要新的业务触发。
+插页默认等待 `3_000ms`，通过 `AdsConfig.interTimeoutMillis(position)` 一次配置，返回 `AdTask`。两平台插页候选全部返回或超时后，有插页则按价格选择，没有插页则只取全屏原生缓存；通过 `nativeFullScreenLayout` 配置布局。原生沿用原始 position，不追加网络等待。退出页面、切换 Tab 或导航前显式取消；Activity 暂停或应用退后台也会结束尚未交接的机会。回到页面不会自动补弹，需要新的业务触发。
+
+`onLoadingChanged` 在主线程执行，也可能在 `showInter` 返回前同步执行。通过校验并取得展示占用后开始等待才通知 `true`；插页或原生交接展示前、等待失败或取消时通知 `false`，不必等广告关闭。未进入等待的请求不通知 `true`。每个请求独立管理自己的遮罩和延迟任务；移除遮罩不代表任务完成，业务仍由 `onResult` 收尾。
 
 ### 激励广告
 
