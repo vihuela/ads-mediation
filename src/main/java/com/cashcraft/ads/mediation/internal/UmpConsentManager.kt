@@ -5,6 +5,7 @@ import android.content.Context
 import com.google.android.ump.ConsentInformation
 import com.google.android.ump.ConsentRequestParameters
 import com.google.android.ump.UserMessagingPlatform
+import com.google.android.ump.FormError
 import com.cashcraft.ads.mediation.AdConsentSnapshot
 import com.cashcraft.ads.mediation.AdConsentStatus
 import com.cashcraft.ads.mediation.UmpConsentConfig
@@ -22,6 +23,20 @@ internal class UmpConsentManager(
     private val requestStarted = AtomicBoolean(false)
     private val gateCompleted = AtomicBoolean(false)
 
+    private var attempt = 0L
+    var failure: ConsentInitializationFailure? = null
+        private set
+
+    /** Releases only the failed request gate. UMP persistence and user consent are untouched. */
+    fun prepareRetry(): Boolean {
+        if (failure?.retryable != true) return false
+        attempt++
+        failure = null
+        requestStarted.set(false)
+        gateCompleted.set(false)
+        return true
+    }
+
     val snapshot: AdConsentSnapshot
         get() {
             if (!config.enabled) return AdConsentSnapshot.DISABLED
@@ -37,7 +52,7 @@ internal class UmpConsentManager(
             consentInformation.privacyOptionsRequirementStatus ==
             ConsentInformation.PrivacyOptionsRequirementStatus.REQUIRED
 
-    /** Refreshes consent once per process launch before any provider initialization or ad request. */
+    /** Refreshes consent before provider initialization; only a failed transient gate may be retried. */
     fun gatherConsent(
         activity: Activity,
         onAdsAllowed: () -> Unit,
@@ -50,6 +65,7 @@ internal class UmpConsentManager(
         }
         if (!requestStarted.compareAndSet(false, true)) return
 
+        val token = ++attempt
         val parameters = ConsentRequestParameters.Builder()
             .setTagForUnderAgeOfConsent(config.tagForUnderAgeOfConsent)
             .build()
@@ -58,20 +74,25 @@ internal class UmpConsentManager(
             activity,
             parameters,
             {
+                if (token != attempt || gateCompleted.get()) return@requestConsentInfoUpdate
                 logger.consent("request_succeeded", snapshot)
                 UserMessagingPlatform.loadAndShowConsentFormIfRequired(activity) { formError ->
+                    if (token != attempt || gateCompleted.get()) return@loadAndShowConsentFormIfRequired
                     logger.consent("form_completed", snapshot, formError?.message)
                     completeGate(
-                        errorMessage = formError?.message,
+                        error = formError,
+                        stage = "ump_form",
                         onAdsAllowed = onAdsAllowed,
                         onAdsUnavailable = onAdsUnavailable,
                     )
                 }
             },
             { requestError ->
+                if (token != attempt || gateCompleted.get()) return@requestConsentInfoUpdate
                 logger.consent("request_failed", snapshot, requestError.message)
                 completeGate(
-                    errorMessage = requestError.message,
+                    error = requestError,
+                    stage = "ump_request",
                     onAdsAllowed = onAdsAllowed,
                     onAdsUnavailable = onAdsUnavailable,
                 )
@@ -95,14 +116,16 @@ internal class UmpConsentManager(
     }
 
     private fun completeGate(
-        errorMessage: String?,
+        error: FormError?,
+        stage: String,
         onAdsAllowed: () -> Unit,
         onAdsUnavailable: (String) -> Unit,
     ) {
         if (consentInformation.canRequestAds()) {
             deliverAdsAllowed(onAdsAllowed)
         } else if (gateCompleted.compareAndSet(false, true)) {
-            onAdsUnavailable(errorMessage ?: "consent_not_obtained")
+            failure = ConsentInitializationFailure(stage, error?.errorCode, error?.message ?: "consent_not_obtained")
+            onAdsUnavailable(failure!!.message)
         }
     }
 
@@ -116,4 +139,11 @@ internal class UmpConsentManager(
         ConsentInformation.ConsentStatus.OBTAINED -> AdConsentStatus.OBTAINED
         else -> AdConsentStatus.UNKNOWN
     }
+}
+
+/** ErrorCode values are defined by UMP 4.0.0; unknown/configuration/user outcomes are terminal. */
+internal data class ConsentInitializationFailure(val stage: String, val code: Int?, val message: String) {
+    val retryable: Boolean
+        get() = code == FormError.ErrorCode.INTERNET_ERROR || code == FormError.ErrorCode.INTERNAL_ERROR ||
+            code == FormError.ErrorCode.TIME_OUT
 }

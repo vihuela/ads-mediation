@@ -105,6 +105,15 @@ object AdMobAds {
     private val pendingAds = mutableMapOf<AdMobFormat, RetainedAd<Ad>>()
     private val takenAds = mutableMapOf<Ad, RetainedAd<Ad>>()
 
+    private var initializationAttempt = 0L
+    internal var initializationError: Throwable? = null
+        private set
+    // MobileAds documents repeated initialize calls as supported; never reset the SDK itself.
+    // https://developers.google.com/ad-manager/mobile-ads-sdk/android/next-gen/reference/com/google/android/libraries/ads/mobile/sdk/MobileAds
+    // Only direct I/O failures are classified as transient. Configuration/unknown failures stay terminal.
+    internal val canRetryInitialization: Boolean
+        get() = state == AdMobState.FAILED && initializationError is java.io.IOException
+
     /** Call once from `Application.onCreate`. Initialization itself runs off the main thread. */
     fun initialize(
         application: Application,
@@ -123,7 +132,18 @@ object AdMobAds {
                     return
                 }
                 AdMobState.FAILED -> {
-                    mainHandler.post { onInitialized(false) }
+                    if (!canRetryInitialization) {
+                        mainHandler.post { onInitialized(false) }
+                        return
+                    }
+                    require(this.application === application && this.config == config) {
+                        "Retry must reuse the installed AdMob configuration"
+                    }
+                    state = AdMobState.INITIALIZING
+                    initializationError = null
+                    initializationListeners += onInitialized
+                    mobileAdsInitializationStarted.set(false)
+                    onMain { beginMobileAdsInitialization() }
                     return
                 }
                 AdMobState.NOT_INITIALIZED -> Unit
@@ -179,14 +199,20 @@ object AdMobAds {
     private fun beginMobileAdsInitialization() {
         if (!mobileAdsInitializationStarted.compareAndSet(false, true)) return
         state = AdMobState.INITIALIZING
+        val token = ++initializationAttempt
         backgroundScope.launch {
-            val initialized = runCatching {
+            val result = runCatching {
                 MobileAds.initialize(
                     application,
                     InitializationConfig.Builder(config.ids.applicationId).build(),
                 )
-            }.isSuccess
-            mainHandler.post { finishInitialization(initialized) }
+            }
+            mainHandler.post {
+                if (token == initializationAttempt && state == AdMobState.INITIALIZING) {
+                    initializationError = result.exceptionOrNull()
+                    finishInitialization(result.isSuccess)
+                }
+            }
         }
     }
 
@@ -343,10 +369,12 @@ object AdMobAds {
     ): AdShowSession = events.begin(format, position, config.ids.adUnitId(format), attempt, onSessionCreated)
 
     private fun finishInitialization(success: Boolean) {
+        if (state != AdMobState.INITIALIZING) return
         state = if (success) AdMobState.READY else AdMobState.FAILED
         if (success) startPreloading()
-        initializationListeners.forEach { listener -> runCatching { listener(success) } }
+        val listeners = initializationListeners.toList()
         initializationListeners.clear()
+        listeners.forEach { listener -> runCatching { listener(success) } }
         if (success) autoAppOpenController.onProviderInitialized()
     }
 

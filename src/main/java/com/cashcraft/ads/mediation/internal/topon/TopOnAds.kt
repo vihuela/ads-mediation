@@ -113,6 +113,11 @@ internal object TopOnAds {
         }
     }
 
+    // TUSDK 6.6.52 exposes only a message on failure; no documented failed-init retry contract.
+    // Keep failures terminal until a vendor-supported retry API and error classification exist.
+    internal var initializationFailureReason: String? = null
+        private set
+
     // The listener overload is retained by TopOn 6.6 and is required here to avoid loading ads
     // before asynchronous SDK initialization has actually completed.
     @Suppress("DEPRECATION")
@@ -200,10 +205,18 @@ internal object TopOnAds {
                     networkConfig,
                     object : TUSDKInitListener {
                         override fun onSuccess() = onMain { finishInitialization(true) }
-                        override fun onFail(message: String) = onMain { finishInitialization(false) }
+                        override fun onFail(message: String) = onMain {
+                            if (state == TopOnState.INITIALIZING) {
+                                initializationFailureReason = message
+                                finishInitialization(false)
+                            }
+                        }
                     },
                 )
-            }.onFailure { finishInitialization(false) }
+            }.onFailure {
+                initializationFailureReason = it.message ?: it.javaClass.simpleName
+                finishInitialization(false)
+            }
         }
     }
 
@@ -368,8 +381,9 @@ internal object TopOnAds {
             createAds()
             loadAll()
         }
-        initializationListeners.forEach { listener -> runCatching { listener(success) } }
+        val listeners = initializationListeners.toList()
         initializationListeners.clear()
+        listeners.forEach { listener -> runCatching { listener(success) } }
         if (success && config.isFormatEnabled(AdFormat.APP_OPEN)) {
             autoAppOpenController.onProviderInitialized()
         }

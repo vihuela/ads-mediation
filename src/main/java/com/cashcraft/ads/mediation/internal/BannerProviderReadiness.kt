@@ -41,7 +41,7 @@ internal class BannerProviderReadiness {
     /** UMP can become allowed through the existing privacy-options flow after an initial denial. */
     fun started() {
         states.keys.toList().forEach { platform ->
-            if (states[platform] != BannerReadiness.NOT_CONFIGURED) {
+            if (states[platform] != BannerReadiness.NOT_CONFIGURED && states[platform] != BannerReadiness.READY) {
                 states[platform] = BannerReadiness.INITIALIZING
                 notifyObservers(platform)
             }

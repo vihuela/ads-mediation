@@ -31,6 +31,20 @@ class BannerProviderReadinessTest {
     }
 
     @Test
+    fun `starting recovery preserves successful platform and only restarts failed readiness`() {
+        val gate = BannerProviderReadiness()
+        gate.configure(BiddingProviderConfig(admob, topon))
+        gate.completed(AdPlatform.ADMOB, true)
+        gate.completed(AdPlatform.TOPON, false)
+        val readyChanges = mutableListOf<BannerReadiness>()
+        gate.observe(AdPlatform.ADMOB) { readyChanges += gate.read(AdPlatform.ADMOB, true) }
+        gate.started()
+        assertEquals(BannerReadiness.READY, gate.read(AdPlatform.ADMOB, true))
+        assertEquals(BannerReadiness.INITIALIZING, gate.read(AdPlatform.TOPON, true))
+        assertEquals(listOf(BannerReadiness.READY), readyChanges)
+    }
+
+    @Test
     fun `unconfigured and failed providers never become eligible with consent`() {
         val gate = BannerProviderReadiness()
         assertEquals(BannerReadiness.NOT_INITIALIZED, gate.read(AdPlatform.ADMOB, false))
