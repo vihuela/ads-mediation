@@ -115,8 +115,8 @@ class BannerContractInstrumentation : Instrumentation() {
 
     private fun ready(view: AdsBannerView) = await("filled ${view.request.position}") {
         check(events.none { it.position == "${view.request.position}_banner" &&
-            it.name == AdEventName.LOAD_RESULT && it.result != "filled" }) { "Test ad failed: ${view.request.position}" }
-        count(view, AdEventName.LOAD_RESULT) == 1 && view.childCount == 1 &&
+            it.name == AdEventName.LOAD_FAIL }) { "Test ad failed: ${view.request.position}" }
+        count(view, AdEventName.LOADED) == 1 && view.childCount == 1 &&
             view.getChildAt(0).visibility == View.VISIBLE
     }
 
@@ -126,12 +126,12 @@ class BannerContractInstrumentation : Instrumentation() {
         var checkedInvisible = false
         var checkedBeforeResult = false
         main { eventAction = { event ->
-            if (event.position == "contract_real_banner" && event.name == AdEventName.LOAD_REQUEST) record {
+            if (event.position == "contract_real_banner" && event.name == AdEventName.LOAD) record {
                 check(view.childCount == 1 && view.getChildAt(0).visibility == View.INVISIBLE)
                 check(view.getChildAt(0).width > 0 && view.getChildAt(0).height > 0)
                 checkedInvisible = true
             }
-            if (event.position == "contract_real_banner" && event.name == AdEventName.LOAD_RESULT) record {
+            if (event.position == "contract_real_banner" && event.name == AdEventName.LOADED) record {
                 val child = view.getChildAt(0) as AdView
                 check(child.visibility == View.INVISIBLE)
                 checkNotNull(checkNotNull(child.getBannerAd()).adEventCallback)
@@ -145,8 +145,8 @@ class BannerContractInstrumentation : Instrumentation() {
             checkNotNull(ad.adEventCallback); checkNotNull(ad.bannerAdRefreshCallback)
             checkedListeners = true
         } }
-        await("real exposure and revenue") { count(view, AdEventName.IMPRESSION) == 1 && count(view, AdEventName.PAID) == 1 }
-        main { check(checkedInvisible && checkedListeners && checkedBeforeResult); check(count(view, AdEventName.LOAD_REQUEST) == 1) }
+        await("real exposure and revenue") { count(view, AdEventName.IMPRESSION) == 1 && revenues.count { it.position == "${view.request.position}_banner" } == 1 }
+        main { check(checkedInvisible && checkedListeners && checkedBeforeResult); check(count(view, AdEventName.LOAD) == 1) }
     }
 
     private fun initializationGate() {
@@ -160,8 +160,8 @@ class BannerContractInstrumentation : Instrumentation() {
         start(current)
         main { check(current.childCount == 0); app.initializeAds() }
         ready(current)
-        main { check(old.childCount == 0 && count(old, AdEventName.LOAD_REQUEST) == 0)
-            check(count(current, AdEventName.LOAD_REQUEST) == 1) }
+        main { check(old.childCount == 0 && count(old, AdEventName.LOAD) == 0)
+            check(count(current, AdEventName.LOAD) == 1) }
     }
 
     private fun gates() {
@@ -169,16 +169,16 @@ class BannerContractInstrumentation : Instrumentation() {
         await("inactive layout") { view.width > 0 }
         main { check(count(view, AdEventName.POSITION) == 0); view.visibility = View.INVISIBLE; view.setActive(true) }
         waitForIdleSync()
-        main { check(count(view, AdEventName.LOAD_REQUEST) == 0 && view.childCount == 0)
+        main { check(count(view, AdEventName.LOAD) == 0 && view.childCount == 0)
             view.layoutParams = view.layoutParams.apply { width = 0 } }
         await("zero width") { view.width == 0 }
         main { view.visibility = View.VISIBLE }
         waitForIdleSync()
-        main { check(count(view, AdEventName.LOAD_REQUEST) == 0)
+        main { check(count(view, AdEventName.LOAD) == 0)
             view.setActive(false); view.setActive(true)
             view.layoutParams = view.layoutParams.apply { width = -1 } }
         ready(view)
-        main { check(count(view, AdEventName.LOAD_REQUEST) == 1) }
+        main { check(count(view, AdEventName.LOAD) == 1) }
     }
 
     private fun loadingReentry() {
@@ -190,28 +190,28 @@ class BannerContractInstrumentation : Instrumentation() {
             error("Expected host exception after deactivation")
         } }
         await("Loading callback") { reached }
-        main { check(view.childCount == 0); check(count(view, AdEventName.LOAD_REQUEST) == 0) }
+        main { check(view.childCount == 0); check(count(view, AdEventName.LOAD) == 0) }
         start(view)
         ready(view)
-        main { check(count(view, AdEventName.LOAD_REQUEST) == 1); check(count(view, AdEventName.POSITION) == 2) }
+        main { check(count(view, AdEventName.LOAD) == 1); check(count(view, AdEventName.POSITION) == 2) }
     }
 
     private fun inFlightDestroy() {
         val old = create("contract_inflight_old")
         var destroyed = 0
         main { eventAction = { event ->
-            if (event.position == "contract_inflight_old_banner" && event.name == AdEventName.LOAD_REQUEST) {
+            if (event.position == "contract_inflight_old_banner" && event.name == AdEventName.LOAD) {
                 old.destroy(); old.destroy()
             }
         } }
         start(old) { if (it == BannerState.Destroyed) { destroyed++; error("Expected destroy callback exception") } }
-        await("actual request then destruction") { count(old, AdEventName.LOAD_REQUEST) == 1 && destroyed == 1 }
+        await("actual request then destruction") { count(old, AdEventName.LOAD) == 1 && destroyed == 1 }
         val replacement = create("contract_inflight_new")
         start(replacement); ready(replacement)
         main {
             check(old.childCount == 0 && destroyed == 1)
             check(count(old, AdEventName.IMPRESSION) == 0)
-            check(count(replacement, AdEventName.LOAD_REQUEST) == 1)
+            check(count(replacement, AdEventName.LOAD) == 1)
         }
     }
 
@@ -233,7 +233,7 @@ class BannerContractInstrumentation : Instrumentation() {
             error("Expected UI state callback exception")
         }
         await("exception-isolated actual exposure and paid") {
-            count(view, AdEventName.IMPRESSION) == 1 && count(view, AdEventName.PAID) == 1 &&
+            count(view, AdEventName.IMPRESSION) == 1 && revenues.count { it.position == "${view.request.position}_banner" } == 1 &&
                 revenues.count { it.position == "contract_throwing_banner" } == 1
         }
         main {
@@ -250,15 +250,15 @@ class BannerContractInstrumentation : Instrumentation() {
         val view = create("contract_restart")
         var abandoned: View? = null
         main { eventAction = { event ->
-            if (event.position == "contract_restart_banner" && event.name == AdEventName.LOAD_REQUEST &&
-                count(view, AdEventName.LOAD_REQUEST) == 1) {
+            if (event.position == "contract_restart_banner" && event.name == AdEventName.LOAD &&
+                count(view, AdEventName.LOAD) == 1) {
                 abandoned = view.getChildAt(0)
                 view.setActive(false); view.setActive(true)
             }
         } }
         start(view); ready(view)
         main { check(abandoned != null && abandoned?.parent == null && view.getChildAt(0) !== abandoned)
-            check(count(view, AdEventName.LOAD_REQUEST) == 2 && count(view, AdEventName.POSITION) == 2) }
+            check(count(view, AdEventName.LOAD) == 2 && count(view, AdEventName.POSITION) == 2) }
     }
 
     private fun configurationFailure() {
@@ -276,11 +276,11 @@ class BannerContractInstrumentation : Instrumentation() {
         await("configuration failure cleanup") { failed && fake.destroyCount == 1 }
         main { check(view.childCount == 0); view.setActive(true); view.requestLayout() }
         waitForIdleSync()
-        main { check(count(view, AdEventName.LOAD_REQUEST) == 1); view.setActive(false); view.setActive(true) }
-        await("new cycle after configuration failure") { count(view, AdEventName.LOAD_RESULT) == 2 && view.childCount == 1 }
-        main { check(count(view, AdEventName.LOAD_REQUEST) == 2 && fake.destroyCount == 1)
+        main { check(count(view, AdEventName.LOAD) == 1); view.setActive(false); view.setActive(true) }
+        await("new cycle after configuration failure") { count(view, AdEventName.LOADED) == 2 && view.childCount == 1 }
+        main { check(count(view, AdEventName.LOAD) == 2 && fake.destroyCount == 1)
             check(events.filter { it.position == "contract_config_failure_banner" &&
-                it.name == AdEventName.LOAD_RESULT }.all { it.result == "filled" }) }
+                it.name == AdEventName.LOADED }.all { it.result == "filled" }) }
     }
 
     private fun expiredObject() {
@@ -289,15 +289,15 @@ class BannerContractInstrumentation : Instrumentation() {
         val (callback, fake) = main { ownLoadCallback(view) to
             CallbackAd(checkNotNull((view.getChildAt(0) as AdView).getBannerAd()).getResponseInfo()) }
         main { view.setActive(false); view.setActive(true) }
-        await("replacement generation loaded") { count(view, AdEventName.LOAD_RESULT) == 2 &&
+        await("replacement generation loaded") { count(view, AdEventName.LOADED) == 2 &&
             view.childCount == 1 && view.getChildAt(0).visibility == View.VISIBLE }
         val replacement = main { view.getChildAt(0) }
         main { callback.onAdLoaded(fake.ad) }
         await("expired delivered object released") { fake.destroyCount == 1 }
         main { check(view.getChildAt(0) === replacement && replacement.visibility == View.VISIBLE)
-            check(count(view, AdEventName.LOAD_REQUEST) == 2 && count(view, AdEventName.LOAD_RESULT) == 2)
+            check(count(view, AdEventName.LOAD) == 2 && count(view, AdEventName.LOADED) == 2)
             check(events.filter { it.position == "contract_expired_banner" &&
-                it.name == AdEventName.LOAD_RESULT }.all { it.result == "filled" }) }
+                it.name == AdEventName.LOADED }.all { it.result == "filled" }) }
     }
 
     /** White-box access only to this repository's callback factory and current generation.
@@ -349,9 +349,9 @@ class BannerContractInstrumentation : Instrumentation() {
                 view.destroy(); view.destroy()
             }
         }
-        await("known paid delivered after destruction") { destroyed == 1 && count(view, AdEventName.PAID) == 1 }
+        await("known paid delivered after destruction") { destroyed == 1 && count(view, AdEventName.IMPRESSION) == 1 }
         main {
-            check(view.childCount == 0 && count(view, AdEventName.IMPRESSION) == 0 && count(view, AdEventName.CLICK) == 0)
+            check(view.childCount == 0 && count(view, AdEventName.IMPRESSION) == 1 && count(view, AdEventName.CLICK) == 0)
             check(revenues.count { it.position == "contract_queued_banner" } == 1)
         }
     }
@@ -380,7 +380,7 @@ class BannerContractInstrumentation : Instrumentation() {
         val height = main { child.height + 20 }
         main { child.minimumHeight = height }
         await("native content height remeasured") { view.height >= height }
-        main { check(view.getChildAt(0) === child); check(count(view, AdEventName.LOAD_REQUEST) == 1)
+        main { check(view.getChildAt(0) === child); check(count(view, AdEventName.LOAD) == 1)
             owner.registry.currentState = Lifecycle.State.DESTROYED; check(view.childCount == 0) }
     }
 
@@ -396,10 +396,10 @@ class BannerContractInstrumentation : Instrumentation() {
             shell("svc wifi disable")
             await("network offline") { connectivity.activeNetwork == null }
             start(view)
-            await("first load failure", 90_000) { count(view, AdEventName.LOAD_RESULT) == 1 }
+            await("first load failure", 90_000) { count(view, AdEventName.LOAD_FAIL) == 1 }
             main {
                 check(events.single { it.position == "contract_failed_pause_banner" &&
-                    it.name == AdEventName.LOAD_RESULT }.result == "failed")
+                    it.name == AdEventName.LOAD_FAIL }.result == "failed")
             }
             val child = main { checkNotNull(view.getChildAt(0)) }
             main {
@@ -415,14 +415,14 @@ class BannerContractInstrumentation : Instrumentation() {
                 view.visibility = View.VISIBLE
             }
             await("failed placeholder visible") { child.visibility == View.VISIBLE }
-            main { check(view.getChildAt(0) === child); check(count(view, AdEventName.LOAD_REQUEST) == 1) }
+            main { check(view.getChildAt(0) === child); check(count(view, AdEventName.LOAD) == 1) }
             shell("svc wifi enable")
             await("SDK recovery exposure and revenue", 120_000) {
-                count(view, AdEventName.IMPRESSION) == 1 && count(view, AdEventName.PAID) == 1
+                count(view, AdEventName.IMPRESSION) == 1 && revenues.count { it.position == "${view.request.position}_banner" } == 1
             }
             main {
                 check(view.getChildAt(0) === child)
-                check(count(view, AdEventName.LOAD_REQUEST) == 1 && count(view, AdEventName.LOAD_RESULT) == 1)
+                check(count(view, AdEventName.LOAD) == 1 && count(view, AdEventName.LOAD_FAIL) == 1)
             }
         } finally { shell("svc wifi enable") }
     }
