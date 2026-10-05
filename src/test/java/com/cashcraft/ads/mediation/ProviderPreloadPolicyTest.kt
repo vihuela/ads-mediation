@@ -56,6 +56,7 @@ import org.robolectric.util.ReflectionHelpers
 class ProviderPreloadPolicyTest {
     private val savedFields = mutableMapOf<String, Any?>()
     private val savedMaps = mutableMapOf<String, Map<Any, Any>>()
+    private val events = mutableListOf<AdEvent>()
     private val banner = BannerRequest(AdPlatform.ADMOB, "banner-unit", "home", BannerSize.Standard320x50)
     private lateinit var checker: AdPolicyChecker
 
@@ -79,6 +80,7 @@ class ProviderPreloadPolicyTest {
         ShadowBannerPreloader.configurations.clear()
         ShadowBannerPreloader.nextAd = null
         ShadowBannerLoader.loads.clear()
+        ShadowBannerLoader.duringLoad = null
         val application = RuntimeEnvironment.getApplication()
         ShadowMMKV.reset()
         checker = AdPolicyChecker(AdUsageStore(application, 0L))
@@ -87,7 +89,8 @@ class ProviderPreloadPolicyTest {
         ReflectionHelpers.setStaticField(AdMobAds::class.java, "state", AdMobState.READY)
         ReflectionHelpers.setStaticField(
             AdMobAds::class.java, "events",
-            AdEventDispatcher(application, AdPlatform.ADMOB, AdMediationMode.ADMOB, AdEventListener.NONE, false, "test"),
+            AdEventDispatcher(application, AdPlatform.ADMOB, AdMediationMode.ADMOB,
+                AdEventListener { events += it }, false, "test"),
         )
     }
 
@@ -104,6 +107,7 @@ class ProviderPreloadPolicyTest {
         ShadowBannerPreloader.configurations.clear()
         ShadowBannerPreloader.nextAd = null
         ShadowBannerLoader.loads.clear()
+        ShadowBannerLoader.duringLoad = null
     }
 
     @Test fun `no installed policy retains standalone provider preloading`() {
@@ -176,19 +180,65 @@ class ProviderPreloadPolicyTest {
     @Test fun `a late one shot banner is destroyed and cannot settle the replacement load`() {
         AdMobAds.preloadBanner(banner, AdSize.BANNER, 1, autoRefill = false)
         val old = ShadowBannerLoader.loads.single()
+        val oldRequest = events.single { it.format == AdFormat.BANNER }
         checker.policy = AdPolicy(enabled = false)
         AdMobAds.onPolicyChanged()
         checker.policy = AdPolicy()
         AdMobAds.onPolicyChanged()
         assertEquals(2, ShadowBannerLoader.loads.size)
+        val currentRequest = events.last { it.format == AdFormat.BANNER }
+        assertNotEquals(oldRequest.requestId, currentRequest.requestId)
         var destroyed = 0
         val obsolete = fakeAd(BannerAd::class.java) { destroyed++ }
         old.onAdLoaded(obsolete)
         assertEquals(1, destroyed)
+        val oldResult = events.last { it.format == AdFormat.BANNER }
+        assertEquals(AdEventName.LOADED, oldResult.name)
+        assertEquals(oldRequest.requestId, oldResult.requestId)
+        assertEquals("filled", oldResult.result)
+        assertNull(AdMobAds.pollBanner(banner, AdSize.BANNER))
         val current = fakeAd(BannerAd::class.java)
         ShadowBannerLoader.loads.last().onAdLoaded(current)
         assertSame(current, AdMobAds.pollBanner(banner, AdSize.BANNER))
         assertEquals(2, ShadowBannerLoader.loads.size)
+        val currentResult = events.last { it.format == AdFormat.BANNER }
+        assertEquals(currentRequest.requestId, currentResult.requestId)
+        assertEquals("filled", currentResult.result)
+        assertEquals(4, events.count { it.format == AdFormat.BANNER })
+    }
+
+    @Test fun `late one shot banner failure reports its request without settling the new generation`() {
+        AdMobAds.preloadBanner(banner, AdSize.BANNER, 1, autoRefill = false)
+        val old = ShadowBannerLoader.loads.single()
+        val oldRequest = events.single { it.format == AdFormat.BANNER }
+        checker.policy = AdPolicy(enabled = false)
+        AdMobAds.onPolicyChanged()
+        checker.policy = AdPolicy()
+        AdMobAds.onPolicyChanged()
+        val currentRequest = events.last { it.format == AdFormat.BANNER }
+        old.onAdFailedToLoad(LoadAdError(LoadAdError.ErrorCode.NO_FILL, "late", null))
+        val oldResult = events.last { it.format == AdFormat.BANNER }
+        assertEquals(AdEventName.LOAD_FAIL, oldResult.name)
+        assertEquals(oldRequest.requestId, oldResult.requestId)
+        assertEquals("no_fill", oldResult.result)
+        assertEquals("NO_FILL", oldResult.errorCode)
+        val current = fakeAd(BannerAd::class.java)
+        ShadowBannerLoader.loads.last().onAdLoaded(current)
+        assertSame(current, AdMobAds.pollBanner(banner, AdSize.BANNER))
+        assertEquals(currentRequest.requestId, events.last { it.format == AdFormat.BANNER }.requestId)
+        assertNotEquals(oldRequest.requestId, currentRequest.requestId)
+        assertEquals(4, events.count { it.format == AdFormat.BANNER })
+    }
+
+    @Test fun `blocked one shot banner emits no load until an actual SDK call starts`() {
+        checker.policy = AdPolicy(enabled = false)
+        AdMobAds.preloadBanner(banner, AdSize.BANNER, 1, autoRefill = false)
+        assertTrue(ShadowBannerLoader.loads.isEmpty())
+        assertTrue(events.none { it.format == AdFormat.BANNER })
+        checker.policy = AdPolicy()
+        AdMobAds.onPolicyChanged()
+        assertEquals(1, ShadowBannerLoader.loads.size)
+        assertEquals(AdEventName.LOAD, events.single { it.format == AdFormat.BANNER }.name)
     }
 
     @Test fun `pending quota does not reject retained selection while platform disable does`() {

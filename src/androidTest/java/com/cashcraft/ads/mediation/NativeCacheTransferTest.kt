@@ -304,7 +304,7 @@ class NativeCacheTransferTest : InstrumentationTestCase() {
         var failure: String? = null
         override fun loaded(ad: NativeAdHandle) { this.ad = ad; loaded.countDown() }
         override fun failed(reason: String, errorCode: String?) { failure = reason; loaded.countDown() }
-        override fun impression(adSource: String?, responseId: String?) { impression.countDown() }
+        override fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue?) { impression.countDown() }
         override fun clicked(adSource: String?, responseId: String?) = Unit
         override fun closed() = Unit
         override fun overlayOpened() = Unit

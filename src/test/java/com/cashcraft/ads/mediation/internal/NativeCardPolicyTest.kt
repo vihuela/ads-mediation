@@ -28,12 +28,13 @@ class NativeCardPolicyTest {
         assertEquals(0, h.availabilityCalls)
         assertTrue(h.loads.isEmpty())
         assertTrue(h.events.isEmpty())
+        assertEquals(listOf("position_disabled"), h.policy.skips)
         assertEquals(1, h.policy.completions)
         h.controller.destroy()
         assertEquals(1, h.policy.completions)
     }
 
-    @Test fun `changed policy during loading cancels delivery without SHOW_FAIL`() {
+    @Test fun `changed policy after opportunity cancels delivery with SHOW_FAIL`() {
         val h = Host().start()
         h.policy.initialBlock = AdBlockReason.GLOBAL_DISABLED
         h.controller.refresh()
@@ -43,7 +44,7 @@ class NativeCardPolicyTest {
         assertEquals(1, h.cancellations)
         assertEquals(0, h.renders)
         assertEquals(NativeState.Blocked(AdBlockReason.GLOBAL_DISABLED), h.controller.state)
-        assertTrue(h.events.none { it.name == AdEventName.SHOW_FAIL })
+        assertEquals(1, h.events.count { it.name == AdEventName.SHOW_FAIL })
         assertEquals(1, h.policy.completions)
     }
 
@@ -54,7 +55,7 @@ class NativeCardPolicyTest {
         assertTrue(h.loads.isEmpty())
         assertEquals(NativeState.Blocked(AdBlockReason.GLOBAL_DISABLED), h.controller.state)
         assertEquals(1, h.policy.completions)
-        assertTrue(h.events.none { it.name == AdEventName.SHOW_FAIL })
+        assertEquals(1, h.events.count { it.name == AdEventName.SHOW_FAIL })
     }
 
     @Test fun `daily quota exhausted by competing card prevents final bind`() {
@@ -68,7 +69,8 @@ class NativeCardPolicyTest {
         assertEquals(0, h.renders)
         assertEquals(1, h.policy.reservations)
         assertEquals(1, h.policy.completions)
-        assertTrue(h.events.none { it.name == AdEventName.SHOW_FAIL || it.name == AdEventName.IMPRESSION })
+        assertEquals(1, h.events.count { it.name == AdEventName.SHOW_FAIL })
+        assertTrue(h.events.none { it.name == AdEventName.IMPRESSION })
     }
 
     @Test fun `policy changing inside layout factory is checked again before final attachment`() {
@@ -87,6 +89,9 @@ class NativeCardPolicyTest {
         val ad = Ad()
         h.loads.single().loaded(ad)
         assertEquals(0, h.policy.impressions)
+        h.loads.single().paid(NativeRevenue(0, "USD", "network", "response", "exact"))
+        assertEquals(0, h.policy.impressions)
+        assertEquals(1, h.events.count { it.name == AdEventName.IMPRESSION })
         h.loads.single().impression("network", "response")
         h.loads.single().impression("network", "response")
         assertEquals(1, h.policy.impressions)
@@ -121,7 +126,7 @@ class NativeCardPolicyTest {
         assertEquals(1, ad.releases)
     }
 
-    @Test fun `platform disabled after selection cannot bind or emit SHOW_FAIL`() {
+    @Test fun `platform disabled after selection cannot bind and fails the existing opportunity`() {
         val h = Host().start()
         h.canBind = false
         val ad = Ad()
@@ -130,7 +135,7 @@ class NativeCardPolicyTest {
         assertEquals(1, ad.releases)
         assertEquals(0, h.policy.reservations)
         assertTrue(h.controller.state is NativeState.Failed)
-        assertTrue(h.events.none { it.name == AdEventName.SHOW_FAIL })
+        assertEquals(1, h.events.count { it.name == AdEventName.SHOW_FAIL })
     }
 
     @Test fun `new cycle keeps late actual exposure on the original policy attempt`() {
@@ -188,12 +193,24 @@ class NativeCardPolicyTest {
         assertTrue(h.events.none { it.name == AdEventName.CLICK })
     }
 
+    @Test fun `disabled platforms before opportunity skip once without position or failure`() {
+        val h = Host()
+        h.platformsEnabled = false
+        h.start()
+        repeat(4) { h.controller.refresh() }
+        assertEquals(listOf("platform_disabled"), h.policy.skips)
+        assertTrue(h.events.isEmpty())
+        assertTrue(h.loads.isEmpty())
+    }
+
     private class Policy : NativeCardPolicyAttempt {
         var initialBlock: AdBlockReason? = null
         var bindBlock: AdBlockReason? = null
         var reservations = 0
         var impressions = 0
         var clicks = 0
+        val skips = mutableListOf<String>()
+        override fun sceneSkipped(reason: String) { skips += reason }
         var completions = 0
         override val hasImpression get() = impressions > 0
         override fun check() = initialBlock
@@ -225,6 +242,7 @@ class NativeCardPolicyTest {
         var gate = NativeAvailability(ready = true)
         var canBind = true
         var privacy = true
+        var platformsEnabled = true
         var cancellations = 0
         var renders = 0
         var beforeBind: () -> Unit = {}
@@ -241,6 +259,7 @@ class NativeCardPolicyTest {
             removeView = {}, clock = { 0 }, dispatch = { it() }, interaction = { _, _ -> },
             onStateChanged = { onState(it) }, retentionPolicy = retention,
             policyAttemptFactory = { policy }, canBindAd = { canBind }, privacyAllowed = { privacy },
+            platformsEnabled = { platformsEnabled },
         )
         fun start(): Host { controller.update(true, true); return this }
     }

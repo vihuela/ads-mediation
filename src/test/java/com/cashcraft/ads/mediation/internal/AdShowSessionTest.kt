@@ -10,10 +10,132 @@ import com.cashcraft.ads.mediation.AdShowResult
 import com.cashcraft.ads.mediation.admob.AdMobState
 import com.cashcraft.ads.mediation.admob.showFailureReason
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class AdShowSessionTest {
+    @Test fun `full screen impression follows EasyLoanCalc callback matrix in either order`() {
+        for (platform in AdPlatform.entries) for (format in listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL, AdFormat.REWARDED)) {
+            for (paidFirst in listOf(false, true)) {
+                val events = mutableListOf<AdEvent>()
+                val session = AdShowSession(AdEventListener(events::add), platform, AdMediationMode.BIDDING,
+                    format, "original-position", "unit", "original-session", 1)
+                val onShow = platform == AdPlatform.TOPON && format == AdFormat.APP_OPEN
+                var confirmed = 0
+                session.onImpressionConfirmed = { confirmed++ }
+                if (paidFirst) {
+                    assertTrue(session.revenue(valueMicros = 2500, currency = "USD", precisionType = "PRECISE"))
+                    assertFalse(session.hasImpression)
+                    assertEquals(if (onShow) 0 else 1, events.count { it.name == AdEventName.IMPRESSION })
+                }
+                repeat(2) { session.impression("network", "response", 1250, "USD", "ESTIMATED") }
+                assertTrue(session.hasImpression)
+                assertEquals(1, confirmed)
+                assertEquals(if (onShow || paidFirst) 1 else 0, events.count { it.name == AdEventName.IMPRESSION })
+                session.emit(AdEventName.DISMISS)
+                session.attempt.complete()
+                if (!paidFirst) assertTrue(session.revenue(valueMicros = 2500, currency = "USD", precisionType = "PRECISE"))
+                assertFalse(session.revenue(valueMicros = 2500, currency = "USD"))
+                val impression = events.single { it.name == AdEventName.IMPRESSION }
+                assertEquals(if (onShow) 1250L else 2500L, impression.valueMicros)
+                assertEquals(if (onShow) "ESTIMATED" else "PRECISE", impression.analyticsParameters()["precision_type"])
+                assertEquals("original-session", impression.sessionId)
+                assertEquals("original-position", impression.position)
+                assertTrue(events.none { it.name == AdEventName.SHOW_FAIL })
+            }
+        }
+    }
+
+    @Test fun `TopOn splash still reports exposure when revenue is unknown and never fills fake zero`() {
+        val events = mutableListOf<AdEvent>()
+        val session = AdShowSession(AdEventListener(events::add), AdPlatform.TOPON, AdMediationMode.TOPON,
+            AdFormat.APP_OPEN, "open", "unit", "session", 1)
+        session.impression("network", "response")
+        assertFalse(events.single { it.name == AdEventName.IMPRESSION }.analyticsParameters().containsKey("revenue_amount"))
+        assertTrue(session.revenue(valueMicros = 0, currency = "USD"))
+        assertEquals(1, events.count { it.name == AdEventName.IMPRESSION })
+    }
+
+    @Test fun `legacy native show session still announces its original position on creation`() {
+        val events = mutableListOf<AdEvent>()
+        val session = AdShowSession(AdEventListener(events::add), AdPlatform.ADMOB,
+            AdMediationMode.ADMOB, AdFormat.NATIVE, "native_position", "unit", "legacy-id", 1)
+        assertEquals(listOf(AdEventName.POSITION), events.map { it.name })
+        session.impression("source", "response")
+        session.revenue(valueMicros = 1250, currency = "USD")
+        session.emit(AdEventName.DISMISS)
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION, AdEventName.DISMISS),
+            events.map { it.name })
+        assertEquals(setOf("legacy-id"), events.map { it.sessionId }.toSet())
+    }
+
+    @Test fun `valid ILRD may precede impression and stays on the same session`() {
+        val events = mutableListOf<AdEvent>()
+        val session = session(events)
+        session.revenue(valueMicros = 1250, currency = "USD")
+        session.impression("source", "response")
+        session.revenue(valueMicros = 1250, currency = "USD")
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION), events.map { it.name })
+        assertEquals(setOf("session-1"), events.map { it.sessionId }.toSet())
+    }
+
+    @Test fun `constructing a full screen session does not publish an opportunity`() {
+        for (format in listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL, AdFormat.REWARDED)) {
+            val events = mutableListOf<AdEvent>()
+            val session = AdShowSession(AdEventListener(events::add), AdPlatform.ADMOB,
+                AdMediationMode.ADMOB, format, "  original position  ", "unit", "internal-id", 1)
+            assertEquals(emptyList<AdEvent>(), events)
+            session.showFailure("no_preloaded_ad")
+            session.showFailure("duplicate")
+            assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
+            assertEquals("  original position  ", events.first().position)
+            assertEquals(events.first().sessionId, events.last().sessionId)
+        }
+    }
+
+    @Test fun `real paid reward and close callbacks are once per original exposed session`() {
+        val events = mutableListOf<AdEvent>()
+        val session = session(events)
+        session.impression("source", "response")
+        session.emit(AdEventName.DISMISS)
+        session.emit(AdEventName.DISMISS)
+        session.attempt.complete()
+        repeat(2) {
+            session.emit(AdEventName.REWARD)
+            session.revenue(valueMicros = 0, currency = "USD")
+        }
+        session.showFailure("late_sdk_error")
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.DISMISS,
+            AdEventName.REWARD, AdEventName.IMPRESSION), events.map { it.name })
+        assertEquals(setOf("session-1"), events.map { it.sessionId }.toSet())
+    }
+
+    @Test fun `unexposed close produces failure and invalid paid does not consume deduplication`() {
+        val events = mutableListOf<AdEvent>()
+        val session = session(events)
+        session.emit(AdEventName.DISMISS)
+        session.emit(AdEventName.DISMISS)
+        session.emit(AdEventName.REWARD)
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
+        session.revenue(valueMicros = -1, currency = "USD")
+        session.revenue(valueMicros = 1, currency = "")
+        session.revenue(valueMicros = 1, currency = "USD")
+        assertEquals(1, events.count { it.name == AdEventName.IMPRESSION })
+    }
+
+    @Test fun `load failure uses structured result and never SDK error prose`() {
+        val events = mutableListOf<AdEvent>()
+        val load = AdLoadSession(AdEventListener(events::add), AdPlatform.ADMOB,
+            AdMediationMode.ADMOB, AdFormat.INTERSTITIAL, "preload", "unit", "load", "load", 1,
+            1, 0, AdLoadClock { 10 })
+        load.request()
+        load.failed("no_fill", "NO_FILL", "SDK error body", null)
+        load.loaded(null, null)
+        assertEquals(listOf(AdEventName.LOAD, AdEventName.LOAD_FAIL), events.map { it.name })
+        assertEquals("no_fill", events.last().reason)
+    }
+
     @Test
     fun `scene impression callback runs once only after real impression`() {
         val events = mutableListOf<AdEvent>()
@@ -26,7 +148,7 @@ class AdShowSessionTest {
         session.impression("Google", "response")
         session.impression("Google", "duplicate")
         assertEquals(1, impressions)
-        assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION), events.map(AdEvent::name))
+        assertEquals(listOf(AdEventName.POSITION), events.map(AdEvent::name))
         assertEquals(null, session.onImpressionConfirmed)
     }
 
@@ -48,6 +170,7 @@ class AdShowSessionTest {
         val session = session(events)
         session.onImpressionConfirmed = { error("logger failed") }
         session.impression("Google", "response")
+        session.revenue(valueMicros = 1250, currency = "USD")
         assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION), events.map(AdEvent::name))
     }
 
@@ -74,7 +197,7 @@ class AdShowSessionTest {
         loadSession.failed("error", "LATE", "late failure", null)
 
         assertEquals(
-            listOf(AdEventName.LOAD_REQUEST, AdEventName.LOAD_RESULT),
+            listOf(AdEventName.LOAD, AdEventName.LOADED),
             events.map(AdEvent::name),
         )
         assertEquals("load-request-1", events.last().requestId)
@@ -89,7 +212,7 @@ class AdShowSessionTest {
     }
 
     @Test
-    fun `impression is the only terminal event for an exposed position`() {
+    fun `physical exposure completes the position without fabricating revenue or a failure`() {
         val events = mutableListOf<AdEvent>()
         val session = session(events)
 
@@ -97,7 +220,7 @@ class AdShowSessionTest {
         session.showFailure("late_failure")
 
         assertEquals(
-            listOf(AdEventName.POSITION, AdEventName.IMPRESSION),
+            listOf(AdEventName.POSITION),
             events.map(AdEvent::name),
         )
         assertEquals(events.first().sessionId, events.last().sessionId)
@@ -145,7 +268,7 @@ class AdShowSessionTest {
 
         assertEquals(AdShowResult.Dismissed, result)
         assertEquals(
-            listOf(AdEventName.POSITION, AdEventName.IMPRESSION),
+            listOf(AdEventName.POSITION),
             events.map(AdEvent::name),
         )
     }
@@ -191,6 +314,7 @@ class AdShowSessionTest {
             ),
         )
         session.impression("Mintegral", "response")
+        session.revenue(valueMicros = 1250, currency = "USD")
 
         assertEquals(
             listOf(AdEventName.POSITION, AdEventName.BID_RESULT, AdEventName.IMPRESSION),
@@ -198,12 +322,12 @@ class AdShowSessionTest {
         )
         val bid = events[1]
         assertEquals(events.first().sessionId, bid.sessionId)
-        assertEquals("topon", bid.analyticsParameters()["winner_platform"])
-        assertEquals(true, bid.analyticsParameters()["admob_available"])
-        assertEquals(true, bid.analyticsParameters()["admob_price_available"])
-        assertEquals(true, bid.analyticsParameters()["topon_price_available"])
-        assertEquals(0.002, bid.analyticsParameters()["winning_value"])
-        assertEquals("bidding", bid.analyticsParameters()["mediation_mode"])
+        assertEquals(AdPlatform.TOPON, bid.winnerPlatform)
+        assertEquals(true, bid.admobAvailable)
+        assertEquals(true, bid.admobPriceAvailable)
+        assertEquals(true, bid.topOnPriceAvailable)
+        assertEquals(0.002, bid.winningValue)
+        assertEquals(AdMediationMode.BIDDING, bid.mediationMode)
     }
 
     @Test
@@ -230,9 +354,9 @@ class AdShowSessionTest {
             events.map(AdEvent::name),
         )
         assertEquals("no_candidate", events[1].result)
-        assertEquals("none", events[1].analyticsParameters()["winner_platform"])
-        assertEquals(false, events[1].analyticsParameters()["admob_price_available"])
-        assertEquals(false, events[1].analyticsParameters()["topon_price_available"])
+        assertEquals(null, events[1].winnerPlatform)
+        assertEquals(false, events[1].admobPriceAvailable)
+        assertEquals(false, events[1].topOnPriceAvailable)
     }
 
     @Test
@@ -253,12 +377,13 @@ class AdShowSessionTest {
             ),
         )
 
-        val parameters = events.last().analyticsParameters()
-        assertEquals(false, parameters["admob_price_available"])
-        assertEquals(true, parameters["topon_price_available"])
-        assertFalse(parameters.containsKey("admob_value"))
-        assertEquals(0.0, parameters["topon_value"])
-        assertEquals(0.0, parameters["winning_value"])
+        val bid = events.last()
+        assertEquals(false, bid.admobPriceAvailable)
+        assertEquals(true, bid.topOnPriceAvailable)
+        assertEquals(null, bid.admobValue)
+        assertEquals(0.0, bid.topOnValue)
+        assertEquals(0.0, bid.winningValue)
+        assertTrue(bid.analyticsParameters().isEmpty())
     }
 
     @Test
@@ -308,12 +433,18 @@ class AdShowSessionTest {
         val admobEvents = mutableListOf<AdEvent>()
         val topOnEvents = mutableListOf<AdEvent>()
 
-        session(admobEvents).impression("Google", "admob-response")
+        session(admobEvents).apply {
+            impression("Google", "admob-response")
+            revenue(valueMicros = 1250, currency = "USD")
+        }
         session(
             events = topOnEvents,
             platform = AdPlatform.TOPON,
             mediationMode = AdMediationMode.TOPON,
-        ).impression("Mintegral", "topon-response")
+        ).apply {
+            impression("Mintegral", "topon-response")
+            revenue(valueMicros = 1250, currency = "USD")
+        }
 
         assertEquals(
             listOf(AdEventName.POSITION, AdEventName.IMPRESSION),
@@ -341,5 +472,5 @@ class AdShowSessionTest {
         adUnitId = "test-unit",
         sessionId = "session-1",
         number = 7L,
-    )
+    ).also { it.admit() }
 }

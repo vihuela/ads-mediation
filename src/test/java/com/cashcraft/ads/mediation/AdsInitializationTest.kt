@@ -327,7 +327,7 @@ class AdsInitializationTest {
         assertEquals(List(3) { AdShowResult.Failed("ad_format_disabled") }, results)
         assertEquals(List(2) { AdShowResult.Failed("ad_format_disabled") }, rewardedResults.map { it.showResult })
         assertTrue(rewardedResults.none { it.rewardEarned })
-        assertTrue(events.none { it.name == AdEventName.LOAD_REQUEST })
+        assertTrue(events.none { it.name == AdEventName.LOAD })
         assertEquals(AdsState.INITIALIZING, Ads.state)
         for (format in listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL, AdFormat.REWARDED)) {
             assertFalse(Ads.isReady(format))

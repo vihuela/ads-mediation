@@ -12,7 +12,7 @@ import org.junit.Test
 
 class BannerEventTest {
     @Test
-    fun `slot enters once while refresh and displays retain separate identities`() {
+    fun `同一页面只报一次位置且每条广告携带独立序号`() {
         val events = mutableListOf<AdEvent>()
         val slot = BannerSlot(
             listener = AdEventListener(events::add),
@@ -25,9 +25,9 @@ class BannerEventTest {
         )
 
         val first = checkNotNull(slot.newDisplay("response-1", requestId = "request-1"))
+        first.impression()
+        first.impression()
         val second = checkNotNull(slot.newDisplay("response-2"))
-        first.impression()
-        first.impression()
         second.refreshSucceeded()
         second.impression()
 
@@ -35,12 +35,35 @@ class BannerEventTest {
             listOf(AdEventName.POSITION, AdEventName.IMPRESSION, AdEventName.BANNER_REFRESH, AdEventName.IMPRESSION),
             events.map(AdEvent::name),
         )
-        assertEquals(listOf("slot-1", first.sessionId, second.sessionId, second.sessionId), events.map(AdEvent::sessionId))
-        assertEquals(listOf("slot-1", "slot-1", "slot-1", "slot-1"), events.map(AdEvent::slotId))
-        assertEquals(listOf(4L, 4L, 4L, 4L), events.map(AdEvent::number))
+        assertEquals(listOf(first.sessionId, first.sessionId, second.sessionId, second.sessionId), events.map(AdEvent::sessionId))
+        assertEquals(List(4) { "slot-1" }, events.map(AdEvent::slotId))
+        assertEquals(List(4) { 4L }, events.map(AdEvent::number))
+        val impressions = events.filter { it.name == AdEventName.IMPRESSION }
+        assertEquals(listOf(1L, 2L), impressions.map { it.analyticsParameters()["refresh_index"] })
+        assertEquals(listOf("slot-1", "slot-1"), impressions.map { it.analyticsParameters()["ad_session_id"] })
         assertEquals("BA_Home_bottom", events.last().position)
         assertEquals("request-1", events[1].requestId)
         assertEquals(null, events.last().requestId)
+    }
+
+    @Test
+    fun `并行 Banner 与宿主重载的页面身份及广告序号独立`() {
+        val events = mutableListOf<AdEvent>()
+        fun slot(id: String) = BannerSlot(
+            AdEventListener(events::add), AdPlatform.TOPON, AdMediationMode.TOPON,
+            "same-position", "same-unit", id, 1L,
+        )
+        val first = slot("page-a")
+        val second = slot("page-b")
+        checkNotNull(first.newDisplay("response-a")).impression()
+        checkNotNull(second.newDisplay("response-b")).impression()
+        first.prepareForLoad()
+        checkNotNull(first.newDisplay("response-a-next")).impression()
+        val positions = events.filter { it.name == AdEventName.POSITION }
+        assertEquals(listOf("page-a", "page-b"), positions.map { it.analyticsParameters()["ad_session_id"] })
+        val impressions = events.filter { it.name == AdEventName.IMPRESSION }
+        assertEquals(listOf("page-a", "page-b", "page-a"), impressions.map { it.analyticsParameters()["ad_session_id"] })
+        assertEquals(listOf(1L, 1L, 2L), impressions.map { it.analyticsParameters()["refresh_index"] })
     }
 
     @Test
@@ -66,7 +89,7 @@ class BannerEventTest {
         load.failed("no_fill", "NO_FILL", "empty", null)
         load.loaded("late", "response-1")
 
-        assertEquals(listOf(AdEventName.LOAD_REQUEST, AdEventName.LOAD_RESULT), events.map(AdEvent::name))
+        assertEquals(listOf(AdEventName.LOAD, AdEventName.LOAD_FAIL), events.map(AdEvent::name))
         assertEquals("no_fill", events.last().result)
         assertEquals(25L, events.last().latencyMillis)
         events.forEach { event ->

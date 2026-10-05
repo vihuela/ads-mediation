@@ -24,7 +24,7 @@ class AppOpenLogTest {
         assertTrue(shown.first().contains("实际来源=AdMob"))
         assertTrue(shown.last().contains("unit=topon-placement resp=show-id"))
         val loaded = event.copy(
-            name = AdEventName.LOAD_RESULT, sessionId = "full-load-session",
+            name = AdEventName.LOADED, sessionId = "full-load-session",
             result = "filled", adSource = "AdMob", requestId = "library-request",
             responseId = "sdk-request", latencyMillis = 150, bufferSize = 1,
         ).appOpenLogLines()
@@ -70,7 +70,7 @@ class AppOpenLogTest {
         assertTrue(failed.first().contains("等待广告超时"))
         assertFalse(failed.first().contains("wait_timeout"))
         assertTrue(failed.last().contains("code=123 reason=wait_timeout"))
-        val paid = event.copy(name = AdEventName.PAID, valueMicros = Long.MAX_VALUE,
+        val paid = event.copy(name = AdEventName.IMPRESSION, valueMicros = Long.MAX_VALUE,
             value = Long.MAX_VALUE / 1_000_000.0, currency = "USD").appOpenLogLines()
         assertTrue(paid.first().contains("9223372036854.775807 USD"))
         assertTrue(paid[1].contains("micros=${Long.MAX_VALUE}"))

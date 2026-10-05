@@ -150,6 +150,7 @@ private class AdMobNativeAdHandle(
     override val expiresAtMillis: Long = SystemClock.elapsedRealtime() + NATIVE_AD_MAX_AGE_MILLIS,
 ) : NativeAdHandle {
     private val destroyed = AtomicBoolean(false)
+    @Volatile private var paidListener = listener
     private var nativeAdView: NativeAdView? = null
     private var removeMediaSizeListener: (() -> Unit)? = null
 
@@ -185,7 +186,7 @@ private class AdMobNativeAdHandle(
         assets.mediaType == NativeMediaType.IMAGE && !nativeAd.mediaContent.hasVideoContent &&
         responseInfo.adapterClassName == "com.google.ads.mediation.admob.AdMobAdapter"
     override fun resumeAfterRetention(): Boolean = pauseForRetention()
-    override fun setCallbacks(callbacks: NativeCallbacks?) { this.listener = callbacks }
+    override fun setCallbacks(callbacks: NativeCallbacks?) { this.listener = callbacks; paidListener = callbacks }
 
     init {
         nativeAd.adEventCallback = object : NativeAdEventCallback {
@@ -202,24 +203,7 @@ private class AdMobNativeAdHandle(
             }
 
             override fun onAdPaid(value: AdValue) {
-                val valueMicros = value.valueMicros
-                val currencyCode = value.currencyCode
-                    ?.trim()
-                    ?.uppercase(Locale.ROOT)
-                    .orEmpty()
-
-                val sourceInfo = responseInfo.loadedAdSourceResponseInfo
-                listener?.paid(
-                    NativeRevenue(
-                        valueMicros = valueMicros,
-                        currencyCode = currencyCode,
-                        adSource = sourceInfo?.name,
-                        responseId = responseInfo.responseId,
-                        precisionType = value.precisionType.name,
-                        mediationAdapterClassName = sourceInfo?.adapterClassName
-                            ?: responseInfo.adapterClassName,
-                    ),
-                )
+                paidListener?.paid(responseInfo.nativeRevenue(value))
             }
 
             override fun onAdShowedFullScreenContent() {
@@ -335,7 +319,8 @@ private class AdMobNativeAdHandle(
         if (!destroyed.compareAndSet(false, true)) return
         removeMediaSizeListener?.invoke()
         removeMediaSizeListener = null
-        runCatching { nativeAd.adEventCallback = null }
+        // UI callbacks become inert; keep the original paid delivery for late SDK payments.
+        listener = null
         val view = nativeAdView
         nativeAdView = null
         runCatching { view?.destroy() }
@@ -373,3 +358,15 @@ internal fun adMobNativeMediaType(hasVideo: Boolean, hasMainImage: Boolean): Nat
 }
 
 private const val NATIVE_AD_MAX_AGE_MILLIS = 3_600_000L
+
+private fun ResponseInfo.nativeRevenue(value: AdValue): NativeRevenue {
+    val source = loadedAdSourceResponseInfo
+    return NativeRevenue(
+        valueMicros = value.valueMicros,
+        currencyCode = value.currencyCode?.trim()?.uppercase(Locale.ROOT).orEmpty(),
+        adSource = source?.name,
+        responseId = responseId,
+        precisionType = value.precisionType.name,
+        mediationAdapterClassName = source?.adapterClassName ?: adapterClassName,
+    )
+}

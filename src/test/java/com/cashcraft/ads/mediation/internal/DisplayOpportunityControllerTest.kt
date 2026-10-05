@@ -854,6 +854,7 @@ class DisplayOpportunityControllerTest {
                 attempt = attempt,
                 onCreated = controller::sessionStarted,
             )
+            session.admit()
             session.bidResult(AdBidEventData(AdPlatform.ADMOB, true, false, null, null, null, "a", "t"))
             beforeCommit()
             val failure = attempt.failureReason() ?: FullScreenShowGate.commit(attempt)

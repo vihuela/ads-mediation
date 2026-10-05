@@ -417,13 +417,19 @@ internal object TopOnAds {
         if (config.isFormatEnabled(AdFormat.INTERSTITIAL)) {
             interstitialAd = TUInterstitial(application, config.ids.interstitialPlacementId).apply {
                 setAdListener(interstitialListener)
-                setAdRevenueListener { info -> onMain { revenuePaid(activeInterstitial?.session, info) } }
+                setAdRevenueListener { info ->
+                    val captured = activeInterstitial?.session
+                    onMain { revenuePaid(captured, info) }
+                }
             }
         }
         if (config.isFormatEnabled(AdFormat.REWARDED)) {
             rewardedAd = TURewardVideoAd(application, config.ids.rewardedPlacementId).apply {
                 setAdListener(rewardedListener)
-                setAdRevenueListener { info -> onMain { revenuePaid(activeRewarded?.session, info) } }
+                setAdRevenueListener { info ->
+                    val captured = activeRewarded?.session
+                    onMain { revenuePaid(captured, info) }
+                }
             }
         }
         if (config.isFormatEnabled(AdFormat.APP_OPEN)) {
@@ -433,7 +439,10 @@ internal object TopOnAds {
                 splashListener,
                 SPLASH_LOAD_TIMEOUT_MILLIS,
             ).apply {
-                setAdRevenueListener { info -> onMain { revenuePaid(activeAppOpen?.session, info) } }
+                setAdRevenueListener { info ->
+                    val captured = activeAppOpen?.session
+                    onMain { revenuePaid(captured, info) }
+                }
             }
         }
     }
@@ -457,20 +466,21 @@ internal object TopOnAds {
         ) return
         if (state != TopOnState.READY || appOpenLoading || (!afterShow && appOpenAd.isAdReady)) return
         appOpenLoading = true
-        appOpenLoadSession = events.beginLoad(
+        appOpenLoadSession = events.createLoad(
             AdFormat.APP_OPEN,
             config.ids.appOpenPlacementId,
             TOPON_BUFFER_SIZE,
         )
-        // beginLoad invokes host listeners, which can synchronously change policy.
+        // Final policy check before the actual SDK call; allocation publishes no host event.
         if (!Ads.canLoadAds(AdPlatform.TOPON)) {
             appOpenLoading = false
             return
         }
-        runCatching(appOpenAd::loadAd).onFailure { error ->
+        val loadSession = appOpenLoadSession ?: return
+        runCatching { loadSession.invokeLoad(appOpenAd::loadAd) }.onFailure { error ->
             appOpenLoading = false
             recordLoadFailure(AdFormat.APP_OPEN)
-            appOpenLoadSession?.failed("error", "exception", error.message, null)
+            loadSession.failed("error", "exception", error.message, null)
         }
     }
 
@@ -481,7 +491,7 @@ internal object TopOnAds {
         ) return
         if (state != TopOnState.READY || interstitialLoading || (!afterShow && interstitialAd.isAdReady)) return
         interstitialLoading = true
-        interstitialLoadSession = events.beginLoad(
+        interstitialLoadSession = events.createLoad(
             AdFormat.INTERSTITIAL,
             config.ids.interstitialPlacementId,
             TOPON_BUFFER_SIZE,
@@ -490,10 +500,11 @@ internal object TopOnAds {
             interstitialLoading = false
             return
         }
-        runCatching(interstitialAd::load).onFailure { error ->
+        val loadSession = interstitialLoadSession ?: return
+        runCatching { loadSession.invokeLoad(interstitialAd::load) }.onFailure { error ->
             interstitialLoading = false
             recordLoadFailure(AdFormat.INTERSTITIAL)
-            interstitialLoadSession?.failed("error", "exception", error.message, null)
+            loadSession.failed("error", "exception", error.message, null)
         }
     }
 
@@ -504,7 +515,7 @@ internal object TopOnAds {
         ) return
         if (state != TopOnState.READY || rewardedLoading || (!afterShow && rewardedAd.isAdReady)) return
         rewardedLoading = true
-        rewardedLoadSession = events.beginLoad(
+        rewardedLoadSession = events.createLoad(
             AdFormat.REWARDED,
             config.ids.rewardedPlacementId,
             TOPON_BUFFER_SIZE,
@@ -513,10 +524,11 @@ internal object TopOnAds {
             rewardedLoading = false
             return
         }
-        runCatching(rewardedAd::load).onFailure { error ->
+        val loadSession = rewardedLoadSession ?: return
+        runCatching { loadSession.invokeLoad(rewardedAd::load) }.onFailure { error ->
             rewardedLoading = false
             recordLoadFailure(AdFormat.REWARDED)
-            rewardedLoadSession?.failed("error", "exception", error.message, null)
+            loadSession.failed("error", "exception", error.message, null)
         }
     }
 
@@ -643,19 +655,15 @@ internal object TopOnAds {
         override fun onReward(info: TUAdInfo) {
             val captured = activeRewarded
             onMain {
-                if (!canAcceptShowCallback(
-                        captured?.session,
-                        activeRewarded?.session,
-                        info.showId,
-                    )
-                ) return@onMain
-                captured?.let { active ->
-                    active.rewardEarned = true
-                    active.session.emit(
-                        AdEventName.REWARD_EARNED,
-                        reason = "${info.scenarioRewardName}:${info.scenarioRewardNumber}",
-                    )
-                }
+                // A real reward may arrive after close or while another rewarded ad owns the provider.
+                val original = info.showId?.trim()?.let(revenueSessionsByImpressionId::get)
+                val session = original ?: captured?.session?.takeIf {
+                    canAcceptShowCallback(it, activeRewarded?.session, info.showId)
+                } ?: return@onMain
+                if (session.format != AdFormat.REWARDED) return@onMain
+                if (captured?.session === session) captured.rewardEarned = true
+                session.emit(AdEventName.REWARD,
+                    reason = "${info.scenarioRewardName}:${info.scenarioRewardNumber}")
             }
         }
 
@@ -711,7 +719,10 @@ internal object TopOnAds {
                 captured?.session?.let { session ->
                     rememberShowSession(info.showId, session)
                     rememberRevenueSession(info.showId, session)
-                    session.impression(info.networkName, info.showId)
+                    session.impression(info.networkName, info.showId,
+                        valueMicros = info.getPublisherRevenue(TUAdConst.CURRENCY.USD)
+                            ?.takeIf { it.isFinite() && it >= 0 }?.toMicrosOrNull(),
+                        currency = USD_CURRENCY_CODE, precisionType = info.ecpmPrecision)
                     if (!captured.refillStarted) {
                         captured.refillStarted = true
                         loadAppOpen(afterShow = true)
@@ -841,7 +852,7 @@ internal object TopOnAds {
         }
         runCatching { appOpenAd.show(activity, container) }.onFailure { error ->
             if (activeAppOpen?.session === session) {
-                finishAppOpenFailed("show_exception", error.javaClass.simpleName, error)
+                finishAppOpenFailed("show_exception", error.javaClass.simpleName, error, eventReason = "exception")
             }
         }
         mainHandler.postDelayed(
@@ -881,7 +892,7 @@ internal object TopOnAds {
         activeInterstitial = ActiveShow(session, onResult)
         runCatching { interstitialAd.show(activity) }.onFailure { error ->
             if (activeInterstitial?.session === session) {
-                finishInterstitialFailed(error.message ?: "show_exception", "exception")
+                finishInterstitialFailed(error.message ?: "show_exception", "exception", eventReason = "exception")
             }
         }
     }
@@ -916,7 +927,7 @@ internal object TopOnAds {
         activeRewarded = ActiveRewardedShow(session, onResult)
         runCatching { rewardedAd.show(activity) }.onFailure { error ->
             if (activeRewarded?.session === session) {
-                finishRewardedFailed(error.message ?: "show_exception", "exception")
+                finishRewardedFailed(error.message ?: "show_exception", "exception", eventReason = "exception")
             }
         }
     }
@@ -943,6 +954,7 @@ internal object TopOnAds {
             failBeforeShow(session, reason, onResult)
             return false
         }
+        session.admit()
         return true
     }
 
@@ -994,13 +1006,13 @@ internal object TopOnAds {
     }
 
     private fun finishInterstitialFailed(error: AdError) =
-        finishInterstitialFailed(error.desc.ifBlank { "show_failed" }, error.code)
+        finishInterstitialFailed(error.desc.ifBlank { "show_failed" }, error.code, eventReason = "ad_error")
 
-    private fun finishInterstitialFailed(reason: String, errorCode: String?) {
+    private fun finishInterstitialFailed(reason: String, errorCode: String?, eventReason: String = reason) {
         val active = activeInterstitial ?: return
         if (!active.session.attempt.complete()) return
         activeInterstitial = null
-        finishFailed(active, reason, errorCode)
+        finishFailed(active, reason, errorCode, eventReason = eventReason)
         loadInterstitial()
     }
 
@@ -1017,13 +1029,13 @@ internal object TopOnAds {
     }
 
     private fun finishRewardedFailed(error: AdError) =
-        finishRewardedFailed(error.desc.ifBlank { "show_failed" }, error.code)
+        finishRewardedFailed(error.desc.ifBlank { "show_failed" }, error.code, eventReason = "ad_error")
 
-    private fun finishRewardedFailed(reason: String, errorCode: String?) {
+    private fun finishRewardedFailed(reason: String, errorCode: String?, eventReason: String = reason) {
         val active = activeRewarded ?: return
         if (!active.session.attempt.complete()) return
         activeRewarded = null
-        active.session.showFailure(reason, errorCode)
+        active.session.showFailure(eventReason, errorCode)
         runCatching {
             active.onResult(
                 AdRewardResult(
@@ -1045,12 +1057,12 @@ internal object TopOnAds {
         loadAppOpen()
     }
 
-    private fun finishAppOpenFailed(reason: String, errorCode: String?, cause: Throwable? = null) {
+    private fun finishAppOpenFailed(reason: String, errorCode: String?, cause: Throwable? = null, eventReason: String = reason) {
         val active = activeAppOpen ?: return
         if (!active.session.attempt.complete()) return
         activeAppOpen = null
         removeSplashContainer()
-        finishFailed(active, reason, errorCode, cause)
+        finishFailed(active, reason, errorCode, cause, eventReason)
         loadAppOpen()
     }
 
@@ -1065,8 +1077,9 @@ internal object TopOnAds {
         reason: String,
         errorCode: String?,
         cause: Throwable? = null,
+        eventReason: String = reason,
     ) {
-        active.session.showFailure(reason, errorCode, cause)
+        active.session.showFailure(eventReason, errorCode, cause)
         runCatching { active.onResult(AdShowResult.Failed(reason)) }
     }
 
@@ -1107,24 +1120,33 @@ internal object TopOnAds {
         }
     }
 
+    private val pendingRevenueByImpressionId = linkedMapOf<String, TUAdInfo>()
+
     private fun revenuePaid(session: AdShowSession?, info: TUAdInfo) {
         val impressionId = info.showId?.trim()?.takeIf(String::isNotEmpty)
         val revenue = info.getPublisherRevenue(TUAdConst.CURRENCY.USD)
             ?.takeIf { it.isFinite() && it >= 0.0 }
             ?: return
         val valueMicros = revenue.toMicrosOrNull() ?: return
-        val revenueSession = impressionId
-            ?.let(revenueSessionsByImpressionId::remove)
-            ?: session
-            ?: return
+        val revenueSession = if (impressionId != null) {
+            revenueSessionsByImpressionId[impressionId] ?: run {
+                // A known old identity evicted from the retained window must not bind to a new ad.
+                if (showSessionsByImpressionId.containsKey(impressionId)) return
+                pendingRevenueByImpressionId.putIfAbsent(impressionId, info)
+                while (pendingRevenueByImpressionId.size > MAX_PENDING_REVENUE_SESSIONS) {
+                    pendingRevenueByImpressionId.remove(pendingRevenueByImpressionId.keys.first())
+                }
+                return
+            }
+        } else session ?: return
         val adNetwork = info.networkName?.trim()?.takeIf(String::isNotEmpty)
         val precisionType = info.ecpmPrecision?.trim()?.takeIf(String::isNotEmpty)
-        revenueSession.paid(
+        if (!revenueSession.paid(
             info = info,
             revenue = revenue,
             valueMicros = valueMicros,
             currencyCode = USD_CURRENCY_CODE,
-        )
+        )) return
         // Preserve the complete TUAdInfo object because Tenjin's TopOn endpoint reflects over it.
         runCatching {
             commonConfig.revenueListener.onRevenuePaid(
@@ -1152,9 +1174,7 @@ internal object TopOnAds {
         revenue: Double,
         valueMicros: Long,
         currencyCode: String,
-    ) {
-        emit(
-            AdEventName.PAID,
+    ): Boolean = revenue(
             adSource = info.networkName,
             responseId = info.showId,
             value = revenue,
@@ -1162,11 +1182,11 @@ internal object TopOnAds {
             currency = currencyCode,
             precisionType = info.ecpmPrecision,
         )
-    }
 
     private fun rememberRevenueSession(impressionId: String?, session: AdShowSession) {
         val normalizedId = impressionId?.trim()?.takeIf(String::isNotEmpty) ?: return
         revenueSessionsByImpressionId[normalizedId] = session
+        pendingRevenueByImpressionId.remove(normalizedId)?.let { revenuePaid(session, it) }
         while (revenueSessionsByImpressionId.size > MAX_PENDING_REVENUE_SESSIONS) {
             val oldestId = revenueSessionsByImpressionId.entries.firstOrNull()?.key ?: break
             revenueSessionsByImpressionId.remove(oldestId)

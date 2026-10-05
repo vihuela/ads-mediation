@@ -2,114 +2,148 @@ package com.cashcraft.ads.mediation
 
 import com.cashcraft.ads.mediation.internal.formatAdEventLogMessage
 import com.cashcraft.ads.mediation.internal.formatNativeDebugLogMessage
-import org.junit.Assert.assertTrue
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
+import org.junit.Assert.*
 import org.junit.Test
 
 class AdEventTest {
-    @Test
-    fun `loading omits position from analytics and every log format while display keeps it`() {
-        for (format in AdFormat.entries) {
-            for (name in AdEventName.entries) {
-                val event = AdEvent(name, AdPlatform.TOPON, format, "business-position",
-                    "load-session", "unit", 1L, requestId = "load-request")
-                val loading = name == AdEventName.LOAD_REQUEST || name == AdEventName.LOAD_RESULT
-                val parameters = event.analyticsParameters()
-                assertEquals(!loading, parameters.containsKey("position"))
+    private fun event(name: AdEventName = AdEventName.IMPRESSION, format: AdFormat = AdFormat.INTERSTITIAL) =
+        AdEvent(name, AdPlatform.ADMOB, format, "business-position", "display-1", "unit", 1,
+            requestId = "load-1", latencyMillis = 25, valueMicros = 1_250, currency = "USD",
+            adSource = "Google", slotId = "slot-1", responseId = "diagnostic")
+
+    @Test fun `public load and reward names are v2 at their source`() {
+        assertEquals(listOf("ad_load", "ad_loaded", "ad_load_fail", "ad_reward"),
+            listOf(AdEventName.LOAD, AdEventName.LOADED, AdEventName.LOAD_FAIL, AdEventName.REWARD).map { it.analyticsName })
+    }
+
+    @Test fun `all formats serialize v2 with independent load and display identities`() {
+        for (format in AdFormat.entries) for (name in AdEventName.entries) {
+            val ad = event(name, format).copy(reason = "platform_disabled")
+            val parameters = ad.analyticsParameters()
+            val unsupported = name in setOf(AdEventName.BID_RESULT, AdEventName.BANNER_REFRESH) ||
+                (name == AdEventName.DISMISS && format == AdFormat.BANNER) ||
+                (name == AdEventName.REWARD && format != AdFormat.REWARDED)
+            if (unsupported) { assertTrue(parameters.isEmpty()); continue }
+            assertEquals(format.analyticsValue, parameters["ad_type"])
+            for (key in listOf("position", "session_id", "slot_id", "number", "response_id", "result",
+                "platform_known", "value", "value_micros", "buffer_size", "tracking_plan_version")) {
+                assertFalse("$name must not expose $key", parameters.containsKey(key))
+            }
+            if (ad.isLoadEvent) {
+                assertEquals("load-1", parameters["request_id"])
                 assertFalse(parameters.containsKey("position_id"))
-                assertEquals("load-request", parameters["request_id"])
-                assertEquals(format.analyticsValue, parameters["ad_type"])
-                val log = when (format) {
-                    AdFormat.APP_OPEN -> event.appOpenLogLines().joinToString("\n")
-                    AdFormat.NATIVE -> formatNativeDebugLogMessage(event)
-                    else -> formatAdEventLogMessage(event)
-                }
-                assertEquals(!loading, log.contains("business-position"))
-                if (loading) {
-                    assertFalse(log.contains("position="))
-                    assertFalse(log.contains("pos="))
-                    assertTrue(log.contains("load-request"))
-                } else {
-                    assertEquals("business-position", parameters["position"])
+                assertFalse(parameters.containsKey("ad_session_id"))
+                if (name != AdEventName.LOAD) assertEquals(25L, parameters["latency_ms"])
+            } else {
+                assertEquals("business-position", parameters["position_id"])
+                assertFalse(parameters.containsKey("request_id"))
+                if (name != AdEventName.SCENE_SKIP) {
+                    assertEquals(if (format == AdFormat.BANNER) "slot-1" else "display-1", parameters["ad_session_id"])
                 }
             }
         }
     }
 
-    @Test
-    fun `banner event exposes slot identity without changing legacy event shape`() {
-        val banner = AdEvent(
-            name = AdEventName.BANNER_REFRESH,
-            platform = AdPlatform.ADMOB,
-            format = AdFormat.BANNER,
-            position = "home_banner",
-            sessionId = "display-1",
-            adUnitId = "banner-unit",
-            number = 1L,
-            slotId = "slot-1",
-            result = "filled",
-        ).analyticsParameters()
-
-        assertEquals("ad_banner_refresh", AdEventName.BANNER_REFRESH.analyticsName)
-        assertEquals("banner", banner["ad_type"])
-        assertEquals("slot-1", banner["slot_id"])
-        assertEquals("filled", banner["result"])
-        assertFalse(AdEvent(
-            name = AdEventName.IMPRESSION,
-            platform = AdPlatform.ADMOB,
-            format = AdFormat.REWARDED,
-            position = "game_rewarded",
-            sessionId = "display-2",
-            adUnitId = "rewarded-unit",
-            number = 1L,
-        ).analyticsParameters().containsKey("slot_id"))
+    @Test fun `仅 Banner 业务曝光携带从一开始的刷新序号且无页面身份时保持原会话`() {
+        for (format in AdFormat.entries) for (name in AdEventName.entries) {
+            val parameters = event(name, format).copy(refreshIndex = 2).analyticsParameters()
+            if (format == AdFormat.BANNER && name == AdEventName.IMPRESSION) {
+                assertEquals(2L, parameters["refresh_index"])
+            } else {
+                assertFalse(parameters.containsKey("refresh_index"))
+            }
+        }
+        for (index in listOf(null, 0L, -1L)) {
+            assertFalse(event(format = AdFormat.BANNER).copy(refreshIndex = index)
+                .analyticsParameters().containsKey("refresh_index"))
+        }
+        assertEquals("display-1", event(format = AdFormat.BANNER).copy(slotId = null)
+            .analyticsParameters()["ad_session_id"])
     }
 
-    @Test
-    fun `paid event exposes Tenjin AdMob revenue fields`() {
-        val parameters = AdEvent(
-            name = AdEventName.PAID,
-            platform = AdPlatform.ADMOB,
-            format = AdFormat.REWARDED,
-            position = "game_tool_refresh_rewarded",
-            sessionId = "session-1",
-            adUnitId = "test-ad-unit",
-            number = 1L,
-            adSource = "Google",
-            responseId = "response-1",
-            value = 0.00125,
-            valueMicros = 1_250L,
-            currency = "USD",
-            mediationAdapterClassName = "GoogleAdapter",
-            precisionType = "PRECISE",
-        ).analyticsParameters()
-
-        assertEquals(1_250L, parameters["value_micros"])
-        assertEquals("USD", parameters["currency"])
-        assertEquals("test-ad-unit", parameters["ad_unit_id"])
-        assertEquals("response-1", parameters["response_id"])
-        assertEquals("GoogleAdapter", parameters["mediation_adapter_class_name"])
-        assertEquals("PRECISE", parameters["precision_type"])
-        assertEquals("admob", parameters["ad_platform"])
+    @Test fun `loading omits scene from every log format`() {
+        for (format in AdFormat.entries) for (name in listOf(AdEventName.LOAD, AdEventName.LOADED, AdEventName.LOAD_FAIL)) {
+            val ad = event(name, format)
+            val log = when (format) {
+                AdFormat.APP_OPEN -> ad.appOpenLogLines().joinToString("\n")
+                AdFormat.NATIVE -> formatNativeDebugLogMessage(ad)
+                else -> formatAdEventLogMessage(ad)
+            }
+            assertFalse(log.contains("business-position"))
+            assertTrue(log.contains("load-1"))
+        }
     }
 
-    @Test
-    fun `TopOn keeps event fields and changes only platform identity`() {
-        val parameters = AdEvent(
-            name = AdEventName.IMPRESSION,
-            platform = AdPlatform.TOPON,
-            format = AdFormat.INTERSTITIAL,
-            position = "game_level_complete_interstitial",
-            sessionId = "session-2",
-            adUnitId = "topon-placement",
-            number = 2L,
-        ).analyticsParameters()
+    @Test fun `scene skip has only canonical identity type and reason`() {
+        for ((raw, canonical) in mapOf("platform_disabled" to "platform_disabled",
+            "daily_show_limit" to "show_rate_limited", "daily_click_limit" to "click_rate_limited")) {
+            assertEquals(mapOf("position_id" to "business-position", "ad_type" to "interstitial", "reason" to canonical),
+                event(AdEventName.SCENE_SKIP).copy(reason = raw, platformKnown = false).analyticsParameters())
+        }
+        assertTrue(event(AdEventName.SCENE_SKIP).copy(reason = "private-body").analyticsParameters().isEmpty())
+    }
 
-        assertEquals("topon", parameters["ad_platform"])
-        assertEquals("interstitial", parameters["ad_type"])
-        assertEquals("game_level_complete_interstitial", parameters["position"])
-        assertEquals("topon-placement", parameters["ad_unit_id"])
+    @Test fun `unselected opportunity is unknown and never exposes a configured unit`() {
+        for (name in listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL)) {
+            val parameters = event(name).copy(platformKnown = false, mediationMode = AdMediationMode.BIDDING).analyticsParameters()
+            assertEquals("unknown", parameters["ad_platform"])
+            assertEquals("bidding", parameters["mediation_mode"])
+            assertFalse(parameters.containsKey("ad_unit_id"))
+        }
+        for (name in listOf(AdEventName.LOAD, AdEventName.LOADED, AdEventName.LOAD_FAIL,
+            AdEventName.IMPRESSION, AdEventName.CLICK, AdEventName.DISMISS, AdEventName.IMPRESSION, AdEventName.REWARD)) {
+            assertTrue(event(name).copy(platformKnown = false).analyticsParameters().isEmpty())
+        }
+    }
+
+    @Test fun `failures emit controlled reasons and suppress exception details`() {
+        val reasons = mapOf("no_candidate" to "no_fill", "native_bid_timeout" to "timeout",
+            "opportunity_cancelled" to "cancelled", "another_full_screen_ad_showing" to "ad_busy",
+            "ad_platform_disabled" to "platform_disabled", "native_inactive" to "scene_inactive",
+            "daily_show_limit" to "show_rate_limited", "daily_click_limit" to "click_rate_limited",
+            "banner_configuration_failed" to "exception", "private SDK body" to "ad_error")
+        for (format in AdFormat.entries) for (name in listOf(AdEventName.LOAD_FAIL, AdEventName.SHOW_FAIL)) {
+            for ((raw, canonical) in reasons) {
+                val properties = event(name, format).copy(reason = raw, errorCode = "SDK_ERROR").analyticsParameters()
+                assertEquals(canonical, properties["reason"])
+                assertEquals(if (canonical == "exception") null else "SDK_ERROR", properties["error_code"])
+            }
+            val thrown = event(name, format).copy(reason = "private body", errorCode = "load_exception").analyticsParameters()
+            assertEquals("exception", thrown["reason"])
+            assertFalse(thrown.containsKey("error_code"))
+        }
+    }
+
+    @Test fun `impression revenue is in currency units while raw provider fields remain in the callback`() {
+        val ad = event(AdEventName.IMPRESSION)
+        assertEquals(0.00125, ad.analyticsParameters()["revenue_amount"])
+        assertEquals("USD", ad.analyticsParameters()["currency"])
+        assertEquals(1_250L, ad.valueMicros)
+        assertEquals("diagnostic", ad.responseId)
+        for (invalid in listOf(ad.copy(valueMicros = null), ad.copy(valueMicros = -1),
+            ad.copy(currency = "usd"), ad.copy(currency = null))) {
+            assertFalse(invalid.analyticsParameters().isEmpty())
+            assertFalse(invalid.analyticsParameters().containsKey("revenue_amount"))
+            assertFalse(invalid.analyticsParameters().containsKey("currency"))
+        }
+        assertEquals(0.0, ad.copy(valueMicros = 0).analyticsParameters()["revenue_amount"])
+        assertFalse(AdEventName.entries.any { it.analyticsName == "ad_paid" })
+    }
+
+    @Test fun `missing identities and terminal latency cannot create valid business events`() {
+        assertTrue(event().copy(position = "").analyticsParameters().isEmpty())
+        assertTrue(event().copy(sessionId = "").analyticsParameters().isEmpty())
+        assertTrue(event(AdEventName.LOAD).copy(requestId = null).analyticsParameters().isEmpty())
+        for (name in listOf(AdEventName.LOADED, AdEventName.LOAD_FAIL)) {
+            assertTrue(event(name).copy(latencyMillis = null).analyticsParameters().isEmpty())
+            assertTrue(event(name).copy(latencyMillis = -1).analyticsParameters().isEmpty())
+        }
+    }
+
+    @Test fun `TopOn uses the same v2 business schema`() {
+        val ad = event()
+        assertEquals(ad.analyticsParameters() + ("ad_platform" to "topon") + ("mediation_mode" to "topon"),
+            ad.copy(platform = AdPlatform.TOPON, mediationMode = AdMediationMode.TOPON).analyticsParameters())
     }
 
     @Test

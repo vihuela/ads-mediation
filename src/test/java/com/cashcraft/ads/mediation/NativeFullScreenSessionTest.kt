@@ -68,11 +68,11 @@ class NativeFullScreenSessionTest {
             assertTrue(h.results.isEmpty())
             h.session.onStateChanged(NativeState.Loaded)
             assertTrue(h.results.isEmpty()) // Render completion is not an impression or dismissal.
-            // The confirmed event is observed after NativeCardController replaces the SDK callback.
-            val events = NativeSlot(h.session.request, 1, { 1 }, AdEventListener {
-                if (it.name == AdEventName.IMPRESSION) h.session.impression.set(true)
-            }, AdRevenueListener.NONE).attempt({ 0 }, recordLoadEvents = false)
-            events.impression("test", "id")
+            val business = mutableListOf<AdEvent>()
+            val events = NativeSlot(h.session.request, 1, { 1 }, AdEventListener(business::add),
+                AdRevenueListener.NONE).attempt({ 0 }, recordLoadEvents = false)
+            events.impression("test", "id", onActualImpression = h.session::onImpression)
+            assertTrue(business.none { it.name == AdEventName.IMPRESSION })
             h.session.complete()
             h.session.complete()
             assertEquals(listOf(AdShowResult.Dismissed), h.results)
@@ -139,6 +139,41 @@ class NativeFullScreenSessionTest {
         } finally { h.close() }
     }
 
+    @Test fun `full screen lifecycle observes actual SDK exposure independently of paid order`() {
+        for (paidFirst in listOf(true, false)) {
+            val h = Harness()
+            val events = mutableListOf<AdEvent>()
+            val revenues = mutableListOf<AdRevenuePayload>()
+            val card = NativeCardController(
+                availability = { NativeAvailability(ready = true) }, canDisplay = { true },
+                newSlot = { NativeSlot(h.session.request, 1, { 1 }, AdEventListener(events::add), AdRevenueListener(revenues::add)) },
+                load = { h.session.deliver(it); NativeLoad {} }, render = { _, _ -> }, removeView = {},
+                clock = { 0 }, dispatch = { it() }, interaction = { _, _ -> }, onStateChanged = h.session::onStateChanged,
+                onActualImpression = h.session::onImpression, recordLoadEvents = false,
+            )
+            try {
+                card.update(true, true)
+                val callbacks = checkNotNull(h.ad.listener)
+                val revenue = NativeRevenue(0, "USD", "test", "id", "exact")
+                if (paidFirst) {
+                    callbacks.paid(revenue)
+                    assertFalse(h.session.impression.get())
+                    assertTrue(h.results.isEmpty())
+                }
+                callbacks.impression("test", "id")
+                assertTrue(h.session.impression.get())
+                assertEquals(if (paidFirst) 1 else 0, events.count { it.name == AdEventName.IMPRESSION })
+                card.destroy()
+                h.session.complete()
+                assertEquals(listOf(AdShowResult.Dismissed), h.results)
+                repeat(2) { callbacks.paid(revenue) }
+                assertEquals(1, events.count { it.name == AdEventName.IMPRESSION })
+                assertEquals(1, revenues.size)
+                assertTrue(events.none { it.name == AdEventName.SHOW_FAIL })
+            } finally { card.destroy(); h.close() }
+        }
+    }
+
     private class Harness {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         val ad = Ad(AdPlatform.ADMOB, .001)
@@ -176,7 +211,7 @@ class NativeFullScreenSessionTest {
         var impressions = 0
         override fun loaded(ad: NativeAdHandle) { this.ad = ad }
         override fun failed(reason: String, errorCode: String?) { failure = reason }
-        override fun impression(adSource: String?, responseId: String?) { impressions++ }
+        override fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue?) { impressions++ }
         override fun clicked(adSource: String?, responseId: String?) = Unit
         override fun closed() = Unit
         override fun overlayOpened() = Unit

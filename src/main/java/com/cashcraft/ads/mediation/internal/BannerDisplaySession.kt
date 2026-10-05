@@ -22,16 +22,18 @@ internal class BannerDisplaySession(
     private val revenueListener: AdRevenueListener,
     private val slotEnded: AtomicBoolean,
     private val logger: AdsModuleLogger? = null,
+    private val impressionOrFailure: AtomicBoolean = AtomicBoolean(false),
 ) {
     val sessionId: String get() = event.sessionId
     val responseId: String get() = checkNotNull(event.responseId)
     val requestId: String? get() = event.requestId
-    private val impressionOrFailure = AtomicBoolean(false)
     private val paid = AtomicBoolean(false)
     private val refreshed = AtomicBoolean(false)
 
     fun impression() {
-        if (!slotEnded.get() && impressionOrFailure.compareAndSet(false, true)) dispatch(event)
+        if (!slotEnded.get() && impressionOrFailure.compareAndSet(false, true) && event.platform == AdPlatform.TOPON) {
+            dispatch(event)
+        }
     }
 
     fun click() {
@@ -44,9 +46,14 @@ internal class BannerDisplaySession(
         }
     }
 
-    /** Only an actual failed display attempt, not load failure or lifecycle cleanup. */
+    /** Failure of a qualified display opportunity, including cancellation before exposure. */
     fun showFailure(reason: String, errorCode: String? = null) {
-        if (!slotEnded.get() && impressionOrFailure.compareAndSet(false, true)) {
+        if (!slotEnded.get()) endOpportunity(reason, errorCode)
+    }
+
+    /** Slot ownership may already be ended; metadata and paid delivery remain valid. */
+    fun endOpportunity(reason: String, errorCode: String? = null) {
+        if (impressionOrFailure.compareAndSet(false, true)) {
             dispatch(event.copy(name = AdEventName.SHOW_FAIL, reason = reason, errorCode = errorCode))
         }
     }
@@ -93,8 +100,8 @@ internal class BannerDisplaySession(
             )
         }
         if (!paid.compareAndSet(false, true)) return
-        dispatch(event.copy(
-            name = AdEventName.PAID,
+        if (event.platform == AdPlatform.ADMOB) dispatch(event.copy(
+            name = AdEventName.IMPRESSION,
             value = valueMicros / 1_000_000.0,
             valueMicros = valueMicros,
             currency = currency,

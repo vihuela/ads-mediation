@@ -25,6 +25,11 @@ internal class AdPolicyAttempt(val request: AdPolicyRequest) {
         else Ads.policyChecker?.check(request) ?: AdPolicyCheckResult.Passed
     }
 
+    /** Telemetry must not reserve quota or remember a new block before the real decision. */
+    fun telemetryBlockReason(): AdBlockReason? = blocked ?: if (hasImpression) null else
+        (Ads.policyChecker?.check(request, if (reserved) id else null)
+            as? AdPolicyCheckResult.Blocked)?.reason
+
     @Synchronized
     fun reserve(): AdPolicyCheckResult = remember {
         (Ads.policyChecker?.reserve(id, request) ?: AdPolicyCheckResult.Passed).also {
@@ -75,4 +80,15 @@ internal class AdPolicyAttempt(val request: AdPolicyRequest) {
     }
 
     fun result(result: AdShowResult): AdShowResult = blocked?.let(AdShowResult::Blocked) ?: result
+}
+
+/** Only these six policy branches are business skips; invalid identity is not a skip. */
+internal fun AdBlockReason.sceneSkipReason(): String? = when (this) {
+    AdBlockReason.GLOBAL_DISABLED -> "global_disabled"
+    AdBlockReason.POSITION_DISABLED -> "position_disabled"
+    AdBlockReason.NEW_USER_PROTECTION -> "new_user_protection"
+    AdBlockReason.FULLSCREEN_GAP -> "fullscreen_gap"
+    AdBlockReason.DAILY_SHOW_LIMIT -> "show_rate_limited"
+    AdBlockReason.DAILY_CLICK_LIMIT -> "click_rate_limited"
+    AdBlockReason.INVALID_SCENE_TYPE -> null
 }

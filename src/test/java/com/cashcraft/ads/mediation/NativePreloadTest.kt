@@ -115,7 +115,7 @@ class NativePreloadTest {
         val demand = NativeAdCache.load(Activity(), request, 320, false, object : NativeCallbacks {
             override fun loaded(ad: NativeAdHandle) { delivered = ad }
             override fun failed(reason: String, errorCode: String?) { error(reason) }
-            override fun impression(adSource: String?, responseId: String?) = Unit
+            override fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue?) = Unit
             override fun clicked(adSource: String?, responseId: String?) = Unit
             override fun closed() = Unit
             override fun overlayOpened() = Unit

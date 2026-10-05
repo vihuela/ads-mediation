@@ -20,6 +20,8 @@ class BannerPolicyEventsTest {
         h.relay.end()
         h.relay.impression(response)
         assertEquals(1, h.impressions)
+        assertEquals(0, h.events.count { it.name == AdEventName.IMPRESSION })
+        h.relay.paid(response, 0, "USD", "UNKNOWN", 1)
         assertEquals(1, h.events.count { it.name == AdEventName.IMPRESSION })
     }
 
@@ -27,11 +29,14 @@ class BannerPolicyEventsTest {
         val h = Host()
         h.relay.loaded(BannerResponse("first"))
         h.relay.impression(BannerResponse("first"))
+        h.relay.paid(BannerResponse("first"), 0, "USD", "UNKNOWN", 1)
         repeat(40) {
             val response = BannerResponse("sdk-refresh-$it")
             h.relay.refreshed(response)
             h.relay.impression(response)
             h.relay.impression(response)
+            h.relay.paid(response, 0, "USD", "UNKNOWN", 1)
+            h.relay.paid(response, 0, "USD", "UNKNOWN", 1)
         }
         // Even after the first response leaves the bounded metadata cache it cannot count twice.
         h.relay.impression(BannerResponse("first"))

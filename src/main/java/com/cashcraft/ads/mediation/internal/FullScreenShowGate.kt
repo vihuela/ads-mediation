@@ -57,6 +57,8 @@ internal object FullScreenShowGate {
 /** Carries a waiting owner's final guard into the provider's actual SDK call. Main thread only. */
 internal class FullScreenShowAttempt(val isWaitingOpportunity: Boolean = false) {
     var policy: AdPolicyAttempt? = null
+    var eventSession: AdShowSession? = null
+    var telemetryFormats: List<com.cashcraft.ads.mediation.AdFormat>? = null
     var guard: (() -> String?)? = null
     var handoffGuard: (() -> String?)? = null
     var onCommitted: (() -> Unit)? = null

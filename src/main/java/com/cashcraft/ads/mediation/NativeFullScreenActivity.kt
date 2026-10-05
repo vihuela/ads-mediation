@@ -34,6 +34,7 @@ class NativeFullScreenActivity : FragmentActivity() {
     internal val nativeRequest: ResolvedNativeRequest? get() = session?.request
     internal val policyAttempt: AdPolicyAttempt? get() = session?.policyAttempt
     internal val onNativeImpression: (() -> Unit)? get() = session?.let { { it.onImpression() } }
+    internal val onNativePosition: (() -> Unit)? get() = session?.onPosition
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -92,6 +93,7 @@ internal class NativeFullScreenSession(
         Ads.nativeAvailability(request.candidates().firstOrNull { it.platform == decision?.selection?.winner } ?: request)
     },
     private val trace: (String) -> Unit = {},
+    val onPosition: () -> Unit = {},
 ) {
     val policyAttempt: AdPolicyAttempt? get() = attempt.policy
     val id = UUID.randomUUID().toString()
@@ -201,6 +203,7 @@ internal class NativeFullScreenSession(
             sceneValid: () -> Boolean,
             attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
             trace: (String) -> Unit = {},
+            onPosition: () -> Unit = {},
             onResult: (AdShowResult) -> Unit): NativeFullScreenSession? {
             if (attempt.policy == null) attempt.policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true,
                 sceneType = AdSceneType.NATIVE_FULLSCREEN))
@@ -233,7 +236,7 @@ internal class NativeFullScreenSession(
             FullScreenShowGate.commit(activity, Ads.nativeAvailability(cached.first).failure, attempt)
                 ?.let { cached.second.destroy(); return fail(it) }
             val session = NativeFullScreenSession(resolved, layout, cached.second, attempt, activity, sceneValid, onResult, decision,
-                trace = trace)
+                trace = trace, onPosition = onPosition)
             trace("选中全屏原生：${cached.first.platform.flowName()}，报价=${decision?.selection?.priceUsd.flowPrice()} 美元/次展示；交接记录=${session.id}。")
             current = session
             Ads.nativeLog(position) { "全屏兜底：已独占领取原生缓存 | ${cached.first.platform.flowName()}" }
@@ -272,7 +275,7 @@ internal fun selectCachedNative(
 private object EmptyNativeCallbacks : NativeCallbacks {
     override fun loaded(ad: NativeAdHandle) = Unit
     override fun failed(reason: String, errorCode: String?) = Unit
-    override fun impression(adSource: String?, responseId: String?) = Unit
+    override fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue?) = Unit
     override fun clicked(adSource: String?, responseId: String?) = Unit
     override fun closed() = Unit
     override fun overlayOpened() = Unit

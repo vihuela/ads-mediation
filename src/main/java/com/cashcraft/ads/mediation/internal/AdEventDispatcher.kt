@@ -11,6 +11,7 @@ import com.cashcraft.ads.mediation.AdMediationMode
 import com.cashcraft.ads.mediation.AdPlatform
 import com.cashcraft.ads.mediation.AdRevenueListener
 import com.cashcraft.ads.mediation.AdShowResult
+import com.cashcraft.ads.mediation.Ads
 import com.cashcraft.ads.mediation.ResolvedNativeRequest
 import com.cashcraft.ads.mediation.internal.nativeads.NativeSlot
 import java.util.UUID
@@ -54,6 +55,8 @@ internal class AdEventDispatcher(
         adUnitId: String,
         attempt: FullScreenShowAttempt? = null,
         onCreated: (AdShowSession) -> Unit = {},
+        platformKnown: Boolean = true,
+        platformDisabled: (() -> Boolean)? = null,
     ): AdShowSession {
         require(format != AdFormat.BANNER) { "Banner requires beginBannerSlot" }
         val number = nextNumber(format, "position")
@@ -62,17 +65,24 @@ internal class AdEventDispatcher(
             platform = platform,
             mediationMode = mediationMode,
             format = format,
-            position = position.normalizedAdPosition(),
+            position = if (format == AdFormat.NATIVE) position.normalizedAdPosition() else position,
             adUnitId = adUnitId,
             sessionId = UUID.randomUUID().toString(),
             number = number,
             logger = logger,
             attempt = attempt ?: FullScreenShowAttempt(),
             onCreated = onCreated,
+            platformKnown = platformKnown,
+            platformDisabled = platformDisabled,
         )
     }
 
     fun beginLoad(format: AdFormat, adUnitId: String, bufferSize: Int): AdLoadSession {
+        return createLoad(format, adUnitId, bufferSize).also(AdLoadSession::request)
+    }
+
+    /** Allocate ownership before invoking the SDK; publish only for an actual load call. */
+    fun createLoad(format: AdFormat, adUnitId: String, bufferSize: Int): AdLoadSession {
         require(format != AdFormat.BANNER) { "Banner requires createBannerLoad" }
         val number = nextNumber(format, "load")
         val requestId = UUID.randomUUID().toString()
@@ -89,7 +99,8 @@ internal class AdEventDispatcher(
             bufferSize = bufferSize,
             startedAtMillis = SystemClock.elapsedRealtime(),
             logger = logger,
-        ).also(AdLoadSession::request)
+            deferUntilRequest = true,
+        )
     }
 
     fun beginBannerSlot(
@@ -109,6 +120,26 @@ internal class AdEventDispatcher(
         revenueListener = revenueListener,
         onCreated = onCreated,
     )
+
+    /** A one-shot preload has no display slot; invokeLoad publishes its actual SDK request. */
+    fun createBannerPreloadLoad(adUnitId: String): AdLoadSession {
+        val requestId = UUID.randomUUID().toString()
+        return AdLoadSession(
+            listener = listener,
+            platform = platform,
+            mediationMode = mediationMode,
+            format = AdFormat.BANNER,
+            position = "preload_banner",
+            adUnitId = adUnitId,
+            sessionId = requestId,
+            requestId = requestId,
+            number = nextNumber(AdFormat.BANNER, "load"),
+            bufferSize = null,
+            startedAtMillis = SystemClock.elapsedRealtime(),
+            logger = logger,
+            deferUntilRequest = true,
+        )
+    }
 
     /** The caller emits request() only after it has actually invoked the SDK load method. */
     fun createBannerLoad(slot: BannerSlot): AdLoadSession {
@@ -160,10 +191,31 @@ internal class AdLoadSession(
     private val clock: AdLoadClock = AdLoadClock(SystemClock::elapsedRealtime),
     private val logger: AdsModuleLogger? = null,
     private val slotId: String? = null,
+    private val deferUntilRequest: Boolean = false,
 ) {
     private val terminal = AtomicBoolean(false)
 
-    fun request() = emit(AdEventName.LOAD_REQUEST)
+    private var requested = false
+    private var pendingTerminal: (() -> Unit)? = null
+
+    @Synchronized
+    fun request() {
+        if (requested) return
+        requested = true
+        emit(AdEventName.LOAD)
+        val pending = pendingTerminal
+        pendingTerminal = null
+        pending?.invoke()
+    }
+
+    /** Even a synchronous callback must follow LOAD; thrown calls are still real attempts. */
+    fun invokeLoad(load: () -> Unit) {
+        try {
+            load()
+        } finally {
+            request()
+        }
+    }
 
     fun loaded(adSource: String?, responseId: String?) {
         finish(
@@ -177,11 +229,18 @@ internal class AdLoadSession(
         finish(
             result = result,
             errorCode = errorCode,
-            reason = reason,
+            reason = if (format in setOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL, AdFormat.REWARDED)) {
+                when {
+                    result in setOf("no_fill", "timeout", "cancelled") -> result
+                    result == "error" && errorCode == "exception" -> "exception"
+                    else -> "ad_error"
+                }
+            } else reason,
             responseId = responseId,
         )
     }
 
+    @Synchronized
     private fun finish(
         result: String,
         errorCode: String? = null,
@@ -190,15 +249,19 @@ internal class AdLoadSession(
         responseId: String? = null,
     ) {
         if (!terminal.compareAndSet(false, true)) return
-        emit(
-            name = AdEventName.LOAD_RESULT,
-            result = result,
-            errorCode = errorCode,
-            reason = reason,
-            adSource = adSource,
-            responseId = responseId,
-            latencyMillis = (clock.nowMillis() - startedAtMillis).coerceAtLeast(0L),
-        )
+        val latency = (clock.nowMillis() - startedAtMillis).coerceAtLeast(0L)
+        val publish = {
+            emit(
+                name = if (result == "filled") AdEventName.LOADED else AdEventName.LOAD_FAIL,
+                result = result,
+                errorCode = errorCode,
+                reason = reason,
+                adSource = adSource,
+                responseId = responseId,
+                latencyMillis = latency,
+            )
+        }
+        if (requested || !deferUntilRequest) publish() else pendingTerminal = publish
     }
 
     private fun emit(
@@ -249,16 +312,43 @@ internal class BannerSlot(
     onCreated: (BannerSlot) -> Unit = {},
 ) {
     private val ended = AtomicBoolean(false)
+    private var initialTerminal = AtomicBoolean(false)
+    private var initialSessionId = UUID.randomUUID().toString()
+    private var initialDisplayBound = false
+    private var currentDisplay: BannerDisplaySession? = null
+    private var refreshIndex = 0L
 
     val isEnded: Boolean get() = ended.get()
 
     init {
         // Publish ownership before the external POSITION listener can reenter the host.
         onCreated(this)
-        emit(AdEventName.POSITION, sessionId = slotId)
+        emit(AdEventName.POSITION, sessionId = initialSessionId)
     }
 
-    fun end() { ended.set(true) }
+    fun end(reason: String = "scene_inactive") {
+        // Commit before dispatch: host callbacks cannot revive or end this opportunity twice.
+        if (ended.compareAndSet(false, true)) finishPending(reason)
+    }
+
+    private fun finishPending(reason: String, errorCode: String? = null) {
+        val display = currentDisplay
+        if (display != null) display.endOpportunity(reason, errorCode)
+        else if (initialTerminal.compareAndSet(false, true)) {
+            emit(AdEventName.SHOW_FAIL, initialSessionId, reason = reason, errorCode = errorCode)
+        }
+    }
+
+    /** 后续宿主加载更新广告身份，但仍属于同一页面周期。 */
+    fun prepareForLoad() {
+        if (isEnded || (!initialDisplayBound && !initialTerminal.get())) return
+        finishPending("cancelled")
+        if (isEnded) return
+        currentDisplay = null
+        initialTerminal = AtomicBoolean(false)
+        initialSessionId = UUID.randomUUID().toString()
+        initialDisplayBound = false
+    }
 
     /**
      * Called only when the adapter has confirmed a NEW stable response. The adapter retains the
@@ -276,6 +366,12 @@ internal class BannerSlot(
             logger?.bannerDiagnostic(slotId, "missing_display_identity", responseId)
             return null
         }
+        val initial = !initialDisplayBound && !initialTerminal.get()
+        if (!initial) {
+            finishPending("cancelled")
+            if (isEnded) return null
+        }
+        initialDisplayBound = true
         return BannerDisplaySession(
             event = AdEvent(
                 name = AdEventName.IMPRESSION,
@@ -283,10 +379,11 @@ internal class BannerSlot(
                 mediationMode = mediationMode,
                 format = AdFormat.BANNER,
                 position = position,
-                sessionId = UUID.randomUUID().toString(),
+                sessionId = if (initial) initialSessionId else UUID.randomUUID().toString(),
                 adUnitId = adUnitId,
                 number = number,
                 slotId = slotId,
+                refreshIndex = ++refreshIndex,
                 requestId = requestId,
                 responseId = identity,
                 adSource = adSource,
@@ -296,7 +393,15 @@ internal class BannerSlot(
             revenueListener = revenueListener,
             slotEnded = ended,
             logger = logger,
-        )
+            impressionOrFailure = if (initial) initialTerminal else AtomicBoolean(false),
+        ).also {
+            currentDisplay = it
+        }
+    }
+
+    /** Failure belongs to the qualified host opportunity, even before an SDK response exists. */
+    fun showFailure(reason: String, errorCode: String? = null) {
+        if (!isEnded) finishPending(reason, errorCode)
     }
 
     /** Refresh failure need not identify a new display and must leave the old one usable. */
@@ -344,36 +449,105 @@ internal class AdShowSession(
     private val logger: AdsModuleLogger? = null,
     val attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
     onCreated: (AdShowSession) -> Unit = {},
+    private val platformKnown: Boolean = true,
+    private val platformDisabled: (() -> Boolean)? = null,
 ) {
     private val terminal = AtomicBoolean(false)
+    var hasImpression: Boolean = false
+        private set
+    private var admitted = false
+    private var skipped = false
+    private var pendingBid: AdBidEventData? = null
+    private val paid = AtomicBoolean(false)
+    private val impressionReported = AtomicBoolean(false)
+    private val rewarded = AtomicBoolean(false)
+    private val dismissed = AtomicBoolean(false)
     var onImpressionConfirmed: (() -> Unit)? = null
 
     init {
+        attempt.eventSession = this
         attempt.policy?.logMaterial(format, platform)
         onCreated(this)
+        // The migration is limited to the three SDK full-screen formats.
+        if (format == AdFormat.NATIVE) {
+            admitted = true
+            emit(AdEventName.POSITION)
+        }
+    }
+
+    /** Called near show, or at a no-fill terminal. Never consumes show quota. */
+    fun admit(): Boolean {
+        if (admitted) return true
+        if (skipped || position.isBlank()) return false
+        val block = attempt.policy?.telemetryBlockReason()
+        val reason = block?.sceneSkipReason()
+            ?: if (block == null && (platformDisabled?.invoke() ?: (attempt.policy != null &&
+                    Ads.fullScreenPlatformsDisabled(attempt.telemetryFormats ?: listOf(format)))))
+                "platform_disabled" else null
+        if (reason != null) {
+            skipped = true
+            terminal.set(true)
+            pendingBid = null
+            dispatch(AdEvent(AdEventName.SCENE_SKIP, platform, format, position, "", "", 0,
+                reason = reason, mediationMode = mediationMode, platformKnown = false))
+            return false
+        }
+        // Invalid scene identity must not become a fabricated qualified opportunity.
+        if (block != null) return false
+        admitted = true
         emit(AdEventName.POSITION)
+        pendingBid?.let { pendingBid = null; bidResult(it) }
+        return true
     }
 
     val hasTerminalEvent: Boolean
         get() = terminal.get()
 
-    fun impression(adSource: String?, responseId: String?) {
+    fun impression(
+        adSource: String?, responseId: String?, valueMicros: Long? = null,
+        currency: String? = null, precisionType: String? = null,
+    ) {
         // Actual callbacks still count if teardown/failure reached the main queue first.
         attempt.policy?.impression()
+        if (!admit()) return
         if (terminal.compareAndSet(false, true)) {
+            hasImpression = true
             val callback = onImpressionConfirmed
             onImpressionConfirmed = null
             runCatching { callback?.invoke() }
-            emit(AdEventName.IMPRESSION, adSource = adSource, responseId = responseId)
+            if (reportsImpressionOnShow) {
+                emit(AdEventName.IMPRESSION, adSource = adSource, responseId = responseId,
+                    value = valueMicros?.div(1_000_000.0), valueMicros = valueMicros,
+                    currency = currency, precisionType = precisionType)
+            }
         }
     }
 
+    private val reportsImpressionOnShow: Boolean
+        get() = platform == AdPlatform.TOPON && format in setOf(AdFormat.APP_OPEN, AdFormat.NATIVE)
+
+    /** Revenue delivery has its own lifetime and dedup, independent of the SDK show callback. */
+    fun revenue(
+        adSource: String? = null, responseId: String? = null, value: Double? = null,
+        valueMicros: Long?, currency: String?, mediationAdapterClassName: String? = null,
+        precisionType: String? = null,
+    ): Boolean {
+        if (valueMicros == null || valueMicros < 0 || currency?.matches(Regex("[A-Z]{3}")) != true) return false
+        if (!admit() || !paid.compareAndSet(false, true)) return false
+        if (!reportsImpressionOnShow) {
+            emit(AdEventName.IMPRESSION, adSource = adSource, responseId = responseId,
+                value = value ?: valueMicros / 1_000_000.0, valueMicros = valueMicros,
+                currency = currency, mediationAdapterClassName = mediationAdapterClassName,
+                precisionType = precisionType)
+        }
+        return true
+    }
+
     fun showFailure(reason: String, errorCode: String? = null, cause: Throwable? = null) {
+        if (!admit()) return
         if (terminal.compareAndSet(false, true)) {
             onImpressionConfirmed = null
-            // A policy block has its own typed notification; never report it as an SDK failure.
-            if (attempt.policy?.blocked != null) return
-            emit(AdEventName.SHOW_FAIL, reason = reason, errorCode = errorCode)
+            emit(AdEventName.SHOW_FAIL, reason = attempt.policy?.blocked?.let { it.sceneSkipReason() ?: it.code } ?: reason, errorCode = errorCode)
             cause?.let { error ->
                 logger?.showFailureException(
                     format = format,
@@ -388,9 +562,11 @@ internal class AdShowSession(
     }
 
     fun bidResult(data: AdBidEventData) {
+        if (!admitted) { if (!skipped) pendingBid = data; return }
         dispatch(
             AdEvent(
                 name = AdEventName.BID_RESULT,
+                platformKnown = platformKnown,
                 platform = platform,
                 mediationMode = mediationMode,
                 format = format,
@@ -425,10 +601,24 @@ internal class AdShowSession(
         currency: String? = null,
         mediationAdapterClassName: String? = null,
         precisionType: String? = null,
-    ) {
+    ): Boolean {
+        if (name != AdEventName.POSITION && !admit()) return false
+        when (name) {
+            AdEventName.IMPRESSION -> if (!impressionReported.compareAndSet(false, true)) return false
+            AdEventName.REWARD -> {
+                if (format != AdFormat.REWARDED || (hasTerminalEvent && !hasImpression)) return false
+                if (!rewarded.compareAndSet(false, true)) return false
+            }
+            AdEventName.DISMISS -> {
+                if (!hasImpression) { showFailure("dismissed_before_impression"); return false }
+                if (!dismissed.compareAndSet(false, true)) return false
+            }
+            else -> Unit
+        }
         if (name == AdEventName.CLICK) attempt.policy?.click()
         val event = AdEvent(
             name = name,
+            platformKnown = platformKnown,
             platform = platform,
             mediationMode = mediationMode,
             format = format,
@@ -447,6 +637,7 @@ internal class AdShowSession(
             precisionType = precisionType,
         )
         dispatch(event)
+        return true
     }
 
     private fun dispatch(event: AdEvent) {
@@ -457,7 +648,7 @@ internal class AdShowSession(
 }
 
 /** A close callback is successful only after the SDK has reported an impression. */
-internal fun AdShowSession.dismissedResult(): AdShowResult = if (hasTerminalEvent) {
+internal fun AdShowSession.dismissedResult(): AdShowResult = if (hasImpression) {
     AdShowResult.Dismissed
 } else {
     showFailure("dismissed_before_impression")

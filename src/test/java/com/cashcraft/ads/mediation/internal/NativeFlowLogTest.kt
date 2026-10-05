@@ -22,15 +22,15 @@ class NativeFlowLogTest {
         assertFalse(ordinary.contains("落选"))
         assertTrue(formatNativeDebugLogMessage(event).contains("获取记录=request-secret"))
         assertTrue(formatNativeDebugLogMessage(event).contains("展示记录=session-secret"))
-        assertNull(formatNativeEventLogMessage(event.copy(name = AdEventName.LOAD_RESULT)))
+        assertNull(formatNativeEventLogMessage(event.copy(name = AdEventName.LOADED)))
         assertTrue(formatNativeEventLogMessage(event.copy(name = AdEventName.IMPRESSION))!!.contains("已确认广告曝光"))
-        assertFalse(formatNativeEventLogMessage(event.copy(name = AdEventName.PAID, value = 0.0, currency = "USD"))!!.contains("到账"))
+        assertFalse(formatNativeEventLogMessage(event.copy(name = AdEventName.IMPRESSION, value = 0.0, currency = "USD"))!!.contains("到账"))
         assertFalse("bad\nline\rtext".nativeLogText().contains('\n'))
         assertEquals(200, "x".repeat(300).nativeLogText().length)
         AdsModuleLogger(false, "test").native("home") { error("disabled logger evaluated message") }
     }
     @Test fun `native revenue display preserves micros and loading debug names observable outcomes`() {
-        val event = AdEvent(AdEventName.PAID, AdPlatform.TOPON, AdFormat.NATIVE,
+        val event = AdEvent(AdEventName.IMPRESSION, AdPlatform.TOPON, AdFormat.NATIVE,
             "home_native", "session", "platform-id", 1, slotId = "home",
             value = Long.MAX_VALUE / 1_000_000.0, valueMicros = Long.MAX_VALUE, currency = "USD")
         assertTrue(formatNativeEventLogMessage(event)!!.contains("9223372036854.775807 USD"))
@@ -39,7 +39,7 @@ class NativeFlowLogTest {
         assertTrue(formatNativeEventLogMessage(event.copy(valueMicros = 0, value = 0.0))!!.contains("0 USD"))
         assertTrue(formatNativeEventLogMessage(event.copy(valueMicros = null, value = Double.NaN))!!.contains("金额未知"))
 
-        val load = event.copy(name = AdEventName.LOAD_RESULT, result = "filled", latencyMillis = 12,
+        val load = event.copy(name = AdEventName.LOADED, result = "filled", latencyMillis = 12,
             value = null, valueMicros = null, currency = null)
         val debug = formatNativeDebugLogMessage(load)
         assertTrue(debug.contains("本层获取成功，尚未确认曝光"))
@@ -69,6 +69,6 @@ class NativeFlowLogTest {
         assertTrue(formatNativeExceptionLogMessage(wrapper).contains("原因链已截断"))
         AdsModuleLogger(false, "test").native("home", error = wrapper) { error("disabled message evaluated") }
         AdsModuleLogger(false, "test").eventDispatchFailed(
-            AdEvent(AdEventName.PAID, AdPlatform.TOPON, AdFormat.NATIVE, "home", "session", "unit", 1), wrapper)
+            AdEvent(AdEventName.IMPRESSION, AdPlatform.TOPON, AdFormat.NATIVE, "home", "session", "unit", 1), wrapper)
     }
 }

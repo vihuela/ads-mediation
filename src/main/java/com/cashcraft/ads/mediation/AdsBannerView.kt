@@ -14,6 +14,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import com.cashcraft.ads.mediation.internal.AdPolicyAttempt
 import com.cashcraft.ads.mediation.internal.AdPolicyRequest
+import com.cashcraft.ads.mediation.internal.sceneSkipReason
 import com.cashcraft.ads.mediation.internal.logMaterial
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
@@ -22,6 +23,7 @@ import com.cashcraft.ads.mediation.internal.BannerSlot
 import com.cashcraft.ads.mediation.admob.AdMobAds
 import com.cashcraft.ads.mediation.internal.admob.AdMobBannerEvents
 import com.cashcraft.ads.mediation.internal.admob.BannerResponse
+import com.cashcraft.ads.mediation.internal.admob.analyticsLoadResult
 import com.google.android.libraries.ads.mobile.sdk.banner.AdSize
 import com.google.android.libraries.ads.mobile.sdk.banner.AdView
 import com.google.android.libraries.ads.mobile.sdk.banner.BannerAd
@@ -65,6 +67,7 @@ class AdsBannerView(
     private var policyAttempt: AdPolicyAttempt? = null
     private var policyReserved = false
     private var policyBlocked: AdBlockReason? = null
+    private var platformSkipReported = false
     private var releasing = false
     private var generation = 0L
     private var requestedSize: RequestSize? = null
@@ -118,11 +121,13 @@ class AdsBannerView(
         evaluate()
     }
 
-    /** A host-controlled new opportunity; SDK refresh never creates a policy opportunity. */
+    /** 显式刷新重新申请广告和频控机会，但保留仍有效的页面周期。 */
     fun refresh() {
         requireMain()
-        if (destroyed) return
-        endSlot()
+        if (destroyed || releasing) return
+        if (slot?.isEnded == true) endSlot("cancelled") else releaseAd()
+        policyBlocked = null
+        platformSkipReported = false
         evaluate()
     }
 
@@ -234,20 +239,21 @@ class AdsBannerView(
             updateState(AdShowResult.Failed("provider_${readiness.name.lowercase()}"))
             return
         }
-        if (slot == null) {
-            val available = dispatcher ?: Ads.bannerEvents(request.platform)?.also { dispatcher = it }
-            available?.beginBannerSlot(request.position, request.adUnitId, Ads.bannerRevenueListener) { slot = it }
-            if (destroyed || !businessActive || slot?.isEnded == true) return
-        }
         if (readiness != BannerReadiness.READY || !eligible()) {
             adView?.visibility = INVISIBLE
             if (adView == null) updateState(BannerState.Waiting)
             return
         }
+        if (slot == null) {
+            val available = dispatcher ?: Ads.bannerEvents(request.platform)?.also { dispatcher = it }
+            available?.beginBannerSlot(request.position, request.adUnitId, Ads.bannerRevenueListener) { slot = it }
+            if (destroyed || !businessActive || slot?.isEnded == true) return
+        }
         val density = resources.displayMetrics.density
         val widthDp = ((width - paddingLeft - paddingRight) / density).toInt()
         if (widthDp <= 0) { updateState(BannerState.Waiting); return }
         request.sizeError(widthDp)?.let {
+            slot?.showFailure(it)
             releaseAd()
             updateState(AdShowResult.Failed(it))
             return
@@ -285,6 +291,8 @@ class AdsBannerView(
     private fun load(size: AdSize) {
         if (!checkPolicy()) return
         val currentSlot = slot?.takeUnless { it.isEnded } ?: return
+        currentSlot.prepareForLoad()
+        if (destroyed || !businessActive || currentSlot.isEnded) return
         val currentGeneration = ++generation
         val currentSize = requestedSize
         try {
@@ -303,13 +311,13 @@ class AdsBannerView(
             events = relay
             updateState(BannerState.Loading)
             if (!isCurrent(currentGeneration)) return
-            if (!eligible()) { releaseAd(); return }
+            if (!eligible()) { releaseAd("scene_inactive"); return }
             // Prepare the current empty View invisibly; callbacks are installed before exposure.
             addView(view, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER))
             view.doOnLayout {
                 view.post {
                     if (!isCurrent(currentGeneration)) return@post
-                    if (!eligible()) { releaseAd(); return@post }
+                    if (!eligible()) { releaseAd("scene_inactive"); return@post }
                     if (!checkPolicy(reserve = true) || !isCurrent(currentGeneration)) return@post
                     val preloadedAd = AdMobAds.pollBanner(request, size)
                     val loader = if (preloadedAd == null) AdView(context as Activity).also { loadView = it } else null
@@ -337,6 +345,7 @@ class AdsBannerView(
                     if (preloadedAd == null) load.request()
                     if (error != null && isCurrent(currentGeneration)) {
                         relay.failed("load_exception", error.message, null)
+                        currentSlot.showFailure("load_exception", "load_exception")
                         if (isCurrent(currentGeneration)) {
                             releaseAd()
                             // Keep the failed size so layout/visibility cannot act as a retry loop.
@@ -351,6 +360,7 @@ class AdsBannerView(
             // first traversal outside that callback so the pending load cannot wait indefinitely.
             post { if (isCurrent(currentGeneration)) requestLayout() }
         } catch (error: Exception) {
+            currentSlot.showFailure("banner_configuration_failed")
             releaseAd()
             requestedSize = currentSize
             failed = true
@@ -366,9 +376,10 @@ class AdsBannerView(
         if (isCurrent(generation)) showIfEligible()
     }
 
-    private fun onFailed(generation: Long, reason: String) {
+    private fun onFailed(generation: Long, reason: String, errorCode: String, analyticsReason: String) {
         if (!isCurrent(generation)) return
         val size = requestedSize
+        slot?.showFailure(analyticsReason, errorCode)
         releaseAd()
         requestedSize = size
         failed = true
@@ -377,6 +388,7 @@ class AdsBannerView(
 
     private fun onConfigurationFailed(generation: Long) {
         if (!isCurrent(generation)) return
+        slot?.showFailure("banner_callback_configuration_failed")
         val size = requestedSize
         releaseAd()
         requestedSize = size
@@ -405,12 +417,20 @@ class AdsBannerView(
         val result = if (reserve || policyReserved) current.reserve() else current.check()
         if (result is AdPolicyCheckResult.Blocked) {
             policyBlocked = result.reason
+            val reason = result.reason.sceneSkipReason()
+            if (slot == null) reason?.let { Ads.emitInlineSceneSkip(AdFormat.BANNER, request.position, it) }
+            else slot?.showFailure(reason ?: "invalid_scene_type")
             releaseAd()
             slot?.end()
             updateState(AdShowResult.Blocked(result.reason))
             return false
         }
         if (!Ads.isPlatformEnabled(request.platform)) {
+            if (slot == null && !platformSkipReported) {
+                platformSkipReported = true
+                Ads.emitInlineSceneSkip(AdFormat.BANNER, request.position, "platform_disabled")
+            } else slot?.showFailure("platform_disabled")
+            platformSkipReported = true
             slot?.end()
             slot = null
             releaseAd()
@@ -422,16 +442,22 @@ class AdsBannerView(
         return true
     }
 
-    private fun endSlot() {
-        slot?.end()
+    private fun endSlot(reason: String = "scene_inactive") {
+        val previousSlot = slot
         slot = null
-        releaseAd()
-        policyBlocked = null
+        releasing = true
+        try {
+            previousSlot?.end(reason)
+            releaseAd(reason)
+            policyBlocked = null
+            platformSkipReported = false
+        } finally { releasing = false }
     }
 
-    private fun releaseAd() {
+    private fun releaseAd(reason: String = "cancelled") {
         releasing = true
         generation++
+        slot?.showFailure(reason)
         events?.end()
         events = null
         val previousPolicy = policyAttempt
@@ -488,30 +514,35 @@ class AdsBannerView(
                     val response = snapshot(ad)
                     main.post {
                         val host = owner.get()
-                        if (host == null || !host.isCurrent(generation)) { ad.destroy(); return@post }
-                        relay.prepareLoaded(response)
+                        if (host == null || !host.isCurrent(generation)) {
+                            relay.loaded(response)
+                            ad.destroy()
+                            return@post
+                        }
+                        relay.loaded(response)
+                        if (!host.isCurrent(generation)) { ad.destroy(); return@post }
                         val configurationError = runCatching {
                             installCallbacks(ad, relay, owner, generation)
                             registerBanner?.invoke(ad)
                         }.exceptionOrNull()
                         if (configurationError != null) {
-                            relay.failed("callback_configuration_failed", configurationError.message, response.id)
                             host.onConfigurationFailed(generation)
                             runCatching { ad.destroy() }
                             return@post
                         }
-                        relay.loaded(response)
                         host.onLoaded(generation, ad)
                     }
                 }
 
                 override fun onAdFailedToLoad(adError: LoadAdError) {
-                    val code = adError.code.toString()
+                    val code = adError.code.name
                     val reason = adError.message
+                    val result = adError.analyticsLoadResult()
+                    val analyticsReason = if (result == "error") "ad_error" else result
                     val response = adError.responseInfo?.responseId
                     main.post {
-                        relay.failed(code, reason, response)
-                        owner.get()?.onFailed(generation, reason)
+                        relay.failed(code, analyticsReason, response, result)
+                        owner.get()?.onFailed(generation, reason, code, analyticsReason)
                     }
                 }
             }

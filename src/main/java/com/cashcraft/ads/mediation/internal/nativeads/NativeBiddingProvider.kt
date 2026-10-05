@@ -132,8 +132,8 @@ internal class NativeAuction(
             if (candidates.all { it.settled }) finish()
         }
         override fun failed(reason: String, errorCode: String?) = dispatch { failed(candidate, reason, errorCode) }
-        override fun impression(adSource: String?, responseId: String?) = dispatch {
-            if (isWinner(candidate)) callbacks.impression(adSource, responseId)
+        override fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue?) = dispatch {
+            if (isWinner(candidate)) callbacks.impression(adSource, responseId, revenue)
         }
         override fun clicked(adSource: String?, responseId: String?) = dispatch {
             if (isWinner(candidate)) callbacks.clicked(adSource, responseId)

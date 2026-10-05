@@ -226,7 +226,7 @@ class NativePreloadTransferTest : InstrumentationTestCase() {
         val callbacks = object : com.cashcraft.ads.mediation.internal.nativeads.NativeCallbacks {
             override fun loaded(ad: com.cashcraft.ads.mediation.internal.nativeads.NativeAdHandle) = Unit
             override fun failed(reason: String, errorCode: String?) = fail(reason)
-            override fun impression(adSource: String?, responseId: String?) { impressions.incrementAndGet() }
+            override fun impression(adSource: String?, responseId: String?, revenue: com.cashcraft.ads.mediation.internal.nativeads.NativeRevenue?) { impressions.incrementAndGet() }
             override fun clicked(adSource: String?, responseId: String?) = Unit
             override fun closed() = Unit
             override fun overlayOpened() = Unit
@@ -303,7 +303,7 @@ class NativePreloadTransferTest : InstrumentationTestCase() {
                 if (cancelled) { cancelledDeliveries++; ad.destroy() } else ads.add(ad)
             }
             override fun failed(reason: String, errorCode: String?) { failures++ }
-            override fun impression(adSource: String?, responseId: String?) = Unit
+            override fun impression(adSource: String?, responseId: String?, revenue: com.cashcraft.ads.mediation.internal.nativeads.NativeRevenue?) = Unit
             override fun clicked(adSource: String?, responseId: String?) = Unit
             override fun closed() = Unit
             override fun overlayOpened() = Unit

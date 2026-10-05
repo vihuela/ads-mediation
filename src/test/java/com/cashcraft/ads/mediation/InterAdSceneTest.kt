@@ -29,9 +29,9 @@ import org.robolectric.util.ReflectionHelpers
 
 /** Calls the public scene entry with local inventory; no advertising SDK is initialized. */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [33], manifest = Config.NONE)
+@Config(sdk = [33], manifest = Config.NONE, shadows = [ShadowMMKV::class])
 class InterAdSceneTest {
-    private val fields = listOf("config", "umpConsentManager", "initializationStage", "nativeLogger")
+    private val fields = listOf("application", "config", "umpConsentManager", "initializationStage", "nativeLogger", "policyChecker", "policyUpdatePosted")
         .associateWith { ReflectionHelpers.getStaticField<Any?>(Ads::class.java, it) }
     private val providerStarted = ReflectionHelpers.getStaticField<AtomicBoolean>(Ads::class.java, "providerInitializationStarted")
     private val wasStarted = providerStarted.get()
@@ -40,16 +40,22 @@ class InterAdSceneTest {
     private val tasks = mutableListOf<AdTask>()
     private val results = mutableListOf<AdShowResult>()
     private val loading = mutableListOf<Boolean>()
+    private val events = mutableListOf<AdEvent>()
     private var config = AdsConfig(
         AdMobProviderConfig(AdMobIds.TEST),
         loggingEnabled = true, logTag = "InterSceneTest", autoShowAppOpen = false,
+        eventListener = { events += it },
         nativeFullScreenLayout = NativeLayout.Custom { error("not rendered by this test") },
     )
 
     @Before fun prepare() {
         resetInstallation()
         val app = RuntimeEnvironment.getApplication()
+        ReflectionHelpers.setStaticField(Ads::class.java, "application", app)
         ReflectionHelpers.setStaticField(Ads::class.java, "config", config)
+        ShadowMMKV.reset()
+        ReflectionHelpers.setStaticField(Ads::class.java, "policyChecker", AdPolicyChecker(AdUsageStore(app, 0)))
+        ReflectionHelpers.setStaticField(Ads::class.java, "policyUpdatePosted", true)
         AdLifecycleMonitor.install(app)
         controller.setup().visible().windowFocusChanged(true)
         ReflectionHelpers.setStaticField(Ads::class.java, "umpConsentManager",
@@ -119,6 +125,78 @@ class InterAdSceneTest {
         assertFalse(Ads.isFullScreenAdShowing)
     }
 
+    @Test fun `native fallback synchronous failure terminates the original qualified opportunity`() {
+        config = config.copy(provider = AdMobProviderConfig(AdMobIds.TEST.copy(interstitialId = "")))
+        start()
+        assertEquals(listOf(AdShowResult.Failed("no_preloaded_ad")), results)
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
+        assertTrue(events.all { it.format == AdFormat.INTERSTITIAL && it.position == "save_record" })
+        assertTrue(events.first().sessionId.isNotBlank())
+        assertEquals(events.first().sessionId, events.last().sessionId)
+        assertEquals("no_preloaded_ad", events.last().reason)
+    }
+
+    @Test fun `native fallback cancelled before position terminates the original opportunity`() {
+        config = config.copy(provider = AdMobProviderConfig(AdMobIds.TEST.copy(interstitialId = "")))
+        cacheNative()
+        val task = start()
+        assertNotNull(NativeFullScreenSession.current)
+        assertTrue(events.isEmpty())
+        task.cancel()
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
+        assertEquals(events.first().sessionId, events.last().sessionId)
+        assertEquals("opportunity_cancelled", events.last().reason)
+    }
+
+    @Test fun `native position owns failure even when the event listener cancels synchronously`() {
+        config = config.copy(provider = AdMobProviderConfig(AdMobIds.TEST.copy(interstitialId = "")))
+        cacheNative()
+        val task = start()
+        val session = checkNotNull(NativeFullScreenSession.current)
+        config = config.copy(eventListener = {
+            events += it
+            if (it.name == AdEventName.POSITION) task.cancel()
+        })
+        ReflectionHelpers.setStaticField(Ads::class.java, "config", config)
+        val slot = checkNotNull(Ads.newNativeSlot(session.request, session.onPosition))
+        slot.position()
+        slot.end("native_cancelled")
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
+        assertTrue(events.all { it.format == AdFormat.NATIVE && it.position == "save_record" })
+        assertEquals(events.first().sessionId, events.last().sessionId)
+        assertEquals(listOf(AdShowResult.Failed("opportunity_cancelled")), results)
+    }
+
+    @Test fun `native impression completes without an extra facade opportunity`() {
+        config = config.copy(provider = AdMobProviderConfig(AdMobIds.TEST.copy(interstitialId = "")))
+        cacheNative()
+        start()
+        val session = checkNotNull(NativeFullScreenSession.current)
+        val slot = checkNotNull(Ads.newNativeSlot(session.request, session.onPosition))
+        val native = slot.attempt({ 0L }, recordLoadEvents = false)
+        native.impression("test", "native-response", onActualImpression = session::onImpression)
+        assertTrue(session.impression.get())
+        assertEquals(listOf(AdEventName.POSITION), events.map { it.name })
+        session.complete()
+        assertEquals(listOf(AdShowResult.Dismissed), results)
+        native.paid(com.cashcraft.ads.mediation.internal.nativeads.NativeRevenue(
+            0, "USD", "test", "native-response", "exact"))
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION), events.map { it.name })
+        assertTrue(events.all { it.format == AdFormat.NATIVE })
+        assertEquals(events.first().sessionId, events.last().sessionId)
+        assertEquals(listOf(AdShowResult.Dismissed), results)
+    }
+
+    @Test fun `native handoff timeout before position retains the failed original opportunity`() {
+        config = config.copy(provider = AdMobProviderConfig(AdMobIds.TEST.copy(interstitialId = "")))
+        cacheNative()
+        start()
+        advance(3_000)
+        assertEquals(listOf(AdShowResult.Failed("native_handoff_timeout")), results)
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
+        assertEquals(events.first().sessionId, events.last().sessionId)
+    }
+
     @Test fun `empty cache ends once and foregrounding never revives a cancelled interstitial`() {
         start()
         controller.pause().stop()
@@ -173,6 +251,69 @@ class InterAdSceneTest {
         assertEquals(listOf(true, false), loading)
         assertNull(NativeFullScreenSession.current)
         assertFalse(Ads.isFullScreenAdShowing)
+    }
+
+    @Test fun `real inter and open entries retain a qualified empty opportunity with unknown bidding platform`() {
+        config = config.copy(provider = BiddingProviderConfig(AdMobProviderConfig(AdMobIds.TEST),
+            TopOnProviderConfig(TopOnIds("app", "key", appOpenPlacementId = "open", interstitialPlacementId = "inter"))),
+            nativeFullScreenLayout = null, interTimeoutMillis = { 0 }, openTimeoutMillis = { 0 })
+        ReflectionHelpers.setStaticField(Ads::class.java, "config", config)
+        for (format in listOf(AdFormat.INTERSTITIAL, AdFormat.APP_OPEN)) {
+            events.clear()
+            results.clear()
+            val position = "  original-${format.analyticsValue}  "
+            tasks += if (format == AdFormat.APP_OPEN) Ads.showOpen(position, onResult = results::add)
+                else Ads.showInter(position, onResult = results::add)
+            assertEquals(1, results.size)
+            assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
+            assertEquals(position, events.first().position)
+            assertTrue(events.first().sessionId.isNotEmpty())
+            assertEquals(events.first().sessionId, events.last().sessionId)
+            assertTrue(events.all { !it.platformKnown && it.analyticsParameters()["ad_platform"] == "unknown" })
+        }
+    }
+
+    @Test fun `rewarded wait terminal publishes one qualified opportunity without a fake loading terminal`() {
+        config = config.copy(provider = BiddingProviderConfig(AdMobProviderConfig(AdMobIds.TEST),
+            TopOnProviderConfig(TopOnIds("app", "key", rewardedPlacementId = "reward"))))
+        ReflectionHelpers.setStaticField(Ads::class.java, "config", config)
+        val rewardResults = mutableListOf<AdRewardResult>()
+        Ads.showRewardedWhenReady(controller.get(), "reward", timeoutMillis = 0, onResult = rewardResults::add)
+        assertEquals(1, rewardResults.size)
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
+        assertTrue(events.all { !it.platformKnown })
+        assertEquals("wait_timeout", events.last().reason)
+    }
+
+    @Test fun `real scene policy and platform skips do not create opportunities or alter final results`() {
+        config = config.copy(nativeFullScreenLayout = null, interTimeoutMillis = { 0 })
+        ReflectionHelpers.setStaticField(Ads::class.java, "config", config)
+        Ads.updatePolicy(AdPolicy(enabled = false))
+        start().cancel()
+        assertEquals(listOf(AdEventName.SCENE_SKIP), events.map { it.name })
+        assertEquals("global_disabled", events.single().reason)
+        assertEquals(listOf(AdShowResult.Blocked(AdBlockReason.GLOBAL_DISABLED)), results)
+        events.clear()
+        results.clear()
+        Ads.updatePolicy(AdPolicy(platforms = mapOf(AdPlatform.ADMOB to false)))
+        start().cancel()
+        assertEquals(listOf(AdEventName.SCENE_SKIP), events.map { it.name })
+        assertEquals("platform_disabled", events.single().reason)
+        assertTrue(results.single() is AdShowResult.Failed) // Same business result as before telemetry repair.
+        assertFalse(events.single().analyticsParameters().containsKey("session_id"))
+    }
+
+    @Test fun `scene invalidated during wait still terminates its eligible request once`() {
+        config = config.copy(nativeFullScreenLayout = null, interTimeoutMillis = { 500 })
+        ReflectionHelpers.setStaticField(Ads::class.java, "config", config)
+        var valid = true
+        tasks += Ads.showInter("save", isSceneValid = { valid }, onResult = results::add)
+        valid = false
+        advance(100)
+        tasks.last().cancel()
+        assertEquals(listOf(AdShowResult.Failed("scene_invalid")), results)
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
+        assertEquals("scene_invalid", events.last().reason)
     }
 
     private fun start(): AdTask {

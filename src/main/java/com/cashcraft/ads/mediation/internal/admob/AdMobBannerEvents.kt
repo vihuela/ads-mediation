@@ -4,6 +4,14 @@ import com.cashcraft.ads.mediation.internal.AdLoadSession
 import com.cashcraft.ads.mediation.internal.AdsModuleLogger
 import com.cashcraft.ads.mediation.internal.BannerDisplaySession
 import com.cashcraft.ads.mediation.internal.BannerSlot
+import com.google.android.libraries.ads.mobile.sdk.common.LoadAdError
+
+internal fun LoadAdError.analyticsLoadResult(): String = when (code) {
+    LoadAdError.ErrorCode.NO_FILL -> "no_fill"
+    LoadAdError.ErrorCode.TIMEOUT -> "timeout"
+    LoadAdError.ErrorCode.CANCELLED -> "cancelled"
+    else -> "error"
+}
 
 /** Snapshot at SDK callback ingress, before dispatching to the main thread. */
 internal data class BannerResponse(
@@ -41,7 +49,10 @@ internal class AdMobBannerEvents(
 
     @Synchronized
     fun loaded(response: BannerResponse) {
-        if (ended) return
+        if (ended) {
+            if (trackLoad) load.loaded(response.source, response.id)
+            return
+        }
         rememberInitialResponse(response)
         remember(response, if (loadFinished || !trackLoad) null else load.requestId)
         loadFinished = true
@@ -49,10 +60,9 @@ internal class AdMobBannerEvents(
     }
 
     @Synchronized
-    fun failed(code: String?, reason: String?, responseId: String?) {
-        if (ended) return
+    fun failed(code: String?, reason: String?, responseId: String?, result: String = "failed") {
         loadFinished = true
-        if (trackLoad) load.failed("failed", code, reason, responseId)
+        if (trackLoad) load.failed(result, code, reason, responseId)
     }
 
     @Synchronized

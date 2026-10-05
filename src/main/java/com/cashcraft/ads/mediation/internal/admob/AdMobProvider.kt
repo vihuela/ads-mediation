@@ -51,6 +51,7 @@ import com.cashcraft.ads.mediation.internal.FullScreenShowAttempt
 import com.cashcraft.ads.mediation.AdSceneType
 import com.cashcraft.ads.mediation.internal.AdPolicyAttempt
 import com.cashcraft.ads.mediation.internal.AdPolicyRequest
+import com.cashcraft.ads.mediation.internal.admob.analyticsLoadResult
 import com.cashcraft.ads.mediation.internal.admob.AdMobConfig
 import com.cashcraft.ads.mediation.internal.admob.AdMobEventName
 import com.cashcraft.ads.mediation.internal.admob.AdMobFormat
@@ -427,7 +428,7 @@ object AdMobAds {
                         AdMobFormat.REWARDED -> RewardedAdPreloader.destroy(preloadId)
                         AdMobFormat.BANNER, AdMobFormat.NATIVE -> Unit
                     }
-                    preloadLoadSessions.remove(preloadId)
+                    preloadLoadSessions.remove(preloadId)?.failed("cancelled", null, null, null)
                     preloadStartedAt.remove(preloadId)
                 }
             }
@@ -499,23 +500,31 @@ object AdMobAds {
             override fun onAdsExhausted(preloadId: String) {
                 mainHandler.post {
                     if (!descriptor.started || descriptor.generation != generation) return@post
-                    if (Ads.canLoadAds(AdPlatform.ADMOB)) beginPreloadCycle(preloadId)
-                    else onPolicyChanged()
+                    // Exhaustion is a cache notification, not an observable SDK load start.
+                    if (!Ads.canLoadAds(AdPlatform.ADMOB)) onPolicyChanged()
                 }
             }
         }
-        beginPreloadCycle(preloadId)
+        val loadSession = events.createLoad(descriptor.format, descriptor.adUnitId, descriptor.bufferSize)
+        preloadLoadSessions[preloadId] = loadSession
         if (!descriptor.started || descriptor.generation != generation || !Ads.canLoadAds(AdPlatform.ADMOB)) {
             onPolicyChanged()
             return
         }
         preloadStartedAt[preloadId] = SystemClock.elapsedRealtime()
         val configuration = preloadConfiguration(descriptor.adUnitId, descriptor.bufferSize)
-        when (descriptor.format) {
-            AdMobFormat.APP_OPEN -> AppOpenAdPreloader.start(preloadId, configuration, preloadCallback)
-            AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.start(preloadId, configuration, preloadCallback)
-            AdMobFormat.REWARDED -> RewardedAdPreloader.start(preloadId, configuration, preloadCallback)
-            AdMobFormat.BANNER, AdMobFormat.NATIVE -> Unit
+        try {
+            loadSession.invokeLoad {
+                when (descriptor.format) {
+                    AdMobFormat.APP_OPEN -> AppOpenAdPreloader.start(preloadId, configuration, preloadCallback)
+                    AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.start(preloadId, configuration, preloadCallback)
+                    AdMobFormat.REWARDED -> RewardedAdPreloader.start(preloadId, configuration, preloadCallback)
+                    AdMobFormat.BANNER, AdMobFormat.NATIVE -> Unit
+                }
+            }
+        } catch (error: Throwable) {
+            loadSession.failed("error", "exception", error.message, null)
+            throw error // Preserve the SDK start failure behavior.
         }
     }
 
@@ -529,9 +538,13 @@ object AdMobAds {
             return
         }
         val startedAt = SystemClock.elapsedRealtime()
+        val loadSession = events.createBannerPreloadLoad(descriptor.adUnitId)
         // ponytail: one ad per placement; use a native no-refill switch if the SDK adds one.
-        BannerAd.load(request, object : AdLoadCallback<BannerAd> {
+        val callback = object : AdLoadCallback<BannerAd> {
             override fun onAdLoaded(ad: BannerAd) = onMain {
+                val responseInfo: ResponseInfo? = ad.getResponseInfo()
+                // Loading completed even when this generation can no longer retain the ad.
+                loadSession.loaded(responseInfo?.loadedAdSourceResponseInfo?.name, responseInfo?.responseId)
                 if (bannerPreloadDescriptors[descriptor.adUnitId to descriptor.position] !== descriptor ||
                     descriptor.settled || descriptor.generation != generation ||
                     !Ads.canLoadAds(AdPlatform.ADMOB)
@@ -546,31 +559,25 @@ object AdMobAds {
             }
 
             override fun onAdFailedToLoad(adError: LoadAdError) = onMain {
+                val result = adError.analyticsLoadResult()
+                loadSession.failed(
+                    result, adError.code.name, if (result == "error") "ad_error" else result,
+                    adError.responseInfo?.responseId,
+                )
                 if (descriptor.generation != generation) return@onMain
                 descriptor.settled = true // No retry or replenishment, including after a failure.
             }
-        })
+        }
+        try {
+            loadSession.invokeLoad { BannerAd.load(request, callback) }
+        } catch (error: Throwable) {
+            loadSession.failed("error", "load_exception", "exception", null)
+            throw error // Preserve the SDK load failure behavior.
+        }
     }
 
     private fun bannerPreloadId(request: BannerRequest, size: AdSize) =
         "cashcraft_banner:${request.adUnitId}:${request.position}:${size.width}x${size.height}"
-
-    private fun beginPreloadCycle(preloadId: String) {
-        if (!Ads.canLoadAds(AdPlatform.ADMOB)) return
-        val descriptor = preloadDescriptors[preloadId] ?: return
-        preloadLoadSessions[preloadId] = events.beginLoad(
-            format = descriptor.format,
-            adUnitId = descriptor.adUnitId,
-            bufferSize = descriptor.bufferSize,
-        )
-    }
-
-    private fun LoadAdError.analyticsLoadResult(): String = when (code) {
-        LoadAdError.ErrorCode.NO_FILL -> "no_fill"
-        LoadAdError.ErrorCode.TIMEOUT -> "timeout"
-        LoadAdError.ErrorCode.CANCELLED -> "cancelled"
-        else -> "error"
-    }
 
     private fun preloadConfiguration(adUnitId: String, bufferSize: Int) = PreloadConfiguration(
         AdRequest.Builder(adUnitId).build(),
@@ -760,7 +767,7 @@ object AdMobAds {
                 onMain {
                     rewardEarned = true
                     session.emit(
-                        AdMobEventName.REWARD_EARNED,
+                        AdMobEventName.REWARD,
                         reason = "${rewardItem.type}:${rewardItem.amount}",
                     )
                 }
@@ -790,6 +797,7 @@ object AdMobAds {
             failBeforeShow(session, reason, onResult)
             return false
         }
+        session.admit()
         return true
     }
 
@@ -842,7 +850,7 @@ object AdMobAds {
             if (!session.attempt.complete()) return@onFailure
             ad.destroy()
             val failure = error.message ?: "show_exception"
-            session.showFailure(failure, cause = error)
+            session.showFailure("exception", cause = error)
             runCatching { onResult(AdShowResult.Failed(failure)) }
         }
     }
@@ -867,7 +875,7 @@ object AdMobAds {
     ) {
         if (!session.attempt.complete()) return
         val reason = error.message.ifBlank { "show_failed" }
-        session.showFailure(reason, error.code.toString())
+        session.showFailure("ad_error", error.code.toString())
         ad.destroy()
         runCatching { onResult(AdShowResult.Failed(reason)) }
     }
@@ -884,8 +892,7 @@ object AdMobAds {
         val adNetwork = adSourceInfo?.name?.trim()?.takeIf(String::isNotEmpty)
         val impressionId = responseInfo.responseId?.trim()?.takeIf(String::isNotEmpty)
         val precisionType = value.precisionType.name.takeIf(String::isNotEmpty)
-        emit(
-            AdMobEventName.PAID,
+        if (!revenue(
             adSource = adNetwork,
             responseId = impressionId,
             value = valueMicros / MICROS_PER_UNIT,
@@ -893,7 +900,7 @@ object AdMobAds {
             currency = currencyCode,
             mediationAdapterClassName = adapterClassName,
             precisionType = precisionType,
-        )
+        )) return
         runCatching {
             config.revenueListener.onRevenuePaid(
                 AdMobRevenuePayload(

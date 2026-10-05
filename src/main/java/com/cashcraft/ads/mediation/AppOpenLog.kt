@@ -10,8 +10,8 @@ fun AdEvent.appOpenLogLines(): List<String> = buildList {
     val provider = if (platform == AdPlatform.ADMOB) "AdMob" else "TopOn"
     val source = adSource?.takeIf { it.isNotBlank() }?.logText() ?: "未提供"
     val message = when (name) {
-        AdEventName.LOAD_REQUEST -> "$provider 开始加载开屏广告。"
-        AdEventName.LOAD_RESULT -> when (result) {
+        AdEventName.LOAD -> "$provider 开始加载开屏广告。"
+        AdEventName.LOADED, AdEventName.LOAD_FAIL -> when (result) {
             "filled" -> "$provider 加载成功，尚未确认曝光；实际来源=$source。"
             "no_fill" -> "$provider 加载结束，暂无广告填充。"
             "cancelled" -> "$provider 加载已取消。"
@@ -26,21 +26,20 @@ fun AdEvent.appOpenLogLines(): List<String> = buildList {
             }
             "比价：AdMob ${admobValue.flowPrice()}、TopOn ${topOnValue.flowPrice()} 美元/次展示，$winner。"
         }
-        AdEventName.IMPRESSION -> "$provider 已确认广告曝光，实际来源=$source。"
+        AdEventName.IMPRESSION -> {
+            val amount = valueMicros?.let { BigDecimal.valueOf(it, 6).stripTrailingZeros().toPlainString() }
+                ?: value?.takeIf { it.isFinite() }?.logPrice() ?: "金额未知"
+            "$provider 已确认广告曝光，实际来源=$source；收益=$amount ${currency?.logText() ?: "币种未知"}。"
+        }
         AdEventName.SHOW_FAIL -> "$provider 获取或展示结束：${reason.flowReason()}。"
         AdEventName.CLICK -> "$provider 已通知广告点击。"
         AdEventName.DISMISS -> "$provider 已关闭开屏广告。"
-        AdEventName.PAID -> {
-            val amount = valueMicros?.let { BigDecimal.valueOf(it, 6).stripTrailingZeros().toPlainString() }
-                ?: value?.takeIf { it.isFinite() }?.logPrice() ?: "金额未知"
-            "收到 $provider 收益回调：$amount ${currency?.logText() ?: "币种未知"}。"
-        }
         else -> "收到 $provider 广告事件，详情见调试日志。"
     }
     add("[开屏广告]$scene $message")
     val stage = when (name) {
-        AdEventName.LOAD_REQUEST -> "开始加载"
-        AdEventName.LOAD_RESULT -> when (result) {
+        AdEventName.LOAD -> "开始加载"
+        AdEventName.LOADED, AdEventName.LOAD_FAIL -> when (result) {
             "filled" -> "加载成功"
             "no_fill" -> "加载无填充"
             "cancelled" -> "加载取消"
@@ -53,14 +52,13 @@ fun AdEvent.appOpenLogLines(): List<String> = buildList {
         AdEventName.SHOW_FAIL -> "展示失败"
         AdEventName.CLICK -> "用户点击"
         AdEventName.DISMISS -> "已关闭"
-        AdEventName.PAID -> "收益回调"
         else -> name.analyticsName
     }
     add(buildString {
         append("$prefix $stage | sid=$sid platform=$platform event=${name.analyticsName}")
         if (!isLoadEvent) append(" pos=${position.logText()}")
         if (adSource != null || name == AdEventName.IMPRESSION ||
-            (name == AdEventName.LOAD_RESULT && result == "filled")) {
+            name == AdEventName.LOADED) {
             append(" source=${adSource?.takeIf { it.isNotBlank() }?.logText() ?: "unknown"}")
         }
         result?.let { append(" result=${it.logText()}") }
@@ -69,14 +67,14 @@ fun AdEvent.appOpenLogLines(): List<String> = buildList {
         if (name == AdEventName.BID_RESULT) {
             append(" winner=${winnerPlatform ?: "none"} winUsd=${winningValue.logPrice()}")
         }
-        if (name == AdEventName.PAID) {
+        if (name == AdEventName.IMPRESSION) {
             value?.let { append(" paid=${it.logPrice()}") }
             valueMicros?.let { append(" micros=$it") }
             currency?.let { append(" currency=${it.logText()}") }
             precisionType?.let { append(" precision=${it.logText()}") }
         }
     })
-    if (name == AdEventName.LOAD_REQUEST || name == AdEventName.POSITION ||
+    if (name == AdEventName.LOAD || name == AdEventName.POSITION ||
         requestId != null || responseId != null || mediationAdapterClassName != null) {
         add(buildString {
             append("$prefix 广告标识 | sid=$sid unit=${adUnitId.logText()}")

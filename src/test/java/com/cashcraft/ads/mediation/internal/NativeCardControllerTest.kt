@@ -80,7 +80,7 @@ class NativeCardControllerTest {
         assertEquals(NativeState.Loaded, h.controller.state)
         assertEquals(1, h.renders)
         assertEquals(2, h.events.count { it.name == AdEventName.POSITION })
-        assertEquals(listOf("cancelled", "filled"), h.events.filter { it.name == AdEventName.LOAD_RESULT }.map { it.result })
+        assertEquals(listOf("cancelled", "filled"), h.events.filter { it.name in setOf(AdEventName.LOADED, AdEventName.LOAD_FAIL) }.map { it.result })
     }
 
     @Test fun `destroy is irreversible and clears the callbacks reaching the page`() {
@@ -95,7 +95,7 @@ class NativeCardControllerTest {
         assertEquals(1, ad.releases)
         assertEquals(NativeState.Destroyed, h.controller.state)
         assertEquals(1, h.loads.size)
-        assertEquals(1, h.events.count { it.name == AdEventName.LOAD_RESULT })
+        assertEquals(1, h.events.count { it.name in setOf(AdEventName.LOADED, AdEventName.LOAD_FAIL) })
     }
 
     @Test fun `retry only works for an eligible failed cycle and is not queued`() {
@@ -109,7 +109,7 @@ class NativeCardControllerTest {
         h.controller.retry()
         h.controller.retry()
         assertEquals(2, h.loads.size)
-        assertEquals(2, h.events.filter { it.name == AdEventName.LOAD_REQUEST }.map { it.requestId }.distinct().size)
+        assertEquals(2, h.events.filter { it.name == AdEventName.LOAD }.map { it.requestId }.distinct().size)
     }
 
     @Test fun `waiting and failed selected provider never loads on aggregate readiness`() {
@@ -141,7 +141,7 @@ class NativeCardControllerTest {
         h.display = true
         h.controller.refresh()
         assertEquals(2, h.loads.size)
-        assertEquals(1, h.events.count { it.name == AdEventName.POSITION })
+        assertEquals(2, h.events.count { it.name == AdEventName.POSITION })
     }
 
     @Test fun `destroy reentered from loading notification prevents the SDK call`() {
@@ -154,7 +154,7 @@ class NativeCardControllerTest {
 
     @Test fun `permission revoked by load result callback prevents mounting`() {
         val h = Host().start()
-        h.onEvent = { if (it.name == AdEventName.LOAD_RESULT) h.gate = NativeAvailability(failure = "consent_not_obtained") }
+        h.onEvent = { if (it.name in setOf(AdEventName.LOADED, AdEventName.LOAD_FAIL)) h.gate = NativeAvailability(failure = "consent_not_obtained") }
         val ad = Ad()
         h.loads.single().loaded(ad)
         assertEquals(0, h.renders)
@@ -171,7 +171,7 @@ class NativeCardControllerTest {
         assertEquals(NativeState.Failed("unsupported_native_render_mode"), h.controller.state)
         assertEquals(1, h.loads.size)
         assertEquals(1, h.events.count { it.name == AdEventName.SHOW_FAIL })
-        assertEquals("filled", h.events.single { it.name == AdEventName.LOAD_RESULT }.result)
+        assertEquals("filled", h.events.single { it.name in setOf(AdEventName.LOADED, AdEventName.LOAD_FAIL) }.result)
         assertTrue(h.tasks.isEmpty()) // Unsupported layouts cannot be repaired by requesting more ads.
     }
 
@@ -192,6 +192,23 @@ class NativeCardControllerTest {
         assertEquals(2, h.loads.size)
     }
 
+    @Test fun `template close before exposure ends opportunity as cancelled and never dismisses`() {
+        val h = Host().start()
+        val callbacks = h.loads.single()
+        callbacks.loaded(Ad())
+        callbacks.closed()
+        callbacks.closed()
+        callbacks.impression("test", "response")
+        callbacks.paid(NativeRevenue(0, "USD", "test", "response", "exact"))
+        assertEquals(1, h.events.count { it.name == AdEventName.SHOW_FAIL })
+        val failed = h.events.single { it.name == AdEventName.SHOW_FAIL }
+        assertEquals("cancelled", failed.reason)
+        assertEquals(h.events.first { it.name == AdEventName.POSITION }.sessionId, failed.sessionId)
+        assertTrue(h.events.none { it.name == AdEventName.DISMISS })
+        assertEquals(1, h.events.count { it.name == AdEventName.IMPRESSION })
+        assertEquals(failed.sessionId, h.revenues.single().sessionId)
+    }
+
     @Test fun `confirmed template close never resurrects in the same cycle`() {
         val h = Host().start()
         val callbacks = h.loads.single()
@@ -207,15 +224,15 @@ class NativeCardControllerTest {
     @Test fun `paid survives disposal and throwing listeners without being attributed to B`() {
         val h = Host().start()
         val a = h.loads.single()
-        val requestA = h.events.single { it.name == AdEventName.LOAD_REQUEST }.requestId
+        val requestA = h.events.single { it.name == AdEventName.LOAD }.requestId
         h.controller.update(false, true)
         h.controller.update(true, true)
-        h.onEvent = { if (it.name == AdEventName.PAID) error("host event failed") }
+        h.onEvent = { if (it.name == AdEventName.IMPRESSION) error("host event failed") }
         a.paid(NativeRevenue(0, "USD", "test", "ad-a", "PRECISE"))
         a.paid(NativeRevenue(0, "USD", "test", "ad-a", "PRECISE"))
         assertEquals(1, h.revenues.size)
         assertEquals(0L, h.revenues.single().valueMicros)
-        assertEquals(requestA, h.events.single { it.name == AdEventName.PAID }.requestId)
+        assertEquals(requestA, h.events.single { it.name == AdEventName.IMPRESSION }.requestId)
         assertEquals(NativeState.Loading, h.controller.state)
     }
 
@@ -226,6 +243,8 @@ class NativeCardControllerTest {
         repeat(2) { callbacks.impression("test", "id"); callbacks.clicked("test", "id") }
         callbacks.overlayOpened()
         callbacks.overlayClosed()
+        assertEquals(0, h.events.count { it.name == AdEventName.IMPRESSION })
+        repeat(2) { callbacks.paid(NativeRevenue(7, "USD", "test", "id", "exact")) }
         h.controller.destroy()
         assertEquals(1, h.events.count { it.name == AdEventName.IMPRESSION })
         assertEquals(2, h.events.count { it.name == AdEventName.CLICK })
@@ -249,7 +268,7 @@ class NativeCardControllerTest {
         val h = Host().start()
         var restarted = false
         h.onEvent = {
-            if (!restarted && it.name == AdEventName.LOAD_RESULT && it.result == "cancelled") {
+            if (!restarted && it.name in setOf(AdEventName.LOADED, AdEventName.LOAD_FAIL) && it.result == "cancelled") {
                 restarted = true
                 h.display = true
                 h.controller.update(false, true)
@@ -281,10 +300,10 @@ class NativeCardControllerTest {
         callbacks.paid(NativeRevenue(1, "", null, null, null))
         repeat(2) { callbacks.paid(NativeRevenue(0, "USD", null, null, null)) }
         assertEquals(1, h.revenues.size)
-        assertEquals(0, h.events.count { it.name == AdEventName.IMPRESSION })
+        assertEquals(1, h.events.count { it.name == AdEventName.IMPRESSION })
         callbacks.impression(null, null)
         assertEquals(1, h.events.count { it.name == AdEventName.IMPRESSION })
-        assertEquals(h.revenues.single().sessionId, h.events.single { it.name == AdEventName.PAID }.sessionId)
+        assertEquals(h.revenues.single().sessionId, h.events.single { it.name == AdEventName.IMPRESSION }.sessionId)
     }
 
     @Test fun `TopOn revenue keeps actual mode and repeated failed attempts each terminate once`() {
@@ -296,7 +315,7 @@ class NativeCardControllerTest {
         h.loads.last().loaded(Ad())
         h.loads.last().paid(NativeRevenue(1, "USD", "test", "show-a", "exact", topOnAdInfo = Any()))
         assertEquals(2, h.events.count { it.name == AdEventName.SHOW_FAIL })
-        assertEquals(3, h.events.count { it.name == AdEventName.LOAD_RESULT })
+        assertEquals(3, h.events.count { it.name in setOf(AdEventName.LOADED, AdEventName.LOAD_FAIL) })
         assertEquals(1, h.revenues.size)
         assertTrue(h.events.all { it.mediationMode == AdMediationMode.TOPON })
         assertEquals(AdMediationMode.TOPON, h.revenues.single().mediationMode)
@@ -306,7 +325,7 @@ class NativeCardControllerTest {
         val h = Host(policy = NativeRetentionPolicy.RETAIN_WHILE_PAGE_ALIVE).start()
         val ad = Ad(expiry = 50, retainable = true)
         h.loads.single().loaded(ad)
-        val requestId = h.events.single { it.name == AdEventName.LOAD_REQUEST }.requestId
+        val requestId = h.events.single { it.name == AdEventName.LOAD }.requestId
         h.loads.single().impression("test", "response")
         h.display = false
         h.controller.refresh()
@@ -326,7 +345,7 @@ class NativeCardControllerTest {
         assertEquals(1, h.renders)
         assertEquals(1, h.loads.size)
         ad.listener!!.paid(NativeRevenue(1, "USD", "test", "response", "PRECISE"))
-        assertEquals(requestId, h.events.single { it.name == AdEventName.PAID }.requestId)
+        assertEquals(requestId, h.events.single { it.name == AdEventName.IMPRESSION }.requestId)
         assertEquals(1, h.events.count { it.name == AdEventName.POSITION })
         h.controller.destroy()
         h.controller.destroy()

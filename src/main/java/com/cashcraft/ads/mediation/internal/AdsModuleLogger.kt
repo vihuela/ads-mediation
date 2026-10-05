@@ -21,7 +21,7 @@ internal class AdsModuleLogger(
             event.appOpenLogLines().forEachIndexed { index, message ->
                 if (index > 0) Log.d(tag, message)
                 else if (event.name == AdEventName.SHOW_FAIL ||
-                    (event.name == AdEventName.LOAD_RESULT && event.result != "filled")) {
+                    event.name == AdEventName.LOAD_FAIL) {
                     Log.w(tag, message)
                 } else Log.i(tag, message)
             }
@@ -197,17 +197,16 @@ internal fun formatNativeEventLogMessage(event: AdEvent): String? {
             }
             "比价：AdMob ${nativePrice(event.admobValue)}、TopOn ${nativePrice(event.topOnValue)} 美元/次展示，$winner。"
         }
-        AdEventName.IMPRESSION -> "$platform 已确认广告曝光。"
-        AdEventName.CLICK -> "$platform 已通知广告点击。"
-        AdEventName.DISMISS -> "$platform 已确认卡片关闭。"
-        AdEventName.PAID -> {
+        AdEventName.IMPRESSION -> {
             // 优先使用原始微单位，避免大额 Double 丢失精度；仅改变日志显示。
             val amount = event.valueMicros?.let { BigDecimal.valueOf(it, 6).stripTrailingZeros().toPlainString() }
                 ?: event.value?.takeIf { it.isFinite() }?.toPlainLogString() ?: "金额未知"
-            "收到平台收益回调：$amount ${event.currency.orEmpty().nativeLogText()}。"
+            "$platform 已确认广告曝光；收益=$amount ${event.currency.orEmpty().nativeLogText()}。"
         }
+        AdEventName.CLICK -> "$platform 已通知广告点击。"
+        AdEventName.DISMISS -> "$platform 已确认卡片关闭。"
         AdEventName.SHOW_FAIL -> "获取或展示结束 | ${nativeReason(event.reason)}"
-        AdEventName.LOAD_REQUEST, AdEventName.LOAD_RESULT, AdEventName.REWARD_EARNED, AdEventName.BANNER_REFRESH -> return null
+        AdEventName.LOAD, AdEventName.LOADED, AdEventName.LOAD_FAIL, AdEventName.REWARD, AdEventName.BANNER_REFRESH, AdEventName.SCENE_SKIP -> return null
     }
     return "[原生广告][${(event.slotId ?: event.position.removeSuffix("_native")).nativeLogText()}] $message"
 }
@@ -217,8 +216,8 @@ internal fun formatNativeDebugLogMessage(event: AdEvent): String = buildString {
     if (!event.isLoadEvent) append("[").append((event.slotId ?: event.position).nativeLogText()).append("]")
     append(" ")
     append(when (event.name) {
-        AdEventName.LOAD_REQUEST -> "开始本层获取"
-        AdEventName.LOAD_RESULT -> when (event.result) {
+        AdEventName.LOAD -> "开始本层获取"
+        AdEventName.LOADED, AdEventName.LOAD_FAIL -> when (event.result) {
             "filled" -> "本层获取成功，尚未确认曝光"
             "cancelled" -> "本层获取已取消"
             "no_fill" -> "本层获取结束，暂无广告填充"

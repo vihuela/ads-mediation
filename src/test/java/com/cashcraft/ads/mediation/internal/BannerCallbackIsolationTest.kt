@@ -17,8 +17,8 @@ class BannerCallbackIsolationTest {
     @Test
     fun `each throwing event callback leaves load and display terminal and a new slot usable`() {
         val expected = listOf(
-            AdEventName.POSITION, AdEventName.LOAD_REQUEST, AdEventName.LOAD_RESULT,
-            AdEventName.IMPRESSION, AdEventName.PAID, AdEventName.CLICK, AdEventName.DISMISS,
+            AdEventName.POSITION, AdEventName.LOAD, AdEventName.LOADED,
+            AdEventName.IMPRESSION, AdEventName.CLICK, AdEventName.DISMISS,
         )
         for (throwAt in expected) {
             val events = mutableListOf<AdEvent>()
@@ -74,8 +74,8 @@ class BannerCallbackIsolationTest {
             next.paid(2L, "USD", null, 2L)
             assertEquals(
                 "new slot after $throwAt",
-                listOf(AdEventName.POSITION, AdEventName.IMPRESSION, AdEventName.PAID),
-                events.takeLast(3).map(AdEvent::name),
+                listOf(AdEventName.POSITION, AdEventName.IMPRESSION),
+                events.takeLast(2).map(AdEvent::name),
             )
             assertEquals(2, revenues.size)
             assertEquals(next.sessionId, revenues.last().sessionId)
@@ -91,7 +91,7 @@ class BannerCallbackIsolationTest {
         var revenueThrows = 0
         val listener = AdEventListener { event ->
             events += event
-            if (event.name == AdEventName.LOAD_RESULT) {
+            if (event.name in setOf(AdEventName.LOADED, AdEventName.LOAD_FAIL)) {
                 resultThrows++
                 error("load result listener")
             }
@@ -123,8 +123,8 @@ class BannerCallbackIsolationTest {
         relay.paid(recovered, 0L, "USD", null, 1L)
 
         assertEquals(
-            listOf(AdEventName.POSITION, AdEventName.LOAD_REQUEST, AdEventName.LOAD_RESULT,
-                AdEventName.IMPRESSION, AdEventName.PAID),
+            listOf(AdEventName.POSITION, AdEventName.LOAD, AdEventName.LOAD_FAIL,
+                AdEventName.IMPRESSION),
             events.map(AdEvent::name),
         )
         assertEquals("failed", events[2].result)

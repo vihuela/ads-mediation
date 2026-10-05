@@ -35,7 +35,7 @@ class AdsModuleLoggerTest {
     fun `load result log contains correlation result and latency fields`() {
         val message = formatAdEventLogMessage(
             AdEvent(
-                name = AdEventName.LOAD_RESULT,
+                name = AdEventName.LOADED,
                 platform = AdPlatform.TOPON,
                 format = AdFormat.REWARDED,
                 position = "preload_rewarded",

@@ -62,7 +62,8 @@ internal interface NativeCallbacks {
     fun bidResult(decision: BidDecision) = Unit
     fun loaded(ad: NativeAdHandle)
     fun failed(reason: String, errorCode: String? = null)
-    fun impression(adSource: String?, responseId: String?)
+    /** Actual SDK exposure; revenue is supplied only by TopOn onAdImpressed. */
+    fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue? = null)
     fun clicked(adSource: String?, responseId: String?)
     fun closed()
     fun overlayOpened()

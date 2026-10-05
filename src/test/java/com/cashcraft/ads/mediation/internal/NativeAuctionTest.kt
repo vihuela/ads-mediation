@@ -82,16 +82,16 @@ class NativeAuctionTest {
         val ad = Ad(AdPlatform.TOPON, 2.0)
         h.loaded(ad)
         h.loaded(Ad(AdPlatform.ADMOB, 1.0))
-        ad.listener!!.impression("Pangle", "inventory-response")
+        ad.listener!!.impression("Pangle", "inventory-response", revenue("inventory-response"))
         ad.listener!!.paid(revenue("inventory-response"))
-        assertFalse(h.events.any { it.name == AdEventName.LOAD_REQUEST || it.name == AdEventName.LOAD_RESULT })
+        assertFalse(h.events.any { it.name == AdEventName.LOAD || it.name in setOf(AdEventName.LOADED, AdEventName.LOAD_FAIL) })
         val bid = h.events.single { it.name == AdEventName.BID_RESULT }
         val impression = h.events.single { it.name == AdEventName.IMPRESSION }
-        val paid = h.events.single { it.name == AdEventName.PAID }
         assertEquals(AdPlatform.TOPON, bid.winnerPlatform)
-        assertEquals(impression.requestId, paid.requestId)
-        assertEquals(impression.sessionId, paid.sessionId)
-        assertEquals("topon-id", paid.adUnitId)
+        assertEquals(impression.sessionId, h.revenues.single().sessionId)
+        assertEquals("topon-id", impression.adUnitId)
+        assertEquals(0L, impression.valueMicros)
+        assertEquals("USD", impression.currency)
         assertEquals(0L, h.revenues.single().valueMicros)
     }
 
@@ -120,7 +120,7 @@ class NativeAuctionTest {
         assertEquals(AdPlatform.TOPON, bid.winnerPlatform)
         assertEquals(0.005, bid.winningValue!!, 0.0)
         h.listeners.getValue(AdPlatform.ADMOB).impression("loser", "wrong")
-        h.listeners.getValue(AdPlatform.TOPON).impression("Pangle", "topon-show")
+        h.listeners.getValue(AdPlatform.TOPON).impression("Pangle", "topon-show", revenue())
         h.listeners.getValue(AdPlatform.TOPON).clicked("Pangle", "topon-show")
         h.listeners.getValue(AdPlatform.TOPON).paid(revenue())
         val impression = h.events.single { it.name == AdEventName.IMPRESSION }
@@ -128,15 +128,18 @@ class NativeAuctionTest {
         assertEquals(AdPlatform.TOPON, impression.platform)
         assertEquals(AdMediationMode.BIDDING, impression.mediationMode)
         assertEquals(impression.requestId, h.events.single {
-            it.name == AdEventName.LOAD_REQUEST && it.platform == AdPlatform.TOPON
+            it.name == AdEventName.LOAD && it.platform == AdPlatform.TOPON
         }.requestId)
-        assertEquals(2, h.events.filter { it.name == AdEventName.LOAD_REQUEST }.map { it.requestId }.distinct().size)
-        assertEquals(2, h.events.count { it.name == AdEventName.LOAD_RESULT })
+        assertEquals(2, h.events.filter { it.name == AdEventName.LOAD }.map { it.requestId }.distinct().size)
+        assertEquals(2, h.events.count { it.name in setOf(AdEventName.LOADED, AdEventName.LOAD_FAIL) })
         h.controller.destroy()
         assertEquals(1, topon.releases)
-        // Legitimate late revenue remains linked to the original selected ad, never to a new page.
+        // This is a repeat payment for the same displayed object, not a second impression.
+        // A changed response field must not bypass display-session revenue dedup.
         h.listeners.getValue(AdPlatform.TOPON).paid(revenue("late-paid"))
-        assertEquals(2, h.revenues.size)
+        assertEquals(1, h.revenues.size)
+        assertEquals(1, h.events.count { it.name == AdEventName.IMPRESSION })
+        assertEquals(impression.sessionId, h.revenues.single().sessionId)
         assertTrue(h.revenues.all { it.platform == AdPlatform.TOPON && it.placementId == "topon-id" })
     }
 
@@ -187,7 +190,7 @@ class NativeAuctionTest {
         val paid = revenue("winner-paid")
         h.loaded(winner)
         h.listeners.getValue(AdPlatform.TOPON).paid(paid)
-        h.onRender = { it.listener!!.impression("Pangle", "winner-paid") }
+        h.onRender = { it.listener!!.impression("Pangle", "winner-paid", paid) }
         h.onEvent = { if (it.name == AdEventName.IMPRESSION) h.controller.destroy() }
 
         h.loaded(Ad(AdPlatform.ADMOB, 1.0))
@@ -196,12 +199,11 @@ class NativeAuctionTest {
         assertNull(h.rendered)
         assertEquals(1, winner.releases)
         val impression = h.events.single { it.name == AdEventName.IMPRESSION }
-        val event = h.events.single { it.name == AdEventName.PAID }
-        assertEquals(impression.sessionId, event.sessionId)
-        assertEquals(impression.requestId, event.requestId)
+        assertEquals(impression.sessionId, h.revenues.single().sessionId)
+        assertEquals(0L, impression.valueMicros)
         assertEquals(0L, h.revenues.single().valueMicros)
         h.listeners.getValue(AdPlatform.TOPON).paid(paid)
-        assertEquals(1, h.events.count { it.name == AdEventName.PAID })
+        assertEquals(1, h.events.count { it.name == AdEventName.IMPRESSION })
         assertEquals(1, h.revenues.size)
         assertEquals(0, h.events.count { it.name == AdEventName.SHOW_FAIL })
     }
@@ -290,7 +292,7 @@ class NativeAuctionTest {
         val timeout = Host().start()
         timeout.expire()
         assertEquals(NativeState.Failed("native_bid_timeout"), timeout.controller.state)
-        assertEquals(2, timeout.events.count { it.name == AdEventName.LOAD_RESULT })
+        assertEquals(2, timeout.events.count { it.name in setOf(AdEventName.LOADED, AdEventName.LOAD_FAIL) })
         val expired = Host().start()
         val ad = Ad(AdPlatform.ADMOB, 10.0, 0L)
         expired.loaded(ad)
@@ -321,7 +323,7 @@ class NativeAuctionTest {
 
     @Test fun `destroy from candidate load request prevents both SDK loads`() {
         val h = Host()
-        h.onEvent = { if (it.name == AdEventName.LOAD_REQUEST) h.controller.destroy() }
+        h.onEvent = { if (it.name == AdEventName.LOAD) h.controller.destroy() }
         h.start()
         assertEquals(0, h.loadCount)
         assertEquals(NativeState.Destroyed, h.controller.state)

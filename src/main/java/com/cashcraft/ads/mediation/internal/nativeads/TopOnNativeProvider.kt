@@ -148,7 +148,7 @@ internal class TopOnNativeProvider : NativeProvider {
                             it.installListeners()
                         }
                     } catch (failure: Throwable) {
-                        initialized?.destroy() ?: acquired?.let(::releaseTopOnAd)
+                        initialized?.destroy() ?: acquired?.let { releaseTopOnAd(it) }
                         callbacks.failed(failure.message ?: "native_load_setup_failed")
                         return@run
                     }
@@ -336,14 +336,14 @@ internal class TopOnNativeProvider : NativeProvider {
                 }
                 owned
             },
-            discard = ::releaseTopOnAd,
+            discard = { releaseTopOnAd(it) },
         )
     }
 
-    private fun releaseTopOnAd(ad: NativeAd) {
+    private fun releaseTopOnAd(ad: NativeAd, keepRevenueListener: Boolean = false) {
         runCatching { ad.setNativeEventListener(null) }
         runCatching { ad.setDislikeCallbackListener(null) }
-        runCatching { ad.setAdRevenueListener(null) }
+        if (!keepRevenueListener) runCatching { ad.setAdRevenueListener(null) }
         runCatching { ad.destory() }
     }
 
@@ -354,6 +354,7 @@ internal class TopOnNativeProvider : NativeProvider {
         private var listener: NativeCallbacks?,
     ) : NativeAdHandle {
         private val destroyed = AtomicBoolean(false)
+        private var paidListener = listener
         private var renderedContainer: TUNativeAdView? = null
         private var renderedBinding: NativeLayoutBinding? = null
         private var sdkCta: View? = null
@@ -362,7 +363,7 @@ internal class TopOnNativeProvider : NativeProvider {
             ad.setNativeEventListener(object : TUNativeEventListener {
                 override fun onAdImpressed(view: TUNativeAdView, adInfo: TUAdInfo) {
                     NativeMainThread.run {
-                        if (!destroyed.get()) listener?.impression(adInfo.networkName, adInfo.showId)
+                        if (!destroyed.get()) listener?.impression(adInfo.networkName, adInfo.showId, revenueOrNull(adInfo))
                     }
                 }
                 override fun onAdClicked(view: TUNativeAdView, adInfo: TUAdInfo) {
@@ -381,8 +382,9 @@ internal class TopOnNativeProvider : NativeProvider {
             })
             ad.setAdRevenueListener(object : TUAdRevenueListener {
                 override fun onAdRevenuePaid(adInfo: TUAdInfo) {
+                    val delivery = paidListener
                     NativeMainThread.run {
-                        revenueOrNull(adInfo)?.let { listener?.paid(it) }
+                        revenueOrNull(adInfo)?.let { delivery?.paid(it) }
                     }
                 }
             })
@@ -426,7 +428,7 @@ internal class TopOnNativeProvider : NativeProvider {
         }
         override val isValid: Boolean get() = !destroyed.get() && runCatching { ad.isValid }.getOrDefault(false)
         override val canCache: Boolean get() = isValid && renderedContainer == null
-        override fun setCallbacks(callbacks: NativeCallbacks?) { this.listener = callbacks }
+        override fun setCallbacks(callbacks: NativeCallbacks?) { this.listener = callbacks; paidListener = callbacks }
 
         override fun render(activity: Activity, binding: NativeLayoutBinding?, widthPx: Int): View {
             require(widthPx > 0) { "native_width_invalid" }
@@ -488,7 +490,9 @@ internal class TopOnNativeProvider : NativeProvider {
             runCatching { renderedBinding?.clearTopOnChildren(sdkCta) }
             renderedBinding = null
             sdkCta = null
-            releaseTopOnAd(ad)
+            // The original revenue callback owns only the detached delivery after cleanup.
+            listener = null
+            releaseTopOnAd(ad, keepRevenueListener = true)
         }
     }
 

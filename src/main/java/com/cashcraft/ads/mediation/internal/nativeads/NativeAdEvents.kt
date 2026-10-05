@@ -24,7 +24,7 @@ internal class NativeSlot(
     private val nextLoadNumber: () -> Long,
     private val listener: AdEventListener,
     private val revenueListener: AdRevenueListener,
-    val id: String = request.position,
+    val id: String = UUID.randomUUID().toString(),
 ) {
     private val position = request.position.normalizedAdPosition()
     private val primary = request.candidates().first()
@@ -34,6 +34,7 @@ internal class NativeSlot(
     private var attempted = false
     private var ended = false
     private var announced = false
+    private var sessionId = UUID.randomUUID().toString()
 
     fun position() {
         if (announced) return
@@ -44,21 +45,30 @@ internal class NativeSlot(
     fun end(reason: String) {
         if (ended) return
         ended = true
-        if (!attempted) emit(AdEventName.SHOW_FAIL, reason)
+        if (announced && !attempted) {
+            attempted = true
+            emit(AdEventName.SHOW_FAIL, reason)
+        }
     }
 
-    /** A policy block has its own notification, never SHOW_FAIL. */
+    /** End slot ownership; the controller decides pre-opportunity skip versus display failure. */
     fun block() { ended = true; attempted = true }
 
     fun attempt(clock: () -> Long, recordLoadEvents: Boolean = true): NativeAttempt {
+        if (attempted) {
+            sessionId = UUID.randomUUID().toString()
+            announced = false
+        }
         attempted = true
+        ended = false
+        position()
         val requestId = UUID.randomUUID().toString()
-        val sessionId = UUID.randomUUID().toString()
         return NativeAttempt(
             base = AdEvent(
                 name = AdEventName.IMPRESSION, platform = platform, format = AdFormat.NATIVE,
                 position = position, sessionId = sessionId, adUnitId = primary.adUnitId, number = number,
-                requestId = requestId, mediationMode = mode, slotId = id,
+                requestId = requestId.takeIf { recordLoadEvents && !request.isBidding }, mediationMode = mode, slotId = id,
+                platformKnown = !request.isBidding,
             ),
             load = AdLoadSession(
                 listener, platform, mode, AdFormat.NATIVE, position, primary.adUnitId,
@@ -80,8 +90,8 @@ internal class NativeSlot(
 
     private fun emit(name: AdEventName, reason: String? = null) {
         runCatching {
-            listener.onEvent(AdEvent(name, platform, AdFormat.NATIVE, position, id,
-                primary.adUnitId, number, reason = reason, mediationMode = mode, slotId = id))
+            listener.onEvent(AdEvent(name, platform, AdFormat.NATIVE, position, sessionId,
+                primary.adUnitId, number, reason = reason, mediationMode = mode, slotId = id, platformKnown = !request.isBidding))
         }
     }
 }
@@ -104,6 +114,7 @@ internal class NativeAttempt(
 ) {
     val id: String get() = base.sessionId
     private var shown = false
+    private var impressionEmitted = false
     private var failed = false
     private var closed = false
     private var started = false
@@ -112,7 +123,14 @@ internal class NativeAttempt(
     private var bidRecorded = false
 
     fun start() { started = true; if (recordLoadEvents && candidates.isEmpty()) load.request() }
-    fun loaded(ad: NativeAdHandle) { if (recordLoadEvents && candidates.isEmpty()) load.loaded(ad.adSource, ad.responseId) }
+    fun loaded(ad: NativeAdHandle) {
+        ad.platform?.let { actual ->
+            base = base.copy(platform = actual, platformKnown = true,
+                adUnitId = candidates[actual]?.request?.adUnitId ?: base.adUnitId,
+                adSource = ad.adSource, responseId = ad.responseId)
+        }
+        if (recordLoadEvents && candidates.isEmpty()) load.loaded(ad.adSource, ad.responseId)
+    }
     fun loadStarted(platform: AdPlatform) {
         val candidate = candidates[platform] ?: return
         if (candidate.started) return
@@ -133,7 +151,7 @@ internal class NativeAttempt(
         val selected = decision.selection
         val winner = candidates[selected?.winner]
         if (selected != null && winner != null) base = base.copy(
-            platform = selected.winner, adUnitId = winner.request.adUnitId, requestId = winner.requestId,
+            platform = selected.winner, adUnitId = winner.request.adUnitId, requestId = winner.requestId.takeIf { recordLoadEvents && winner.started }, platformKnown = true,
         )
         emit(base.copy(
             name = AdEventName.BID_RESULT, result = if (selected == null) "unavailable" else "selected",
@@ -168,10 +186,20 @@ internal class NativeAttempt(
         failed = true
         emit(base.copy(name = AdEventName.SHOW_FAIL, reason = reason, errorCode = errorCode))
     }
-    fun impression(source: String?, response: String?) {
+    fun impression(source: String?, response: String?, revenue: NativeRevenue? = null, onActualImpression: (() -> Unit)? = null) {
         if (shown || failed) return
         shown = true
-        emit(base.copy(name = AdEventName.IMPRESSION, adSource = source, responseId = response))
+        runCatching { onActualImpression?.invoke() }
+        if (base.platform == AdPlatform.TOPON) emitImpression(source, response, revenue)
+    }
+    private fun emitImpression(source: String?, response: String?, revenue: NativeRevenue?) {
+        if (impressionEmitted) return
+        impressionEmitted = true
+        val validRevenue = revenue?.takeIf { it.valueMicros >= 0L && it.currencyCode.isNotBlank() }
+        emit(base.copy(name = AdEventName.IMPRESSION, adSource = source, responseId = response,
+            value = validRevenue?.valueMicros?.div(1_000_000.0), valueMicros = validRevenue?.valueMicros,
+            currency = validRevenue?.currencyCode, precisionType = validRevenue?.precisionType,
+            mediationAdapterClassName = validRevenue?.mediationAdapterClassName))
     }
     fun click(source: String?, response: String?) {
         if (!failed && !closed) emit(base.copy(name = AdEventName.CLICK, adSource = source, responseId = response))
@@ -179,7 +207,8 @@ internal class NativeAttempt(
     fun close() {
         if (closed) return
         closed = true
-        emit(base.copy(name = AdEventName.DISMISS))
+        if (!shown) showFailure("cancelled")
+        else if (!failed) emit(base.copy(name = AdEventName.DISMISS))
     }
     fun paid(revenue: NativeRevenue) {
         // Never require an impression or a live page for an already identified paid callback.
@@ -187,7 +216,7 @@ internal class NativeAttempt(
             diagnostic("invalid_native_revenue")
             return
         }
-        val eventId = revenueEventId(base.platform, revenue.responseId, base.sessionId)
+        val eventId = revenueEventId(base.platform, null, base.sessionId)
         if (eventId in paidEvents) return
         val payload = runCatching {
             when (base.platform) {
@@ -202,10 +231,7 @@ internal class NativeAttempt(
             }
         }.getOrElse { diagnostic("invalid_native_revenue"); return }
         paidEvents += eventId
-        emit(base.copy(name = AdEventName.PAID, adSource = revenue.adSource, responseId = revenue.responseId,
-            value = revenue.valueMicros / 1_000_000.0, valueMicros = revenue.valueMicros,
-            currency = revenue.currencyCode, precisionType = revenue.precisionType,
-            mediationAdapterClassName = revenue.mediationAdapterClassName))
+        if (base.platform == AdPlatform.ADMOB) emitImpression(revenue.adSource, revenue.responseId, revenue)
         runCatching { revenueListener.onRevenuePaid(payload) }.onFailure { diagnostic("native_revenue_callback_failed") }
     }
     private fun emit(event: AdEvent) { runCatching { listener.onEvent(event) } }

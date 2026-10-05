@@ -46,10 +46,12 @@ class AdPolicyIntegrationTest {
         task.cancel()
         assertEquals(listOf(AdShowResult.Blocked(AdBlockReason.GLOBAL_DISABLED)), results)
         assertEquals(listOf(AdBlockInfo("save", AdBlockReason.GLOBAL_DISABLED)), blocks)
-        assertTrue(events.isEmpty())
+        assertEquals(listOf(AdEventName.SCENE_SKIP), events.map { it.name })
+        assertEquals("", events.single().sessionId)
+        assertEquals("global_disabled", events.single().reason)
     }
 
-    @Test fun `policy changed by a position listener blocks final handoff without show fail`() {
+    @Test fun `policy changed after admitted position closes that session with show fail`() {
         val policy = AdPolicyAttempt(AdPolicyRequest("save", fullscreen = true))
         assertEquals(AdPolicyCheckResult.Passed, policy.check())
         val attempt = FullScreenShowAttempt().also { it.policy = policy; attempts += it }
@@ -62,6 +64,7 @@ class AdPolicyIntegrationTest {
             format = AdFormat.INTERSTITIAL, position = "save", adUnitId = "test",
             sessionId = "one", number = 1, attempt = attempt,
         )
+        assertTrue(session.admit())
         val denied = checkNotNull(FullScreenShowGate.commit(attempt))
         session.showFailure(denied)
         attempt.complete()
@@ -69,7 +72,9 @@ class AdPolicyIntegrationTest {
         assertFalse(FullScreenShowGate.isAnyAdShowing)
         assertEquals(1, blocks.size)
         assertEquals(AdBlockReason.GLOBAL_DISABLED, blocks.single().reason)
-        assertFalse(events.any { it.name == AdEventName.SHOW_FAIL })
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
+        assertEquals("one", events.last().sessionId)
+        assertEquals("global_disabled", events.last().reason)
         assertEquals(AdShowResult.Blocked(AdBlockReason.GLOBAL_DISABLED), policy.result(AdShowResult.Failed(denied)))
     }
 
@@ -118,7 +123,8 @@ class AdPolicyIntegrationTest {
             onResult = results::add)
         assertEquals(List(4) { AdShowResult.Blocked(AdBlockReason.DAILY_SHOW_LIMIT) }, results)
         assertEquals(4, blocks.size)
-        assertTrue(events.isEmpty())
+        assertEquals(3, events.size) // Native is outside this fullscreen event contract.
+        assertTrue(events.all { it.name == AdEventName.SCENE_SKIP && it.reason == "show_rate_limited" })
     }
 
     @Test fun `missing identity fails closed even when frequency is disabled`() {
@@ -155,6 +161,8 @@ class AdPolicyIntegrationTest {
         assertEquals(AdPolicyCheckResult.Passed,
             checker.check(AdPolicyRequest("save", sceneType = AdSceneType.INTER)))
         assertEquals(2, events.count { it.name == AdEventName.CLICK })
+        assertEquals(0, events.count { it.name == AdEventName.IMPRESSION })
+        session.revenue(valueMicros = 1250, currency = "USD")
         assertEquals(1, events.count { it.name == AdEventName.IMPRESSION })
     }
 
@@ -199,6 +207,83 @@ class AdPolicyIntegrationTest {
             val resolved = provider.resolveNativeRequest(NativeRequest("fallback", sceneType = type), fullScreen = true)
             assertEquals(type, resolved.sceneType)
             assertTrue(resolved.candidates().all { it.sceneType == type })
+        }
+    }
+
+    @Test fun `qualification observes policy without occupying the last show quota`() {
+        checker.policy = AdPolicy(frequency = AdFrequencyPolicy(enabled = true, dailyMaxShows = 1))
+        val policy = AdPolicyAttempt(AdPolicyRequest("save", fullscreen = true, sceneType = AdSceneType.INTER))
+        val attempt = FullScreenShowAttempt().also { it.policy = policy; attempts += it }
+        val session = AdShowSession(AdEventListener(events::add), AdPlatform.ADMOB, AdMediationMode.ADMOB,
+            AdFormat.INTERSTITIAL, "save", "unit", "internal", 1, attempt = attempt)
+        assertTrue(session.admit())
+        assertEquals(AdPolicyCheckResult.Passed, checker.check(AdPolicyRequest("other")))
+        assertEquals(AdPolicyCheckResult.Passed, policy.reserve())
+        session.showFailure("no_preloaded_ad")
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
+    }
+
+    @Test fun `an existing own reservation does not become a telemetry skip`() {
+        checker.policy = AdPolicy(frequency = AdFrequencyPolicy(enabled = true, dailyMaxShows = 1))
+        val policy = AdPolicyAttempt(AdPolicyRequest("save", fullscreen = true))
+        assertEquals(AdPolicyCheckResult.Passed, policy.reserve())
+        val attempt = FullScreenShowAttempt().also { it.policy = policy; attempts += it }
+        val session = AdShowSession(AdEventListener(events::add), AdPlatform.ADMOB, AdMediationMode.ADMOB,
+            AdFormat.INTERSTITIAL, "save", "unit", "reserved", 1, attempt = attempt)
+        assertTrue(session.admit())
+        assertEquals(listOf(AdEventName.POSITION), events.map { it.name })
+    }
+
+    @Test fun `only configured platform switches cause platform skip and retries stay independent`() {
+        checker.policy = AdPolicy(platforms = mapOf(AdPlatform.ADMOB to false))
+        repeat(2) {
+            val attempt = FullScreenShowAttempt().also {
+                it.policy = AdPolicyAttempt(AdPolicyRequest("same", fullscreen = true)); attempts += it
+            }
+            val session = AdShowSession(AdEventListener(events::add), AdPlatform.ADMOB, AdMediationMode.ADMOB,
+                AdFormat.INTERSTITIAL, "same", "unit", "internal-$it", 1, attempt = attempt)
+            session.showFailure("no_preloaded_ad")
+            session.showFailure("duplicate")
+        }
+        assertEquals(List(2) { AdEventName.SCENE_SKIP }, events.map { it.name })
+        assertTrue(events.all { it.reason == "platform_disabled" && !it.analyticsParameters().containsKey("session_id") })
+        assertTrue(Ads.fullScreenPlatformsDisabled(listOf(AdFormat.INTERSTITIAL)))
+        ReflectionHelpers.setStaticField(Ads::class.java, "config", AdsConfig(
+            BiddingProviderConfig(AdMobProviderConfig(AdMobIds.TEST),
+                TopOnProviderConfig(TopOnIds("app", "key", interstitialPlacementId = "topon"))),
+            eventListener = { events += it }))
+        assertFalse(Ads.fullScreenPlatformsDisabled(listOf(AdFormat.INTERSTITIAL)))
+        checker.policy = checker.policy.copy(platforms = mapOf(AdPlatform.ADMOB to false, AdPlatform.TOPON to false))
+        assertTrue(Ads.fullScreenPlatformsDisabled(listOf(AdFormat.INTERSTITIAL)))
+    }
+
+    @Test fun `selected main and interstitial fallback keep real bidding platform and original open position`() {
+        ReflectionHelpers.setStaticField(Ads::class.java, "config", AdsConfig(
+            BiddingProviderConfig(AdMobProviderConfig(AdMobIds.TEST),
+                TopOnProviderConfig(TopOnIds("app", "key", interstitialPlacementId = "inter"))),
+            eventListener = { events += it }))
+        for (platform in AdPlatform.entries) {
+            events.clear()
+            checker.policy = AdPolicy(platforms = mapOf(AdPlatform.ADMOB to (platform == AdPlatform.ADMOB)))
+            val attempt = FullScreenShowAttempt().also {
+                it.policy = AdPolicyAttempt(AdPolicyRequest("cold_start", fullscreen = true, sceneType = AdSceneType.OPEN))
+                attempts += it
+            }
+            assertNull(FullScreenShowGate.reserve(attempt))
+            val session = AdShowSession(AdEventListener(events::add), platform, AdMediationMode.BIDDING,
+                AdFormat.INTERSTITIAL, "cold_start", "unit", "selected-${platform.name}", 1, attempt = attempt)
+            assertTrue(session.admit())
+            assertNull(FullScreenShowGate.commit(attempt))
+            session.revenue(valueMicros = 100, currency = "USD")
+            session.impression("network", "response")
+            assertEquals(AdShowResult.Dismissed, session.dismissedResult())
+            session.emit(AdEventName.DISMISS)
+            session.emit(AdEventName.DISMISS)
+            attempt.complete()
+            assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION,
+                AdEventName.DISMISS), events.map { it.name })
+            assertTrue(events.all { it.platform == platform && it.platformKnown && it.position == "cold_start" })
+            assertTrue(events.none { it.analyticsParameters().containsKey("platform_known") })
         }
     }
 

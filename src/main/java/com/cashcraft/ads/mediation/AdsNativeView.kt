@@ -229,7 +229,7 @@ class AdsNativeView(
             },
             canDisplay = { activityResumed && connection?.canDisplay() == true },
             newSlot = { resolvedRequest?.let {
-                Ads.newNativeSlot(it, (activity as? NativeFullScreenActivity)?.onNativeImpression)
+                Ads.newNativeSlot(it, (activity as? NativeFullScreenActivity)?.onNativePosition)
             } },
             load = {
                 requestedWidth = checkNotNull(connection).contentWidth
@@ -251,9 +251,14 @@ class AdsNativeView(
             dispatch = NativeMainThread::run,
             interaction = NativeInteractions::onInteraction,
             onStateChanged = { next -> connection?.callback?.invoke(next) },
+            onActualImpression = { (activity as? NativeFullScreenActivity)?.onNativeImpression?.invoke() },
             retentionPolicy = policy,
             canBindAd = { ad -> ad.platform?.let(Ads::isPlatformEnabled) != false },
             privacyAllowed = { Ads.consentSnapshot.canRequestAds },
+            platformsEnabled = {
+                val candidates = resolvedRequest?.candidates().orEmpty()
+                candidates.isEmpty() || candidates.any { it.platform?.let(Ads::isPlatformEnabled) != false }
+            },
             policyAttemptFactory = {
                 if (activity is NativeFullScreenActivity) {
                     activity.policyAttempt?.let { NativeCardPolicyAdapter(it, owned = false) }

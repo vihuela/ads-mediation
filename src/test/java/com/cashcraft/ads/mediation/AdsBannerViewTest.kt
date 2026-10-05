@@ -11,10 +11,13 @@ import com.cashcraft.ads.mediation.internal.AdLoadClock
 import com.cashcraft.ads.mediation.internal.AdLoadSession
 import com.cashcraft.ads.mediation.internal.BannerSlot
 import com.cashcraft.ads.mediation.internal.admob.AdMobBannerEvents
+import com.google.android.libraries.ads.mobile.sdk.common.AdLoadCallback
+import com.google.android.libraries.ads.mobile.sdk.common.LoadAdError
 import com.google.android.libraries.ads.mobile.sdk.banner.AdSize
 import com.google.android.libraries.ads.mobile.sdk.banner.AdView
 import com.google.android.libraries.ads.mobile.sdk.banner.BannerAd
 import com.google.android.libraries.ads.mobile.sdk.banner.BannerAdRefreshCallback
+import com.google.android.libraries.ads.mobile.sdk.banner.BannerAdEventCallback
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -185,14 +188,17 @@ class AdsBannerViewTest {
         fun field(name: String) = AdsBannerView::class.java.getDeclaredField(name).apply { isAccessible = true }
         field("adView").set(banner, child)
         val generation = field("generation").getLong(banner)
-        val listener = AdEventListener {}
+        val observed = mutableListOf<AdEvent>()
+        val listener = AdEventListener(observed::add)
         val slot = BannerSlot(listener, AdPlatform.ADMOB, AdMediationMode.ADMOB,
             "page", "test-unit", "slot", 1L, revenueListener = AdRevenueListener {})
         val load = AdLoadSession(listener, AdPlatform.ADMOB, AdMediationMode.ADMOB, AdFormat.BANNER,
             "page", "test-unit", "request", "request", 1L, null, 0L, AdLoadClock { 1L }, slotId = "slot")
         val relay = AdMobBannerEvents(slot, load)
         var refresh: BannerAdRefreshCallback? = null
+        var eventCallback: BannerAdEventCallback? = null
         val ad = Proxy.newProxyInstance(BannerAd::class.java.classLoader, arrayOf(BannerAd::class.java)) { _, method, args ->
+            if (method.name == "setAdEventCallback") eventCallback = args?.get(0) as BannerAdEventCallback
             if (method.name == "setBannerAdRefreshCallback") refresh = args?.get(0) as BannerAdRefreshCallback
             null
         } as BannerAd
@@ -201,6 +207,8 @@ class AdsBannerViewTest {
             AdMobBannerEvents::class.java, WeakReference::class.java, java.lang.Long.TYPE)
             .apply { isAccessible = true }.invoke(companion, ad, relay, WeakReference(banner), generation)
         try {
+            checkNotNull(eventCallback).onAdDismissedFullScreenContent()
+            assertTrue(observed.none { it.name == AdEventName.DISMISS })
             shadowOf(Looper.getMainLooper()).idle()
             child.layout(0, 0, 320, 50)
             assertEquals(View.VISIBLE, child.visibility)
@@ -217,6 +225,120 @@ class AdsBannerViewTest {
             assertFalse("A queued old refresh must not touch a replacement ad", child.isLayoutRequested)
         } finally {
             banner.destroy()
+            assertTrue(observed.none { it.name == AdEventName.DISMISS })
+        }
+    }
+
+    @Test
+    fun `page destruction and explicit refresh terminate only unexposed banner opportunities`() {
+        for (destroy in listOf(false, true)) for (exposed in listOf(false, true)) {
+            val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+            val view = AdsBannerView(activity, PageOwner(), request(), active = false)
+            val observed = mutableListOf<AdEvent>()
+            val slot = BannerSlot(AdEventListener(observed::add), AdPlatform.ADMOB, AdMediationMode.ADMOB,
+                "page", "unit", "slot", 1)
+            val display = checkNotNull(slot.newDisplay("response"))
+            AdsBannerView::class.java.getDeclaredField("slot").apply { isAccessible = true }.set(view, slot)
+            if (exposed) display.impression()
+            if (destroy) view.destroy() else view.refresh()
+            assertEquals(destroy, slot.isEnded)
+            view.destroy()
+            val failures = observed.filter { it.name == AdEventName.SHOW_FAIL }
+            assertEquals(if (exposed) 0 else 1, failures.size)
+            if (!exposed) {
+                assertEquals(if (destroy) "scene_inactive" else "cancelled", failures.single().reason)
+                assertEquals(display.sessionId, failures.single().sessionId)
+            }
+            display.paid(1L, "USD", null, 1L)
+            assertEquals(display.sessionId, observed.single { it.name == AdEventName.IMPRESSION }.sessionId)
+            assertTrue(observed.none { it.name == AdEventName.DISMISS })
+        }
+    }
+
+    @Test
+    fun `临时隐藏暂停及显式刷新保留页面周期而停用会结束周期`() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val owner = PageOwner()
+        val view = AdsBannerView(controller.get(), owner, request())
+        val observed = mutableListOf<AdEvent>()
+        val slot = BannerSlot(AdEventListener(observed::add), AdPlatform.ADMOB, AdMediationMode.ADMOB,
+            "page", "unit", "page-cycle", 1)
+        AdsBannerView::class.java.getDeclaredField("slot").apply { isAccessible = true }.set(view, slot)
+        try {
+            checkNotNull(slot.newDisplay("first")).apply {
+                impression()
+                paid(1L, "USD", null, 1L)
+            }
+            view.visibility = View.INVISIBLE
+            owner.registry.currentState = Lifecycle.State.STARTED
+            controller.pause()
+            controller.resume()
+            owner.registry.currentState = Lifecycle.State.RESUMED
+            view.visibility = View.VISIBLE
+            view.refresh()
+            assertFalse(slot.isEnded)
+            slot.prepareForLoad()
+            checkNotNull(slot.newDisplay("second")).apply {
+                impression()
+                paid(2L, "USD", null, 2L)
+            }
+            assertEquals(1, observed.count { it.name == AdEventName.POSITION })
+            val impressions = observed.filter { it.name == AdEventName.IMPRESSION }
+            assertEquals(listOf(1L, 2L), impressions.map { it.analyticsParameters()["refresh_index"] })
+            assertEquals(listOf("page-cycle", "page-cycle"), impressions.map { it.analyticsParameters()["ad_session_id"] })
+            view.setActive(false)
+            assertTrue(slot.isEnded)
+            view.setActive(true)
+            assertNull(slot.newDisplay("old-cycle-late-response"))
+        } finally {
+            view.destroy()
+            controller.pause().stop().destroy()
+        }
+    }
+
+    @Test
+    fun `SDK load failures preserve classifications and codes across load and display events`() {
+        val cases = mapOf(
+            LoadAdError.ErrorCode.NO_FILL to "no_fill",
+            LoadAdError.ErrorCode.TIMEOUT to "timeout",
+            LoadAdError.ErrorCode.CANCELLED to "cancelled",
+            LoadAdError.ErrorCode.INTERNAL_ERROR to "ad_error",
+        )
+        for ((code, reason) in cases) {
+            val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+            val states = mutableListOf<BannerState>()
+            val view = AdsBannerView(activity, PageOwner(), request(), onState = states::add)
+            fun field(name: String) = AdsBannerView::class.java.getDeclaredField(name).apply { isAccessible = true }
+            field("adView").set(view, AdView(activity))
+            val generation = field("generation").getLong(view)
+            val observed = mutableListOf<AdEvent>()
+            val listener = AdEventListener(observed::add)
+            val slot = BannerSlot(listener, AdPlatform.ADMOB, AdMediationMode.ADMOB, "page", "test-unit", "slot", 1)
+            val load = AdLoadSession(listener, AdPlatform.ADMOB, AdMediationMode.ADMOB, AdFormat.BANNER,
+                "page", "test-unit", "request", "request", 1, null, 0, AdLoadClock { 1 })
+            val relay = AdMobBannerEvents(slot, load)
+            field("slot").set(view, slot)
+            field("events").set(view, relay)
+            val companion = checkNotNull(field("Companion").get(null))
+            @Suppress("UNCHECKED_CAST")
+            val callback = companion.javaClass.getDeclaredMethod("loadCallback", WeakReference::class.java,
+                java.lang.Long.TYPE, AdMobBannerEvents::class.java, Function1::class.java)
+                .apply { isAccessible = true }.invoke(companion, WeakReference(view), generation, relay, null) as AdLoadCallback<BannerAd>
+            try {
+                load.request()
+                callback.onAdFailedToLoad(LoadAdError(code, "SDK diagnostic message", null))
+                callback.onAdFailedToLoad(LoadAdError(code, "duplicate", null))
+                shadowOf(Looper.getMainLooper()).idle()
+                val failedLoad = observed.single { it.name in setOf(AdEventName.LOADED, AdEventName.LOAD_FAIL) }
+                val failedDisplay = observed.single { it.name == AdEventName.SHOW_FAIL }
+                assertEquals(reason, failedLoad.reason)
+                assertEquals(reason, failedDisplay.reason)
+                assertEquals(code.name, failedLoad.errorCode)
+                assertEquals(code.name, failedDisplay.errorCode)
+                assertEquals("request", failedLoad.requestId)
+                assertEquals(observed.single { it.name == AdEventName.POSITION }.sessionId, failedDisplay.sessionId)
+                assertEquals(AdShowResult.Failed("SDK diagnostic message"), states.last())
+            } finally { view.destroy() }
         }
     }
 

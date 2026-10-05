@@ -46,8 +46,8 @@ internal class AdPolicyChecker(
         }
 
     /** Pure eligibility query: no quota consumption, callbacks, logs, or persistence. */
-    fun check(request: AdPolicyRequest): AdPolicyCheckResult = synchronized(lock) {
-        checkLocked(request)
+    fun check(request: AdPolicyRequest, ownPendingId: String? = null): AdPolicyCheckResult = synchronized(lock) {
+        checkLocked(request, ownPending = ownPendingId != null && ownPendingId in pending)
     }
 
     /** Check and occupy one show quota atomically, even while frequency checks are off. */

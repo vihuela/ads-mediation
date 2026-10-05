@@ -174,6 +174,7 @@ internal class DisplayOpportunityController(
         if (state == State.FINISHED) return
         state = State.FINISHED
         cancelledReason?.let(attempt::invalidate)
+        (result.showResult as? AdShowResult.Failed)?.let { attempt.eventSession?.showFailure(it.reason) }
         FullScreenShowGate.release(attempt)
         attempt.guard = null
         attempt.handoffGuard = null

@@ -2,6 +2,7 @@ package com.cashcraft.ads.mediation.internal.nativeads
 
 import com.cashcraft.ads.mediation.AdBlockReason
 import com.cashcraft.ads.mediation.AdPolicyCheckResult
+import com.cashcraft.ads.mediation.internal.sceneSkipReason
 import com.cashcraft.ads.mediation.internal.AdPolicyAttempt
 import com.cashcraft.ads.mediation.internal.logMaterial
 import com.cashcraft.ads.mediation.NativeState
@@ -32,6 +33,7 @@ internal interface NativeCardPolicyAttempt {
     fun click()
     fun materialSelected(platform: com.cashcraft.ads.mediation.AdPlatform?) = Unit
     fun complete()
+    fun sceneSkipped(reason: String) = Unit
 }
 
 internal class NativeCardPolicyAdapter(
@@ -51,6 +53,11 @@ internal class NativeCardPolicyAdapter(
     override fun click() = attempt.click()
     override fun materialSelected(platform: com.cashcraft.ads.mediation.AdPlatform?) =
         attempt.logMaterial(com.cashcraft.ads.mediation.AdFormat.NATIVE, platform)
+    override fun sceneSkipped(reason: String) {
+        if (owned) attempt.request.position?.let {
+            com.cashcraft.ads.mediation.Ads.emitInlineSceneSkip(com.cashcraft.ads.mediation.AdFormat.NATIVE, it, reason)
+        }
+    }
     override fun complete() { if (owned) attempt.complete() }
 }
 
@@ -74,6 +81,8 @@ internal class NativeCardController(
     private val policyAttemptFactory: () -> NativeCardPolicyAttempt? = { null },
     private val canBindAd: (NativeAdHandle) -> Boolean = { true },
     private val privacyAllowed: () -> Boolean = { true },
+    private val platformsEnabled: () -> Boolean = { true },
+    private val onActualImpression: () -> Unit = {},
 ) {
     var state: NativeState = NativeState.Idle
         private set
@@ -89,6 +98,7 @@ internal class NativeCardController(
     private var closed = false
     private var releasing = false
     private var retained = false
+    private var platformSkipReported = false
     private var automaticRetries = 0
     private var retryTask: Runnable? = null
     val isRetained: Boolean get() = retained
@@ -122,6 +132,16 @@ internal class NativeCardController(
         val gate = currentAvailability()
         if (retained && gate.failure != null) { fail(gate.failure); return }
         if (!active) return
+        if (slot == null && (!visible || !canDisplay())) return
+        if (slot == null && !platformsEnabled()) {
+            if (!platformSkipReported) {
+                platformSkipReported = true
+                policyAttempt?.sceneSkipped("platform_disabled")
+            }
+            fail("native_platform_not_configured")
+            return
+        }
+        if (slot == null && !gate.ready && gate.failure == null) return
         if (slot == null) {
             slot = newSlot()
             slot?.position()
@@ -166,6 +186,7 @@ internal class NativeCardController(
         if ((state !is NativeState.Failed && state !is NativeState.Blocked) || !eligible() || closed) return
         cancelRetry()
         automaticRetries = 0
+        platformSkipReported = false
         if (state is NativeState.Blocked) slot = null
         transition(NativeState.Idle)
         refresh()
@@ -257,7 +278,7 @@ internal class NativeCardController(
         val events = attempt
         slot?.block()
         val released = release("native_cancelled", reportCancellation = false)
-        events?.block()
+        events?.fail("platform_disabled")
         if (generation == released && state == failed) runCatching { onStateChanged(failed) }
         return false
     }
@@ -276,9 +297,11 @@ internal class NativeCardController(
         val blocked = NativeState.Blocked(reason)
         state = blocked // Commit before completion can synchronously trigger policy listeners.
         val events = attempt
+        if (slot == null) reason.sceneSkipReason()?.let { policyAttempt?.sceneSkipped(it) }
+        else if (events == null) slot?.end(reason.sceneSkipReason() ?: "invalid_scene_type")
         slot?.block()
         val released = release("native_cancelled", reportCancellation = false)
-        events?.block()
+        events?.fail(reason.sceneSkipReason() ?: "invalid_scene_type")
         if (generation == released && state == blocked) runCatching { onStateChanged(blocked) }
     }
 
@@ -287,6 +310,10 @@ internal class NativeCardController(
         val owner = slot ?: return
         val token = ++generation
         val events = owner.attempt(clock, recordLoadEvents)
+        if (generation != token || !active || state == NativeState.Destroyed) {
+            events.cancel("native_cancelled")
+            return
+        }
         attempt = events
         val callbacks = NativeDelivery(events, dispatch, interaction, policyAttempt)
         delivery = callbacks
@@ -334,11 +361,12 @@ internal class NativeCardController(
                 }
             }
         }
+        callbacks.onActualImpression = onActualImpression
         callbacks.onFailed = { reason, code -> if (generation == token) fail(reason, code) }
         callbacks.onClosed = {
             if (generation == token) {
                 closed = true
-                val released = release("native_closed")
+                val released = release("cancelled")
                 events.close()
                 if (generation == released) transition(NativeState.Idle)
             }
@@ -378,6 +406,7 @@ internal class NativeCardController(
     private fun endCycle(reason: String) {
         val oldSlot = slot
         slot = null
+        platformSkipReported = false
         closed = false
         val released = release(reason)
         oldSlot?.end(reason)
@@ -438,10 +467,11 @@ private class NativeDelivery(
 ) : NativeCallbacks {
     var current: (() -> Boolean)? = null
     var interactive: (() -> Boolean)? = null
+    var onActualImpression: (() -> Unit)? = null
     var onLoaded: ((NativeAdHandle) -> Unit)? = null
     var onFailed: ((String, String?) -> Unit)? = null
     var onClosed: (() -> Unit)? = null
-    fun detach() { current = null; interactive = null; onLoaded = null; onFailed = null; onClosed = null }
+    fun detach() { onActualImpression = null; current = null; interactive = null; onLoaded = null; onFailed = null; onClosed = null }
     override val isActive: Boolean get() = current?.invoke() == true
     override fun loadStarted(platform: com.cashcraft.ads.mediation.AdPlatform) = dispatch {
         if (current?.invoke() == true) events.loadStarted(platform)
@@ -462,10 +492,10 @@ private class NativeDelivery(
     override fun failed(reason: String, errorCode: String?) = dispatch {
         if (current?.invoke() == true) onFailed?.invoke(reason, errorCode)
     }
-    override fun impression(adSource: String?, responseId: String?) = dispatch {
+    override fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue?) = dispatch {
         policy?.impression()
         if (current?.invoke() == true) {
-            events.impression(adSource, responseId)
+            events.impression(adSource, responseId, revenue, onActualImpression)
         }
     }
     override fun clicked(adSource: String?, responseId: String?) = dispatch {
