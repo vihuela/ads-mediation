@@ -241,10 +241,11 @@ Google 文档说明自动刷新依赖广告可见，开启后也可处理加载�
 
 ## 事件、收益与兼容
 
-`ad_position` 每个 active 周期一次，`slot_id` 关联整个周期。实际本层加载才产生 request；失败后平台内部成功不补第二个 load result。
-首次展示关联已确认的初始 request；平台刷新没有本层 request，刷新事件不冒充曝光。
-每个已确认 response ID 的展示有独立 session，paid／impression 分别去重，顺序不限，合法零收益照常交付。
-收益同时进入 `ad_paid` 和全局 `revenueListener`；一个监听抛异常不阻断另一个。
+`ad_position` 每个页面 active 周期一次，业务 `ad_session_id` 使用该周期的 `slotId`。临时隐藏、失焦、前后台切换、公共底栏 Tab 切换、尺寸重载和显式 `refresh()` 均保留仍有效的周期；销毁后重建或 `setActive(false)` 后重新启用才建立新周期。
+实际本层加载才产生 request；失败后平台内部成功不补第二个 load result。首次展示关联已确认的初始 request；平台刷新没有本层 request，刷新诊断不冒充曝光。
+每个已确认 response ID 的展示仍有独立内部 session，paid／impression 分别去重，顺序不限，合法零收益照常交付。AdMob 在有效 `onAdPaid` 回调时向业务 `ad_impression` 和全局 `revenueListener` 分别交付，不再发送 `ad_paid`；一个监听抛异常不阻断另一个。
+业务 `ad_impression` 带 `refresh_index`：首条广告为 1，下一条为 2，依次递增；自动刷新和宿主重载均沿用该页面序列。序号在确认新广告身份时固定，重复回调、刷新失败、缺失身份不递增；迟到或乱序收益保留原广告序号，无有效收益回调的广告可能使已上报序号出现空缺。新周期从 1 开始。
+同周期的位置、曝光、点击等业务事件共享 `ad_session_id`，但原始 `AdEvent.sessionId` 和收益 payload 的 `sessionId` / `eventId` 仍按每条广告独立，不会把刷新后的收益合并去重。
 
 每次本层加载最多保留 32 个展示的不可变身份和去重元数据，不含页面引用。
 已确认的旧展示收益即使页面销毁仍可交付；未知／已淘汰身份只写诊断，不归给最新广告，不补造正常收益。
@@ -253,7 +254,7 @@ Google 文档说明自动刷新依赖广告可见，开启后也可处理加载�
 新增 `AdFormat.BANNER`、`AdEventName.BANNER_REFRESH` 需要更新穷尽 `when` 与事件解析。
 原 `BannerState.Failed` 已移除，构造、类型判断及穷尽 `when` 分支统一改为 `AdShowResult.Failed`，
 并重新编译使用 Banner 的宿主与依赖模块；`onState` 参数类型和 `reason: String` 保持不变。
-`AdEvent` 增加 `slotId` 后构造及 `copy` 的 JVM 签名改变，宿主及依赖它的二进制模块必须重新编译；不能把默认参数视为二进制兼容保证。
+`AdEvent` 增加 `slotId`、`refreshIndex` 后构造及 `copy` 的 JVM 签名改变，宿主及依赖它的二进制模块必须重新编译；不能把默认参数视为二进制兼容保证。
 `AdMobIds` 新增带默认值的可选 `bannerId` 参数，原有源码调用可继续使用；
 宿主及依赖模块需要重新编译，不承诺二进制兼容。原有显式 request 接口继续可用，
 不要求配置 `AdMobIds.bannerId`。便捷入口的默认尺寸仍为原有 `AnchoredAdaptive`。

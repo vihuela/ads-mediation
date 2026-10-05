@@ -212,10 +212,8 @@ class App : Application() {
                     tagForUnderAgeOfConsent = false,
                 ),
                 eventListener = { event ->
-                    analytics.logEvent(
-                        event.name.analyticsName,
-                        event.analyticsParameters(),
-                    )
+                    val parameters = event.analyticsParameters()
+                    if (parameters.isNotEmpty()) analytics.logEvent(event.name.analyticsName, parameters)
                 },
                 revenueListener = { payload ->
                     when (payload) {
@@ -452,7 +450,7 @@ TopOn SDK 管理，目前没有在 `BiddingProviderConfig` 暴露缓存数量。
 
 `position` 保留接入方传入的业务场景 ID（去除首尾空白，空值使用 `unknown`），不追加广告类型后缀。
 展示相关日志和事件上报使用同一个 ID，广告类型由独立的 `ad_type` 字段表示。
-加载事件（`ad_load_request` / `ad_load_result`）不输出或上报 `position`，以 `request_id` / `session_id` 关联加载过程。
+加载事件（`ad_load` / `ad_loaded` / `ad_load_fail`）以独立 `request_id` 关联加载过程，不携带业务场景或展示会话。
 
 ```kotlin
 val ready = Ads.isReady(AdFormat.INTERSTITIAL)
@@ -543,10 +541,8 @@ if (Ads.isPrivacyOptionsRequired) {
 
 ```kotlin
 eventListener = AdEventListener { event ->
-    analytics.logEvent(
-        name = event.name.analyticsName,
-        parameters = event.analyticsParameters(),
-    )
+    val parameters = event.analyticsParameters()
+    if (parameters.isNotEmpty()) analytics.logEvent(event.name.analyticsName, parameters)
 }
 ```
 
@@ -554,66 +550,61 @@ eventListener = AdEventListener { event ->
 
 | 枚举 | 上报名称 | 说明 |
 | --- | --- | --- |
-| `LOAD_REQUEST` | `ad_load_request` | 开始加载或补充缓存 |
-| `LOAD_RESULT` | `ad_load_result` | 加载成功或失败 |
-| `POSITION` | `ad_position` | 一次被允许进入广告模块的展示机会 |
-| `BID_RESULT` | `ad_bid_result` | 竞价候选、价格和获胜方 |
-| `IMPRESSION` | `ad_impression` | 广告平台确认产生展示 |
+| `LOAD` | `ad_load` | 真实 SDK 加载调用开始 |
+| `LOADED` | `ad_loaded` | 加载成功 |
+| `LOAD_FAIL` | `ad_load_fail` | 加载失败、超时或取消 |
+| `SCENE_SKIP` | `ad_scene_skip` | 展示机会建立前被策略拦截 |
+| `POSITION` | `ad_position` | 一次被允许进入广告模块的展示机会；Banner 每个页面 active 周期仅一次 |
+| `BID_RESULT` | `ad_bid_result` | 竞价诊断，不作为业务事件上报 |
+| `IMPRESSION` | `ad_impression` | 按下表的平台回调发送，可携带展示级收益 |
 | `SHOW_FAIL` | `ad_show_fail` | 本次展示机会未产生展示并已失败收口 |
 | `CLICK` | `ad_click` | 用户点击广告 |
 | `DISMISS` | `ad_close` | 全屏广告关闭 |
-| `PAID` | `ad_paid` | 平台返回展示级收益 |
-| `REWARD_EARNED` | `ad_reward_earned` | 激励广告平台确认奖励 |
+| `REWARD` | `ad_reward` | 激励广告平台确认奖励 |
+| `BANNER_REFRESH` | `ad_banner_refresh` | SDK 刷新诊断，不作为业务事件上报 |
 
-在完成初始化后，每个被广告模块接收的展示会话都满足：
+`ad_impression` 的时机与 EasyLoanCalc 一致，不再发送业务 `ad_paid`：
 
-```text
-ad_position = ad_impression + ad_show_fail
-```
+| 平台 / 形式 | 业务事件触发回调 |
+| --- | --- |
+| AdMob 开屏、插屏、激励、Native（含全屏 Native）、Banner | `onAdPaid` |
+| TopOn 插屏、激励 | `onAdRevenuePaid` |
+| TopOn 开屏 | `onAdShow` |
+| TopOn Native（含全屏 Native） | `onAdImpressed` |
 
-同一个会话不会同时产生 `ad_impression` 和 `ad_show_fail`。竞价会话的顺序是
-`ad_position -> ad_bid_result -> ad_impression/ad_show_fail`；初始化或同意流程尚未完成等
+TopOn Banner 当前未提供生产实现。实际曝光回调仍独立控制展示状态、频控和页面生命周期。
+同一展示的业务曝光事件与专用收益交付各自去重。收益晚于页面关闭时，使用原场景及原会话。
+收益回调先到时不伪造实际曝光通知。收益回调驱动的业务事件在没有有效收益时不会发出，
+因此不再保证 `ad_position = ad_impression + ad_show_fail`；失败后的有效迟到收益也不会被丢弃。
+TopOn 开屏/Native 在展示回调缺少金额时仍记录曝光，省略收益字段，不把未知收益填成零。
 竞价前失败没有 `ad_bid_result`。
 
-`AdEvent` 公共属性：
+`AdEvent.analyticsParameters()` 直接提供 v2 业务字段，宿主无需转换事件名或字段。
+诊断事件（`BID_RESULT` / `BANNER_REFRESH`）以及不满足业务契约的事件返回空 Map；宿主只转发非空业务参数。
+`AdEvent` 的原始类型化属性仍用于 SDK 日志、回调诊断和专用收益通道，不会全部进入业务埋点。
 
-| 属性 / analytics key | 说明 |
+| v2 analytics key | 说明 |
 | --- | --- |
-| `name` | 当前事件枚举；`analyticsName` 是稳定上报名 |
-| `platform` / `ad_platform` | 事件所属平台：`admob` 或 `topon` |
-| `mediationMode` / `mediation_mode` | 初始化模式：`admob`、`topon` 或 `bidding` |
-| `format` / `ad_type` | `app_open`、`interstitial` 或 `rewarded` |
-| `position` | 非加载事件的原始业务场景 ID；`ad_load_request` / `ad_load_result` 不携带此字段 |
-| `sessionId` / `session_id` | 串联同一次展示机会内的全部事件 |
-| `adUnitId` / `ad_unit_id` | AdMob ad unit ID 或 TopOn placement ID |
-| `number` | 当前进程内同类事件的递增序号 |
+| `ad_type` | `app_open`、`interstitial`、`rewarded`、`native` 或 `banner` |
+| `ad_platform` | `admob`、`topon`；选定平台前的展示机会/失败为 `unknown` |
+| `mediation_mode` | `admob`、`topon` 或 `bidding` |
+| `position_id` / `ad_session_id` | 非加载事件的业务场景和展示会话；Banner 同一页面 active 周期共享会话，场景拦截只含 `position_id` |
+| `request_id` | 加载事件独立请求 ID，不携带展示会话 |
+| `latency_ms` | 加载成功/失败的非负耗时 |
+| `ad_unit_id` | 选定平台后可用的广告单元 |
+| `ad_source` | 加载成功、曝光和点击事件的实际广告源 |
+| `reason` / `error_code` | 受控失败/拦截原因；异常不透传异常详情或伪造 SDK 错误码 |
+| `revenue_amount` / `currency` | `ad_impression` 上可用的收益主货币单位金额和 ISO 币种；SDK 返回零金额时保留零 |
+| `precision_type` | 收益精度类型 |
+| `refresh_index` | 仅 Banner 曝光：同一页面周期内广告序号，首条为 1；新广告递增，重复回调和刷新失败不递增，迟到收益保留原序号 |
 
-按事件出现的可选属性：
-
-| 属性 / analytics key | 说明 |
-| --- | --- |
-| `reason` | 失败或结果原因，最长 64 字符 |
-| `errorCode` / `error_code` | 平台错误码 |
-| `adSource` / `ad_source` | 实际填充广告源 |
-| `responseId` / `response_id` | 平台响应 ID |
-| `value` | 单次展示收益，或竞价价格，单位由事件的 `currency` 确定 |
-| `valueMicros` / `value_micros` | AdMob 收益微单位原值 |
-| `currency` | ISO 货币代码；竞价事件统一为 USD |
-| `mediationAdapterClassName` | AdMob 实际 mediation adapter 类名 |
-| `precisionType` | 收益精度类型 |
-| `requestId` | 加载请求 ID |
-| `result` | 加载或竞价结果 |
-| `latencyMillis` / `latency_ms` | 加载耗时 |
-| `bufferSize` / `buffer_size` | AdMob 预加载缓存大小 |
-
-`ad_bid_result` 还包含 `winner_platform`、`admob_available`、`topon_available`、
-`admob_price_available`、`topon_price_available`、`admob_value`、`topon_value`、
-`winning_value`、`admob_ad_unit_id` 和 `topon_ad_unit_id`。无有效价格时对应 value 字段不出现，
-不会用 `0` 冒充未知价格；真实零价格仍上报 `0.0`。
+业务参数不包含 `position`、`session_id`、`slot_id`、`number`、`response_id`、
+`value_micros` 或竞价诊断字段。Firebase 保留事件的过滤由宿主上报器处理；独立收益回调继续使用原始收益 payload。
 
 ## 6. 收益回调
 
-`ad_paid` 用于通用可观测性；展示级收益应使用独立的 `revenueListener`。AdMob 和 TopOn
+`ad_impression` 携带业务收益字段；Firebase/Tenjin 等专用收益上报继续使用独立的 `revenueListener`，
+该监听仍由平台收益回调触发，不受业务曝光事件触发时机影响。AdMob 和 TopOn
 保留各自的 payload 类型，但所有后端上报所需字段都位于公共 `AdRevenuePayload` 接口上，宿主
 无需按平台分支。只有 Tenjin 等依赖 Provider 原生字段的集成才需要判断具体子类型。
 
@@ -789,11 +780,11 @@ GitHub Package 版本不可覆盖；脚本默认自动递增可避免重复版�
 5. 在自定义 Application.onCreate 中调用 Ads.initialize。默认启用 UMP；记录 onInitialized，
    但初始化失败不能导致 App 崩溃或阻塞业务流程。
 6. AdsConfig 必须接入 eventListener：使用 event.name.analyticsName 作为事件名，使用
-   event.analyticsParameters() 作为完整参数。保持同一 session_id，并确保初始化后的每个展示
-   会话满足 ad_position = ad_impression + ad_show_fail。
+   event.analyticsParameters() 作为完整参数。保持同一 ad_session_id，按第 5 节的回调时机解释业务曝光与失败；
+   不把收益回调缺失当作未曝光，也不按曝光/失败等式反推展示机会。
 7. AdsConfig 必须接入 revenueListener。通用后端直接消费 AdRevenuePayload 的 eventId、时间、
    平台、格式、展示上下文、微单位金额、币种、广告网络和 impressionId；AdMob 子类型保留
-   mediationAdapterClassName，TopOn 子类型保留原始 adInfo。不要从 ad_paid 反推原生收益对象。
+   mediationAdapterClassName，TopOn 子类型保留原始 adInfo。不要从业务 ad_impression 反推原生收益对象。
 8. 把插屏、激励和手动开屏调用改为 Ads.showInterstitial、Ads.showRewarded、
    Ads.showAppOpen。position 使用稳定业务场景名。激励业务只能在 rewardEarned=true 时发奖，
    并把 sessionId 带到业务发奖埋点。
@@ -813,7 +804,8 @@ Ads.initialize(
         ),
         umpConsent = UmpConsentConfig(),
         eventListener = { event ->
-            analytics.logEvent(event.name.analyticsName, event.analyticsParameters())
+            val parameters = event.analyticsParameters()
+            if (parameters.isNotEmpty()) analytics.logEvent(event.name.analyticsName, parameters)
         },
         revenueListener = { payload ->
             when (payload) {
