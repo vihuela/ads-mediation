@@ -2,6 +2,11 @@ name: Publish GitHub Package
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "SDK version (empty to increment latest patch)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -11,6 +16,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     env:
+      VERSION_NAME: ${{ inputs.version }}
       GITHUB_PACKAGES_USERNAME: ${{ secrets.PACKAGES_USERNAME }}
       GITHUB_PACKAGES_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
     steps:
