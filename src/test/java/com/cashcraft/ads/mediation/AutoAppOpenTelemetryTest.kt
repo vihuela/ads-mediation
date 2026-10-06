@@ -120,7 +120,14 @@ class AutoAppOpenTelemetryTest {
         ReflectionHelpers.setField(automatic, "isAdAvailable", available)
         val attempt = begin()
         shadowOf(Looper.getMainLooper()).idle()
-        assertCorrelatedFailure(attempt, "no_preloaded_ad")
+        assertCorrelatedFailure(attempt, "no_preloaded_ad", bidResultExpected = true)
+        val bid = events.single { it.name == AdEventName.BID_RESULT }
+        assertEquals(attempt.positionSessionId, bid.sessionId)
+        val parameters = bid.analyticsParameters()
+        assertEquals("no_candidate", parameters["result"])
+        assertEquals(false, parameters["admob_available"])
+        assertEquals(false, parameters["topon_available"])
+        assertFalse(parameters.containsKey("ad_source"))
         assertGateReleased()
     }
 
@@ -208,8 +215,10 @@ class AutoAppOpenTelemetryTest {
         return checkNotNull(ReflectionHelpers.getField<FullScreenShowAttempt?>(automatic, "pendingOpportunity"))
     }
 
-    private fun assertCorrelatedFailure(attempt: FullScreenShowAttempt, reason: String) {
-        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
+    private fun assertCorrelatedFailure(attempt: FullScreenShowAttempt, reason: String, bidResultExpected: Boolean = false) {
+        val expected = listOf(AdEventName.POSITION) +
+            (if (bidResultExpected) listOf(AdEventName.BID_RESULT) else emptyList()) + AdEventName.SHOW_FAIL
+        assertEquals(expected, events.map { it.name })
         assertEquals(reason, events.last().reason)
         assertEquals(attempt.positionSessionId, events.first().sessionId)
         assertEquals(events.first().sessionId, events.last().sessionId)
