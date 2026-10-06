@@ -127,7 +127,7 @@ object Ads {
                     else -> null
                 }))
         }
-        val disabled = { fullScreenPlatformsDisabled(sceneFormats(format, fallback)) }
+        val disabled = { fullScreenPlatformsDisabled(owner.telemetryFormats ?: sceneFormats(format, fallback)) }
         val known = config.provider !is BiddingProviderConfig
         return if (::facadeEvents.isInitialized) facadeEvents.begin(format, position,
             config.provider.adUnitId(format), owner, platformKnown = known, platformDisabled = disabled)
@@ -135,6 +135,9 @@ object Ads {
             format, position, config.provider.adUnitId(format), java.util.UUID.randomUUID().toString(), 0, attempt = owner,
             platformKnown = known, platformDisabled = disabled)
     }
+
+    internal fun admitOpportunity(format: AdFormat, position: String, attempt: FullScreenShowAttempt): Boolean =
+        (attempt.eventSession ?: facadeSession(format, position, attempt = attempt))?.admit() == true
 
     internal fun canLoadAds(platform: AdPlatform): Boolean =
         isPlatformEnabled(platform) && policyChecker?.checkLoad() !is AdPolicyCheckResult.Blocked
@@ -178,7 +181,7 @@ object Ads {
     private var nativeLogger: com.cashcraft.ads.mediation.internal.AdsModuleLogger? = null
     private lateinit var facadeEvents: AdEventDispatcher
     private lateinit var umpConsentManager: UmpConsentManager
-    private lateinit var autoBiddingAppOpenController: AutoAppOpenController<Unit>
+    private lateinit var autoBiddingAppOpenController: AutoAppOpenController<FullScreenShowAttempt>
     private var admobInitializationResult: Boolean? = null
     private var topOnInitializationResult: Boolean? = null
 
@@ -365,11 +368,26 @@ object Ads {
                 isProviderReady = { initializationStage == InitializationStage.COMPLETE },
                 providerFailureReason = { null },
                 isAdAvailable = { isReady(AdFormat.APP_OPEN) },
-                beginOpportunity = { Unit },
-                show = { activity, _ ->
-                    showAppOpen(activity, this.config.appOpenPosition)
+                beginOpportunity = {
+                    FullScreenShowAttempt().apply {
+                        policy = AdPolicyAttempt(AdPolicyRequest(this@Ads.config.appOpenPosition,
+                            fullscreen = true, sceneType = AdSceneType.OPEN))
+                        guard = { commonShowFailure(AdFormat.APP_OPEN) }
+                    }
                 },
-                fail = { _, reason -> failAutoBiddingAppOpenOpportunity(reason) },
+                onQualified = { activity, attempt ->
+                    FullScreenShowGate.tryAcquire(activity, commonShowFailure(AdFormat.APP_OPEN), attempt)
+                        ?: if (admitOpportunity(AdFormat.APP_OPEN, this.config.appOpenPosition, attempt)) null
+                        else "platform_disabled"
+                },
+                show = { activity, attempt ->
+                    bidAndShow(AdFormat.APP_OPEN, activity, this.config.appOpenPosition,
+                        checkNotNull(attempt.policy), {}, attempt)
+                },
+                fail = { attempt, reason ->
+                    attempt.eventSession?.showFailure(reason)
+                    attempt.complete()
+                },
                 noAdFailureReason = NO_BID_CANDIDATE,
             )
             initializationStage = InitializationStage.WAITING_FOR_UMP
@@ -932,6 +950,7 @@ object Ads {
                 showWhenEmpty = true,
                 preferAvailableAfterResume = false,
                 trace = trace,
+                onQualified = { admitOpportunity(scene, position, it) },
                 onLoadingChanged = onLoadingChanged,
                 preferCachedImmediately = scene == AdFormat.INTERSTITIAL,
                 policy = policy,
@@ -1153,6 +1172,7 @@ object Ads {
                 }
                 onResult(result)
             },
+            onQualified = { admitOpportunity(format, position, it) },
             preferCachedImmediately = format != AdFormat.APP_OPEN,
             policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true,
                 userInitiated = format == AdFormat.REWARDED, sceneType = sceneType)),
@@ -1248,15 +1268,27 @@ object Ads {
         position: String,
         policy: AdPolicyAttempt,
         onResult: (AdRewardResult) -> Unit,
-    ) {
-        require(format != AdFormat.BANNER) { "Banner does not use full-screen bidding" }
-        val attempt = FullScreenShowAttempt().apply {
+        attempt: FullScreenShowAttempt = FullScreenShowAttempt().apply {
             this.policy = policy
             guard = { commonShowFailure(format) }
+        },
+    ) {
+        require(format != AdFormat.BANNER) { "Banner does not use full-screen bidding" }
+        FullScreenShowGate.tryAcquire(activity, commonShowFailure(format), attempt)?.let { reason ->
+            (attempt.eventSession ?: facadeSession(format, position, policy, attempt))?.showFailure(reason)
+            attempt.complete()
+            onResult(AdRewardResult(false, policy.result(AdShowResult.Failed(reason)), attempt.positionSessionId))
+            return
         }
-        FullScreenShowGate.reserve(attempt)?.let { reason ->
-            val sessionId = emitFacadeShowFailure(format, position, reason, policy)
-            onResult(AdRewardResult(false, AdShowResult.Failed(reason), sessionId))
+        if (!admitOpportunity(format, position, attempt)) {
+            attempt.complete()
+            onResult(AdRewardResult(false, policy.result(AdShowResult.Failed("platform_disabled"))))
+            return
+        }
+        attempt.failureReason()?.let { reason ->
+            attempt.eventSession?.showFailure(reason)
+            attempt.complete()
+            onResult(AdRewardResult(false, policy.result(AdShowResult.Failed(reason)), attempt.positionSessionId))
             return
         }
         val decision = AdBiddingCoordinator.select(format)
@@ -1343,15 +1375,21 @@ object Ads {
             config.loggingEnabled, config.logTag).beginLoad(AdFormat.NATIVE, adUnitId, 1)
     }
 
-    internal fun newNativeSlot(request: ResolvedNativeRequest, onPosition: (() -> Unit)? = null): NativeSlot? {
+    internal fun newNativeSlot(request: ResolvedNativeRequest, onPosition: (() -> Unit)? = null,
+        opportunity: FullScreenShowAttempt? = null): NativeSlot? {
         if (!::config.isInitialized || request.failureReason() != null) return null
         val platform = requireNotNull(request.candidates().first().platform)
         val mode = if (request.isBidding) AdMediationMode.BIDDING
             else if (platform == AdPlatform.ADMOB) AdMediationMode.ADMOB else AdMediationMode.TOPON
         val listener = AdEventListener { event ->
             // 外部监听器可能同步取消任务，须先标记原生已拥有本次机会。
-            if (event.name == AdEventName.POSITION) onPosition?.invoke()
-            observedEvents.onEvent(event)
+            if (event.name == AdEventName.POSITION) {
+                val alreadyReported = opportunity?.positionSessionId != null
+                if (alreadyReported) opportunity?.eventSession = null // Native now owns terminal events.
+                onPosition?.invoke()
+                if (alreadyReported) return@AdEventListener
+            }
+            observedEvents.onEvent(opportunity?.positionSessionId?.let { event.copy(slotId = it) } ?: event)
         }
         return AdEventDispatcher(application, platform, mode, listener,
             config.loggingEnabled, config.logTag).nativeSlot(request, config.revenueListener)
@@ -1388,31 +1426,6 @@ object Ads {
             notifyNativeReadiness()
             onDismissed(errorMessage)
         }
-    }
-
-    private fun failAutoBiddingAppOpenOpportunity(reason: String) {
-        val attempt = FullScreenShowAttempt().also {
-            it.policy = AdPolicyAttempt(AdPolicyRequest(config.appOpenPosition, fullscreen = true, sceneType = AdSceneType.OPEN))
-        }
-        val decision = AdBiddingCoordinator.select(AdFormat.APP_OPEN)
-        val session = decision.selection?.let { selection ->
-            when (selection.winner) {
-                AdPlatform.ADMOB -> AdMobAds.beginBiddingSession(
-                    AdFormat.APP_OPEN,
-                    config.appOpenPosition,
-                    attempt,
-                )
-                AdPlatform.TOPON -> TopOnAds.beginBiddingSession(
-                    AdFormat.APP_OPEN,
-                    config.appOpenPosition,
-                    attempt,
-                )
-            }
-        } ?: checkNotNull(facadeSession(AdFormat.APP_OPEN, config.appOpenPosition, attempt = attempt))
-        session.bidResult(decision.toEventData(AdFormat.APP_OPEN))
-        session.showFailure(
-            if (decision.selection == null) NO_BID_CANDIDATE else reason,
-        )
     }
 
     private fun onMain(block: () -> Unit) {

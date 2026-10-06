@@ -342,7 +342,7 @@ val rewardedOpportunity = Ads.showRewardedWhenReady(
 )
 ```
 
-只有 `rewardEarned == true` 才发奖，不能根据 `Dismissed`、曝光或收益事件发奖。纯等待期间失败/取消时没有真实展示会话，`sessionId` 可以为 `null`。交给平台展示后，即使原页面离开，后续奖励结算仍应由业务处理，避免只因 UI 已离场而丢失已获得的奖励。
+只有 `rewardEarned == true` 才发奖，不能根据 `Dismissed`、曝光或收益事件发奖。未通过准入检查时 `sessionId` 可以为 `null`；准入通过后等待失败/取消仍保留业务会话 ID。交给平台展示后，即使原页面离开，后续奖励结算仍应由业务处理，避免只因 UI 已离场而丢失已获得的奖励。
 
 ### 不等待的展示入口
 
@@ -579,7 +579,7 @@ TopOn 模板广告使用默认布局入口，并在 `NativeRequest.topOnTemplate
 | 事件名 | 用途 |
 | --- | --- |
 | `ad_load_request` / `ad_load_result` | 加载请求及结果，通过 request/session 关联 |
-| `ad_position` | 进入实际展示尝试或页面广告展示周期 |
+| `ad_position` | 全部频控、开关与展示资格检查通过后、比价前的展示需求；不传平台或广告单元 |
 | `ad_bid_result` | 竞价候选、价格和获胜平台 |
 | `ad_impression` | 平台确认曝光 |
 | `ad_show_fail` | 展示尝试或页面广告请求失败 |
@@ -591,7 +591,7 @@ TopOn 模板广告使用默认布局入口，并在 `NativeRequest.topOnTemplate
 
 `position` 使用稳定的业务场景名，如 `startup`、`level_complete`、`home_bottom`，不要传 SDK 广告位 ID。全屏展示会去除首尾空白，空值归一为 `unknown`；Native 则拒绝空位置。展示事件的广告类型由 `ad_type` 区分，加载事件不携带 `position`。
 
-纯全屏等待期间超时、取消或场景失效，不创建 `ad_position`、`ad_bid_result` 或 `ad_show_fail`，业务等待漏斗应在调用和结果回调处单独记录。Banner 刷新和页面 Native 也不能直接套用全屏的一次调用事件数量规则。
+全屏机会准入通过即上报一次 `ad_position`，等待超时、取消或无填充均用同一 `ad_session_id` 收口；未通过准入的请求不补造 position。Banner 页面周期及 Native 同一周期内的失败重试不重复上报 position，不能直接套用一次 position 等于一次曝光或失败的数量等式。
 
 `Ads.mediationMode` 表示初始化模式；每条广告的来源读 `event.platform`，获胜方读 `winnerPlatform`，实际填充广告网络读 `adSource`。Bidding 模式下 `Ads.platform == null`，这不表示没有广告来源。
 

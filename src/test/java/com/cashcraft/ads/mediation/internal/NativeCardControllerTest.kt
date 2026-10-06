@@ -28,6 +28,32 @@ class NativeCardControllerTest {
         h.loads.last().failed("native_load_timeout")
         h.advance(2_000)
         assertEquals(6, h.loads.size)
+        assertEquals(1, h.events.count { it.name == AdEventName.POSITION })
+        val slotId = h.events.single { it.name == AdEventName.POSITION }.slotId
+        assertTrue(h.events.filter { !it.isLoadEvent }.all { it.analyticsParameters()["ad_session_id"] == slotId })
+        assertEquals(5, h.events.filter { it.name == AdEventName.SHOW_FAIL }.map { it.sessionId }.distinct().size)
+    }
+
+    @Test fun `automatic retry keeps one position and both current and late material revenues`() {
+        val h = Host().start()
+        val old = h.loads.single()
+        old.failed("no_fill")
+        val oldSession = h.events.single { it.name == AdEventName.SHOW_FAIL }.sessionId
+        h.advance(2_000)
+        val current = h.loads.last()
+        current.loaded(Ad())
+        val revenue = NativeRevenue(7, "USD", "test", "same-response", "exact")
+        repeat(2) { current.paid(revenue) }
+        repeat(2) { old.paid(revenue) }
+        assertEquals(2, h.revenues.size)
+        assertEquals(oldSession, h.revenues.last().sessionId)
+        assertEquals(2, h.revenues.map { it.sessionId }.distinct().size)
+        assertEquals(2, h.revenues.map { it.eventId }.distinct().size)
+        val position = h.events.single { it.name == AdEventName.POSITION }
+        assertEquals(listOf(position.slotId), h.events.filter { !it.isLoadEvent }
+            .map { it.analyticsParameters()["ad_session_id"] }.distinct())
+        assertEquals(h.revenues.map { it.sessionId },
+            h.events.filter { it.name == AdEventName.IMPRESSION }.map { it.sessionId })
     }
 
     @Test fun `hidden destroyed and stale retry callbacks cannot start or replace a live retry`() {
@@ -141,7 +167,7 @@ class NativeCardControllerTest {
         h.display = true
         h.controller.refresh()
         assertEquals(2, h.loads.size)
-        assertEquals(2, h.events.count { it.name == AdEventName.POSITION })
+        assertEquals(1, h.events.count { it.name == AdEventName.POSITION })
     }
 
     @Test fun `destroy reentered from loading notification prevents the SDK call`() {

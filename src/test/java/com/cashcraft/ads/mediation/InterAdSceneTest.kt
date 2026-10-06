@@ -136,34 +136,32 @@ class InterAdSceneTest {
         assertEquals("no_preloaded_ad", events.last().reason)
     }
 
-    @Test fun `native fallback cancelled before position terminates the original opportunity`() {
+    @Test fun `native fallback cancelled before handoff terminates the already reported opportunity`() {
         config = config.copy(provider = AdMobProviderConfig(AdMobIds.TEST.copy(interstitialId = "")))
         cacheNative()
         val task = start()
         assertNotNull(NativeFullScreenSession.current)
-        assertTrue(events.isEmpty())
+        assertEquals(listOf(AdEventName.POSITION), events.map { it.name })
         task.cancel()
         assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
         assertEquals(events.first().sessionId, events.last().sessionId)
         assertEquals("opportunity_cancelled", events.last().reason)
     }
 
-    @Test fun `native position owns failure even when the event listener cancels synchronously`() {
+    @Test fun `native handoff keeps the original opportunity and owns its failure`() {
         config = config.copy(provider = AdMobProviderConfig(AdMobIds.TEST.copy(interstitialId = "")))
         cacheNative()
         val task = start()
         val session = checkNotNull(NativeFullScreenSession.current)
-        config = config.copy(eventListener = {
-            events += it
-            if (it.name == AdEventName.POSITION) task.cancel()
-        })
-        ReflectionHelpers.setStaticField(Ads::class.java, "config", config)
-        val slot = checkNotNull(Ads.newNativeSlot(session.request, session.onPosition))
+        val slot = checkNotNull(Ads.newNativeSlot(session.request, session.onPosition, session.attempt))
         slot.position()
+        assertEquals(listOf(AdEventName.POSITION), events.map { it.name })
+        task.cancel()
         slot.end("native_cancelled")
         assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
-        assertTrue(events.all { it.format == AdFormat.NATIVE && it.position == "save_record" })
-        assertEquals(events.first().sessionId, events.last().sessionId)
+        assertEquals(AdFormat.INTERSTITIAL, events.first().format)
+        assertEquals(AdFormat.NATIVE, events.last().format)
+        assertEquals(events.first().analyticsParameters()["ad_session_id"], events.last().analyticsParameters()["ad_session_id"])
         assertEquals(listOf(AdShowResult.Failed("opportunity_cancelled")), results)
     }
 
@@ -172,7 +170,7 @@ class InterAdSceneTest {
         cacheNative()
         start()
         val session = checkNotNull(NativeFullScreenSession.current)
-        val slot = checkNotNull(Ads.newNativeSlot(session.request, session.onPosition))
+        val slot = checkNotNull(Ads.newNativeSlot(session.request, session.onPosition, session.attempt))
         val native = slot.attempt({ 0L }, recordLoadEvents = false)
         native.impression("test", "native-response", onActualImpression = session::onImpression)
         assertTrue(session.impression.get())
@@ -182,8 +180,9 @@ class InterAdSceneTest {
         native.paid(com.cashcraft.ads.mediation.internal.nativeads.NativeRevenue(
             0, "USD", "test", "native-response", "exact"))
         assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION), events.map { it.name })
-        assertTrue(events.all { it.format == AdFormat.NATIVE })
-        assertEquals(events.first().sessionId, events.last().sessionId)
+        assertEquals(AdFormat.INTERSTITIAL, events.first().format)
+        assertEquals(AdFormat.NATIVE, events.last().format)
+        assertEquals(events.first().analyticsParameters()["ad_session_id"], events.last().analyticsParameters()["ad_session_id"])
         assertEquals(listOf(AdShowResult.Dismissed), results)
     }
 
@@ -269,7 +268,8 @@ class InterAdSceneTest {
             assertEquals(position, events.first().position)
             assertTrue(events.first().sessionId.isNotEmpty())
             assertEquals(events.first().sessionId, events.last().sessionId)
-            assertTrue(events.all { !it.platformKnown && it.analyticsParameters()["ad_platform"] == "unknown" })
+            assertFalse(events.first().analyticsParameters().containsKey("ad_platform"))
+            assertEquals("unknown", events.last().analyticsParameters()["ad_platform"])
         }
     }
 
@@ -301,6 +301,19 @@ class InterAdSceneTest {
         assertEquals("platform_disabled", events.single().reason)
         assertTrue(results.single() is AdShowResult.Failed) // Same business result as before telemetry repair.
         assertFalse(events.single().analyticsParameters().containsKey("session_id"))
+    }
+
+    @Test fun `enabled native fallback admits the scene when the interstitial platform is disabled`() {
+        config = config.copy(provider = BiddingProviderConfig(
+            AdMobProviderConfig(AdMobIds.TEST),
+            TopOnProviderConfig(TopOnIds("app", "key", nativePlacementId = "native"))),
+            interTimeoutMillis = { 0 })
+        Ads.updatePolicy(AdPolicy(platforms = mapOf(AdPlatform.ADMOB to false, AdPlatform.TOPON to true)))
+        start()
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
+        assertEquals("no_preloaded_ad", (results.single() as AdShowResult.Failed).reason)
+        assertEquals(events.first().sessionId, events.last().sessionId)
+        assertFalse(events.first().analyticsParameters().containsKey("ad_platform"))
     }
 
     @Test fun `scene invalidated during wait still terminates its eligible request once`() {

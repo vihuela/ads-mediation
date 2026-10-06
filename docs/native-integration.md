@@ -191,7 +191,7 @@ Activity、owner、等值 request、layout 对象和 retentionPolicy 组成配�
 ## 事件、收益与全屏
 
 - `AdFormat.NATIVE` 区分广告格式，`slotId` 字段保留但改为原始业务 position（无后缀），不再生成页面 UUID；每次请求有 requestId，同一广告对象有自己的展示 sessionId。加载事件延续 requestId 作为加载 sessionId 的原口径，不能当成曝光会话。
-- position 使用业务位置的 `_native` 后缀，页面加载不是全局 preload。每个有效周期一次 ad_position、每次本层加载一对 request/result；取消有独立原因，曝光前失败按尝试去重。
+- position 使用业务位置的 `_native` 后缀，页面加载不是全局 preload。每个有效周期仅一次 ad_position，失败重试不增加机会；业务 ad_session_id 使用稳定 slotId，每次本层加载仍有独立 request/result 和素材收益身份。取消有独立原因，曝光前失败按尝试去重。
 - 曝光/点击以平台回调为准；Loaded、挂载和可见度不伪造曝光。合法多次点击保留，页面释放和覆盖层关闭不伪装成 ad_close。
 - 沿用 `AdEventListener` 与 `AdRevenueListener`。单平台请求的 mediationMode 为 ADMOB/TOPON；双 ID 请求为 BIDDING，每端有独立获取 requestId；SDK 库存准备的加载事件与页面获取分开，在最终取得有效胜出对象后产生一次 ad_bid_result，记录候选可用性、价格可用性和胜出平台。后续曝光/点击/收益沿用获胜候选的 requestId、平台和广告位 ID。paid 与 impression 不要求先后；合法零收入保留，旧广告迟到收益仍按原身份归因，平台销毁后是否继续发回调不作保证。
 - Native 不占全屏锁、也不参与全屏等待/竞价。`Ads.isReady(NATIVE)` 恒为 false，查询卡片自己的 state。已启用的旧自动开屏路径有 Native 交互抑制；手动插页在业务允许时调用 `Ads.showInter`，离场或业务条件失效时取消任务；覆盖层期间不要主动创建任务。

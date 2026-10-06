@@ -58,6 +58,7 @@ internal object FullScreenShowGate {
 internal class FullScreenShowAttempt(val isWaitingOpportunity: Boolean = false) {
     var policy: AdPolicyAttempt? = null
     var eventSession: AdShowSession? = null
+    var positionSessionId: String? = null
     var telemetryFormats: List<com.cashcraft.ads.mediation.AdFormat>? = null
     var guard: (() -> String?)? = null
     var handoffGuard: (() -> String?)? = null

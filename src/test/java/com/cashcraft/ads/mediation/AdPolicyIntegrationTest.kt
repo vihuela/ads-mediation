@@ -149,6 +149,7 @@ class AdPolicyIntegrationTest {
         val observed = ReflectionHelpers.getStaticField<AdEventListener>(Ads::class.java, "observedEvents")
         val session = AdShowSession(observed, AdPlatform.TOPON, AdMediationMode.BIDDING,
             AdFormat.INTERSTITIAL, "cold_start", "test", "open-interstitial", 1, attempt = attempt)
+        session.admit()
         session.impression("network", "response")
         session.impression("network", "response")
         session.emit(AdEventName.CLICK)

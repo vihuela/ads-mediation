@@ -22,6 +22,7 @@ internal class AutoAppOpenController<T>(
     private val clock: () -> Long = SystemClock::elapsedRealtime,
     private val windowMillis: Long = DEFAULT_WINDOW_MILLIS,
     private val checkIntervalMillis: Long = DEFAULT_CHECK_INTERVAL_MILLIS,
+    private val onQualified: (Activity, T) -> String? = { _, _ -> null },
 ) {
     private var foregroundStartedAtMillis = 0L
     private var attempted = false
@@ -63,7 +64,7 @@ internal class AutoAppOpenController<T>(
     }
 
     fun finishOpportunity(reason: String) {
-        if (!isEnabled() || !isProviderReady() || attempted) return
+        if (attempted) return
         val opportunity = pendingOpportunity ?: return
         attempted = true
         pendingOpportunity = null
@@ -77,7 +78,10 @@ internal class AutoAppOpenController<T>(
     }
 
     private fun schedule(delayMillis: Long = checkIntervalMillis) {
-        if (!isEnabled() || !isProviderReady()) return
+        if (!isEnabled() || !isProviderReady()) {
+            finishOpportunity("provider_not_ready")
+            return
+        }
         if (!AdLifecycleMonitor.isAppInForeground || attempted || checkScheduled) return
         if (pendingOpportunity == null) return
         checkScheduled = true
@@ -93,6 +97,7 @@ internal class AutoAppOpenController<T>(
 
     private fun checkAndShow() {
         if (!AdLifecycleMonitor.isAppInForeground || attempted) return
+        if (!isEnabled() || !isProviderReady()) { finishOpportunity("provider_not_ready"); return }
         if (NativeInteractions.blocksAutoAppOpen()) {
             finishOpportunity("native_interaction")
             return
@@ -103,6 +108,12 @@ internal class AutoAppOpenController<T>(
             !shouldIgnoreActivity(activity)
         val activityInteractive = activityAvailable &&
             AdLifecycleMonitor.activityShowFailureReason(checkNotNull(activity)) == null
+        if (activityInteractive && elapsed <= windowMillis) {
+            val opportunity = pendingOpportunity ?: return
+            onQualified(checkNotNull(activity), opportunity)?.let { finishOpportunity(it); return }
+            // Qualification callbacks may synchronously background or cancel this opportunity.
+            if (attempted || pendingOpportunity !== opportunity || !AdLifecycleMonitor.isAppInForeground) return
+        }
         val adAvailable = isAdAvailable()
         when (
             decideAutoAppOpenCheck(

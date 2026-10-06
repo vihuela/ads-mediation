@@ -34,6 +34,7 @@ class NativeFullScreenActivity : FragmentActivity() {
     internal val nativeRequest: ResolvedNativeRequest? get() = session?.request
     internal val policyAttempt: AdPolicyAttempt? get() = session?.policyAttempt
     internal val onNativeImpression: (() -> Unit)? get() = session?.let { { it.onImpression() } }
+    internal val opportunityAttempt: FullScreenShowAttempt? get() = session?.attempt
     internal val onNativePosition: (() -> Unit)? get() = session?.onPosition
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -84,7 +85,7 @@ internal class NativeFullScreenSession(
     val request: ResolvedNativeRequest,
     val layout: NativeLayout.Custom,
     private var ad: NativeAdHandle?,
-    private val attempt: FullScreenShowAttempt,
+    val attempt: FullScreenShowAttempt,
     host: Activity,
     private val sceneValid: () -> Boolean,
     private var onResult: ((AdShowResult) -> Unit)?,
@@ -186,6 +187,7 @@ internal class NativeFullScreenSession(
         trace(endMessage)
         Ads.nativeLog(request.position) { endMessage }
         val result = if (shown) AdShowResult.Dismissed else AdShowResult.Failed(failure)
+        if (!shown) attempt.eventSession?.showFailure(failure)
         runCatching { callback?.invoke(attempt.policy?.result(result) ?: result) }
     }
 
@@ -208,6 +210,7 @@ internal class NativeFullScreenSession(
             if (attempt.policy == null) attempt.policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true,
                 sceneType = AdSceneType.NATIVE_FULLSCREEN))
             fun fail(reason: String): NativeFullScreenSession? {
+                attempt.eventSession?.showFailure(reason)
                 attempt.complete()
                 onResult(attempt.policy!!.result(AdShowResult.Failed(reason)))
                 return null
@@ -226,6 +229,8 @@ internal class NativeFullScreenSession(
             }
             FullScreenShowGate.tryAcquire(activity, Ads.nativeAvailability(resolved).failure, attempt)
                 ?.let { return fail(it) }
+            if (!Ads.admitOpportunity(AdFormat.NATIVE, position, attempt)) return fail("platform_disabled")
+            attempt.failureReason()?.let { return fail(it) }
             val generation = NativeAdCache.generation
             var decision: BidDecision? = null
             val cached = selectCachedNative(resolved,

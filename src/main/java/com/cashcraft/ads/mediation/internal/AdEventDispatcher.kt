@@ -444,7 +444,7 @@ internal class AdShowSession(
     val format: AdFormat,
     val position: String,
     val adUnitId: String,
-    val sessionId: String,
+    sessionId: String,
     private val number: Long,
     private val logger: AdsModuleLogger? = null,
     val attempt: FullScreenShowAttempt = FullScreenShowAttempt(),
@@ -452,6 +452,7 @@ internal class AdShowSession(
     private val platformKnown: Boolean = true,
     private val platformDisabled: (() -> Boolean)? = null,
 ) {
+    val sessionId: String = attempt.positionSessionId ?: sessionId
     private val terminal = AtomicBoolean(false)
     var hasImpression: Boolean = false
         private set
@@ -468,16 +469,12 @@ internal class AdShowSession(
         attempt.eventSession = this
         attempt.policy?.logMaterial(format, platform)
         onCreated(this)
-        // The migration is limited to the three SDK full-screen formats.
-        if (format == AdFormat.NATIVE) {
-            admitted = true
-            emit(AdEventName.POSITION)
-        }
     }
 
-    /** Called near show, or at a no-fill terminal. Never consumes show quota. */
-    fun admit(): Boolean {
+    /** Publish a qualified business opportunity before candidate selection. Never consumes quota. */
+    fun admit(qualify: Boolean = true): Boolean {
         if (admitted) return true
+        if (attempt.positionSessionId != null) { admitted = true; return true }
         if (skipped || position.isBlank()) return false
         val block = attempt.policy?.telemetryBlockReason()
         val reason = block?.sceneSkipReason()
@@ -494,7 +491,9 @@ internal class AdShowSession(
         }
         // Invalid scene identity must not become a fabricated qualified opportunity.
         if (block != null) return false
+        if (!qualify) return false
         admitted = true
+        attempt.positionSessionId = sessionId
         emit(AdEventName.POSITION)
         pendingBid?.let { pendingBid = null; bidResult(it) }
         return true
@@ -509,7 +508,7 @@ internal class AdShowSession(
     ) {
         // Actual callbacks still count if teardown/failure reached the main queue first.
         attempt.policy?.impression()
-        if (!admit()) return
+        if (!admit(qualify = false)) return
         if (terminal.compareAndSet(false, true)) {
             hasImpression = true
             val callback = onImpressionConfirmed
@@ -533,7 +532,7 @@ internal class AdShowSession(
         precisionType: String? = null,
     ): Boolean {
         if (valueMicros == null || valueMicros < 0 || currency?.matches(Regex("[A-Z]{3}")) != true) return false
-        if (!admit() || !paid.compareAndSet(false, true)) return false
+        if (!admit(qualify = false) || !paid.compareAndSet(false, true)) return false
         if (!reportsImpressionOnShow) {
             emit(AdEventName.IMPRESSION, adSource = adSource, responseId = responseId,
                 value = value ?: valueMicros / 1_000_000.0, valueMicros = valueMicros,
@@ -544,7 +543,7 @@ internal class AdShowSession(
     }
 
     fun showFailure(reason: String, errorCode: String? = null, cause: Throwable? = null) {
-        if (!admit()) return
+        if (!admit(qualify = false)) return
         if (terminal.compareAndSet(false, true)) {
             onImpressionConfirmed = null
             emit(AdEventName.SHOW_FAIL, reason = attempt.policy?.blocked?.let { it.sceneSkipReason() ?: it.code } ?: reason, errorCode = errorCode)
@@ -602,7 +601,7 @@ internal class AdShowSession(
         mediationAdapterClassName: String? = null,
         precisionType: String? = null,
     ): Boolean {
-        if (name != AdEventName.POSITION && !admit()) return false
+        if (name != AdEventName.POSITION && !admit(qualify = false)) return false
         when (name) {
             AdEventName.IMPRESSION -> if (!impressionReported.compareAndSet(false, true)) return false
             AdEventName.REWARD -> {

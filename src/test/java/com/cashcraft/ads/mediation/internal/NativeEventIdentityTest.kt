@@ -35,10 +35,12 @@ class NativeEventIdentityTest {
         assertEquals(attempt.id, revenues.single().sessionId)
     }
 
-    @Test fun `retry separates opportunity from actual load and old late payment keeps old display`() {
+    @Test fun `retry shares one business opportunity while old late payment keeps its material identity`() {
         val events = mutableListOf<AdEvent>()
+        val revenues = mutableListOf<AdRevenuePayload>()
         val slot = NativeSlot(ResolvedNativeRequest(AdPlatform.ADMOB, "unit", "home"), 1, { 1 },
-            AdEventListener(events::add), AdRevenueListener.NONE)
+            AdEventListener(events::add), AdRevenueListener(revenues::add))
+        slot.position()
         val old = slot.attempt({ 0 })
         old.start()
         old.loaded(Ad(AdPlatform.ADMOB))
@@ -47,11 +49,19 @@ class NativeEventIdentityTest {
         next.start()
         next.loaded(Ad(AdPlatform.ADMOB))
         next.impression("source", "response")
-        next.paid(NativeRevenue(5, "USD", "source", "next-response", "exact"))
-        old.paid(NativeRevenue(0, "USD", "source", "response", "exact"))
+        repeat(2) { next.paid(NativeRevenue(5, "USD", "source", "response", "exact")) }
+        repeat(2) { old.paid(NativeRevenue(0, "USD", "source", "response", "exact")) }
+        slot.position()
         val positions = events.filter { it.name == AdEventName.POSITION }
-        assertEquals(2, positions.size)
-        assertNotEquals(positions[0].sessionId, positions[1].sessionId)
+        assertEquals(1, positions.size)
+        assertEquals(old.id, positions.single().sessionId)
+        assertNotEquals(old.id, next.id)
+        assertTrue(events.all { it.slotId == slot.id })
+        assertTrue(events.filter { !it.isLoadEvent }.all { it.analyticsParameters()["ad_session_id"] == slot.id })
+        assertEquals(listOf(next.id, old.id), revenues.map { it.sessionId })
+        assertEquals(listOf(revenueEventId(AdPlatform.ADMOB, null, next.id),
+            revenueEventId(AdPlatform.ADMOB, null, old.id)), revenues.map { it.eventId })
+        assertEquals(2, revenues.map { it.eventId }.distinct().size)
         val load = events.single { it.name == AdEventName.LOAD }
         assertNotEquals(old.id, load.requestId)
         assertEquals(load.requestId, events.single { it.name in setOf(AdEventName.LOADED, AdEventName.LOAD_FAIL) }.requestId)

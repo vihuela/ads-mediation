@@ -69,7 +69,7 @@ data class AdEvent(
 
     /** v2 business properties. Diagnostics or invalid events return an empty map. */
     fun analyticsParameters(): Map<String, Any> {
-        if (name in setOf(AdEventName.BID_RESULT, AdEventName.BANNER_REFRESH) ||
+        if (name == AdEventName.BANNER_REFRESH ||
             (format == AdFormat.BANNER && name == AdEventName.DISMISS)) return emptyMap()
         val properties = linkedMapOf<String, Any>("ad_type" to format.analyticsValue)
         if (name == AdEventName.SCENE_SKIP) {
@@ -77,8 +77,13 @@ data class AdEvent(
             properties["reason"] = skipReasons[reason] ?: return emptyMap()
             return properties
         }
-        if (!platformKnown && name !in setOf(AdEventName.POSITION, AdEventName.SHOW_FAIL)) return emptyMap()
-        properties["ad_platform"] = if (platformKnown) platform.analyticsValue else "unknown"
+        if (name == AdEventName.BID_RESULT && (mediationMode != AdMediationMode.BIDDING ||
+                format == AdFormat.BANNER || admobAvailable == null || topOnAvailable == null || currency != "USD")) return emptyMap()
+        if (!platformKnown && name !in setOf(AdEventName.POSITION, AdEventName.SHOW_FAIL, AdEventName.BID_RESULT)) return emptyMap()
+        if (name != AdEventName.POSITION) {
+            properties["ad_platform"] = if (name == AdEventName.BID_RESULT) winnerPlatform?.analyticsValue ?: "unknown"
+                else if (platformKnown) platform.analyticsValue else "unknown"
+        }
         properties["mediation_mode"] = mediationMode.analyticsValue
         if (isLoadEvent) {
             properties["request_id"] = requestId?.takeIf { it.isNotBlank() } ?: return emptyMap()
@@ -87,11 +92,38 @@ data class AdEvent(
             }
         } else {
             properties["position_id"] = position.takeIf { it.isNotBlank() } ?: return emptyMap()
-            val businessSessionId = if (format == AdFormat.BANNER) slotId ?: sessionId else sessionId
+            val businessSessionId = if (format == AdFormat.BANNER || format == AdFormat.NATIVE) slotId ?: sessionId else sessionId
             properties["ad_session_id"] = businessSessionId.takeIf { it.isNotBlank() } ?: return emptyMap()
         }
-        if (platformKnown) adUnitId.takeIf { it.isNotBlank() }?.let { properties["ad_unit_id"] = it }
+        if (name == AdEventName.BID_RESULT) {
+            val winnerUnit = when (winnerPlatform) {
+                AdPlatform.ADMOB -> admobAdUnitId
+                AdPlatform.TOPON -> topOnAdUnitId
+                null -> null
+            }
+            winnerUnit?.takeIf { it.isNotBlank() }?.let { properties["ad_unit_id"] = it }
+        } else if (platformKnown && name != AdEventName.POSITION) {
+            adUnitId.takeIf { it.isNotBlank() }?.let { properties["ad_unit_id"] = it }
+        }
         when (name) {
+            AdEventName.BID_RESULT -> {
+                properties["result"] = if (winnerPlatform == null) "no_candidate" else "won"
+                properties["winner_platform"] = winnerPlatform?.analyticsValue ?: "unknown"
+                properties["admob_available"] = checkNotNull(admobAvailable)
+                properties["topon_available"] = checkNotNull(topOnAvailable)
+                val admobPrice = admobValue?.takeIf { it.isFinite() && it >= 0 }
+                val topOnPrice = topOnValue?.takeIf { it.isFinite() && it >= 0 }
+                properties["admob_price_available"] = admobPrice != null
+                properties["topon_price_available"] = topOnPrice != null
+                properties["admob_value"] = admobPrice ?: "unknow"
+                properties["topon_value"] = topOnPrice ?: "unknow"
+                properties["winning_value"] = winningValue?.takeIf {
+                    winnerPlatform != null && it.isFinite() && it >= 0
+                } ?: "unknow"
+                properties["currency"] = "USD"
+                admobAdUnitId?.takeIf { it.isNotBlank() }?.let { properties["admob_ad_unit_id"] = it }
+                topOnAdUnitId?.takeIf { it.isNotBlank() }?.let { properties["topon_ad_unit_id"] = it }
+            }
             AdEventName.LOADED, AdEventName.CLICK ->
                 adSource?.takeIf { it.isNotBlank() }?.let { properties["ad_source"] = it }
             AdEventName.LOAD_FAIL, AdEventName.SHOW_FAIL -> {

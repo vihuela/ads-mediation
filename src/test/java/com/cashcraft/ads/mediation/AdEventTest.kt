@@ -25,6 +25,13 @@ class AdEventTest {
                 (name == AdEventName.REWARD && format != AdFormat.REWARDED)
             if (unsupported) { assertTrue(parameters.isEmpty()); continue }
             assertEquals(format.analyticsValue, parameters["ad_type"])
+            if (name in setOf(AdEventName.POSITION, AdEventName.SCENE_SKIP)) {
+                assertFalse(parameters.containsKey("ad_platform"))
+                assertFalse(parameters.containsKey("ad_unit_id"))
+            } else {
+                assertEquals("admob", parameters["ad_platform"])
+                assertEquals("unit", parameters["ad_unit_id"])
+            }
             for (key in listOf("position", "session_id", "slot_id", "number", "response_id", "result",
                 "platform_known", "value", "value_micros", "buffer_size", "tracking_plan_version")) {
                 assertFalse("$name must not expose $key", parameters.containsKey(key))
@@ -38,7 +45,7 @@ class AdEventTest {
                 assertEquals("business-position", parameters["position_id"])
                 assertFalse(parameters.containsKey("request_id"))
                 if (name != AdEventName.SCENE_SKIP) {
-                    assertEquals(if (format == AdFormat.BANNER) "slot-1" else "display-1", parameters["ad_session_id"])
+                    assertEquals(if (format == AdFormat.BANNER || format == AdFormat.NATIVE) "slot-1" else "display-1", parameters["ad_session_id"])
                 }
             }
         }
@@ -59,6 +66,16 @@ class AdEventTest {
         }
         assertEquals("display-1", event(format = AdFormat.BANNER).copy(slotId = null)
             .analyticsParameters()["ad_session_id"])
+    }
+
+    @Test fun `native and banner business identity falls back to the original session without a slot`() {
+        for (format in listOf(AdFormat.NATIVE, AdFormat.BANNER)) {
+            for (name in listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL, AdEventName.IMPRESSION, AdEventName.CLICK)) {
+                val ad = event(name, format).copy(slotId = null)
+                assertEquals("display-1", ad.analyticsParameters()["ad_session_id"])
+                assertEquals("display-1", ad.sessionId)
+            }
+        }
     }
 
     @Test fun `loading omits scene from every log format`() {
@@ -83,9 +100,26 @@ class AdEventTest {
         assertTrue(event(AdEventName.SCENE_SKIP).copy(reason = "private-body").analyticsParameters().isEmpty())
     }
 
-    @Test fun `unselected opportunity is unknown and never exposes a configured unit`() {
-        for (name in listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL)) {
-            val parameters = event(name).copy(platformKnown = false, mediationMode = AdMediationMode.BIDDING).analyticsParameters()
+    @Test fun `position omits provider fields for every format platform and mediation mode`() {
+        for (format in AdFormat.entries) for (platform in AdPlatform.entries) {
+            for (mode in AdMediationMode.entries) for (known in listOf(true, false)) {
+                val parameters = event(AdEventName.POSITION, format).copy(
+                    platform = platform, mediationMode = mode, platformKnown = known,
+                ).analyticsParameters()
+                assertEquals(mapOf(
+                    "ad_type" to format.analyticsValue,
+                    "mediation_mode" to mode.analyticsValue,
+                    "position_id" to "business-position",
+                    "ad_session_id" to if (format == AdFormat.BANNER || format == AdFormat.NATIVE) "slot-1" else "display-1",
+                ), parameters)
+            }
+        }
+    }
+
+    @Test fun `unselected show failure is unknown and never exposes a configured unit`() {
+        for (format in AdFormat.entries) {
+            val parameters = event(AdEventName.SHOW_FAIL, format)
+                .copy(platformKnown = false, mediationMode = AdMediationMode.BIDDING).analyticsParameters()
             assertEquals("unknown", parameters["ad_platform"])
             assertEquals("bidding", parameters["mediation_mode"])
             assertFalse(parameters.containsKey("ad_unit_id"))
@@ -93,6 +127,70 @@ class AdEventTest {
         for (name in listOf(AdEventName.LOAD, AdEventName.LOADED, AdEventName.LOAD_FAIL,
             AdEventName.IMPRESSION, AdEventName.CLICK, AdEventName.DISMISS, AdEventName.IMPRESSION, AdEventName.REWARD)) {
             assertTrue(event(name).copy(platformKnown = false).analyticsParameters().isEmpty())
+        }
+    }
+
+    @Test fun `bid result reports both candidates and actual winner with a stable business session`() {
+        for (format in listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL, AdFormat.REWARDED, AdFormat.NATIVE)) {
+            for (winner in AdPlatform.entries) {
+                val parameters = event(AdEventName.BID_RESULT, format).copy(
+                    mediationMode = AdMediationMode.BIDDING, platformKnown = false,
+                    winnerPlatform = winner, admobAvailable = true, topOnAvailable = true,
+                    admobValue = 0.0, topOnValue = 0.00125, winningValue = if (winner == AdPlatform.ADMOB) 0.0 else 0.00125,
+                    admobAdUnitId = "admob-unit", topOnAdUnitId = "topon-unit", currency = "USD",
+                ).analyticsParameters()
+                assertEquals("won", parameters["result"])
+                assertEquals(winner.analyticsValue, parameters["ad_platform"])
+                assertEquals(winner.analyticsValue, parameters["winner_platform"])
+                assertEquals(if (winner == AdPlatform.ADMOB) "admob-unit" else "topon-unit", parameters["ad_unit_id"])
+                assertEquals("admob-unit", parameters["admob_ad_unit_id"])
+                assertEquals("topon-unit", parameters["topon_ad_unit_id"])
+                assertEquals(true, parameters["admob_available"])
+                assertEquals(true, parameters["topon_available"])
+                assertEquals(true, parameters["admob_price_available"])
+                assertEquals(true, parameters["topon_price_available"])
+                assertEquals(0.0, parameters["admob_value"])
+                assertEquals(0.00125, parameters["topon_value"])
+                assertEquals(if (winner == AdPlatform.ADMOB) 0.0 else 0.00125, parameters["winning_value"])
+                assertEquals("USD", parameters["currency"])
+                assertEquals(if (format == AdFormat.NATIVE) "slot-1" else "display-1", parameters["ad_session_id"])
+            }
+        }
+    }
+
+    @Test fun `no bid candidate reports unknow amounts without inventing a winner unit or zero prices`() {
+        val parameters = event(AdEventName.BID_RESULT, AdFormat.NATIVE).copy(
+            mediationMode = AdMediationMode.BIDDING, platformKnown = false,
+            admobAvailable = false, topOnAvailable = false, currency = "USD",
+            admobAdUnitId = "admob-unit", topOnAdUnitId = "topon-unit",
+        ).analyticsParameters()
+        assertEquals("no_candidate", parameters["result"])
+        assertEquals("unknown", parameters["ad_platform"])
+        assertEquals("unknown", parameters["winner_platform"])
+        assertEquals(false, parameters["admob_available"])
+        assertEquals(false, parameters["topon_available"])
+        assertEquals(false, parameters["admob_price_available"])
+        assertEquals(false, parameters["topon_price_available"])
+        assertFalse(parameters.containsKey("ad_unit_id"))
+        for (key in listOf("admob_value", "topon_value", "winning_value")) {
+            assertEquals(key, "unknow", parameters[key])
+        }
+    }
+
+    @Test fun `unknown invalid and nonfinite bid prices report unknow without dropping the result`() {
+        for (price in listOf(null, -1.0, Double.NaN, Double.POSITIVE_INFINITY)) {
+            val bid = event(AdEventName.BID_RESULT).copy(mediationMode = AdMediationMode.BIDDING,
+                winnerPlatform = AdPlatform.TOPON, admobAvailable = true, topOnAvailable = true,
+                admobValue = price, topOnValue = price, winningValue = price, currency = "USD")
+            val parameters = bid.analyticsParameters()
+            assertEquals("won", parameters["result"])
+            assertEquals(false, parameters["admob_price_available"])
+            assertEquals(false, parameters["topon_price_available"])
+            for (key in listOf("admob_value", "topon_value", "winning_value")) assertEquals("unknow", parameters[key])
+            assertTrue(bid.copy(position = "").analyticsParameters().isEmpty())
+            assertTrue(bid.copy(sessionId = "").analyticsParameters().isEmpty())
+            assertTrue(bid.copy(currency = "EUR").analyticsParameters().isEmpty())
+            assertTrue(bid.copy(mediationMode = AdMediationMode.ADMOB).analyticsParameters().isEmpty())
         }
     }
 

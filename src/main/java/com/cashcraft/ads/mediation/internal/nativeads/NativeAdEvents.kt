@@ -33,7 +33,7 @@ internal class NativeSlot(
         else if (platform == AdPlatform.ADMOB) AdMediationMode.ADMOB else AdMediationMode.TOPON
     private var attempted = false
     private var ended = false
-    private var announced = false
+    private var announced = false // POSITION belongs to the slot, not each material attempt.
     private var sessionId = UUID.randomUUID().toString()
 
     fun position() {
@@ -56,8 +56,8 @@ internal class NativeSlot(
 
     fun attempt(clock: () -> Long, recordLoadEvents: Boolean = true): NativeAttempt {
         if (attempted) {
+            // Keep material/revenue identity independent from the stable business slot identity.
             sessionId = UUID.randomUUID().toString()
-            announced = false
         }
         attempted = true
         ended = false

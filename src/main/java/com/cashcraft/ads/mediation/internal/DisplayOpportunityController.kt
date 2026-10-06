@@ -25,6 +25,7 @@ internal class DisplayOpportunityController(
     private val preferCachedImmediately: Boolean = false,
     policy: AdPolicyAttempt? = null,
     private val excludeWaitingTime: () -> Boolean = { false },
+    private var onQualified: ((FullScreenShowAttempt) -> Boolean)? = null,
 ) {
     data class LoadSnapshot(val ready: Boolean, val settled: Boolean)
 
@@ -32,6 +33,7 @@ internal class DisplayOpportunityController(
     private var state = State.WAITING
     private var started = false
     private var loadEnsured = false
+    private var qualified = false
     private var attempting = false
     private var loading = false
     private var pausedAtMillis: Long? = null
@@ -133,6 +135,13 @@ internal class DisplayOpportunityController(
         val reason = environmentFailure()
         if (state != State.WAITING || pausedAtMillis != null) return
         if (reason != null && reason !in TRANSIENT_REASONS) return fail(reason)
+        if (reason == null && !qualified) {
+            qualified = true // Commit before the event listener can cancel or reenter.
+            val admitted = onQualified?.invoke(attempt) != false
+            sessionId = attempt.positionSessionId
+            if (state != State.WAITING || pausedAtMillis != null) return
+            if (!admitted) return fail("platform_disabled")
+        }
         if (!attempting) setLoading(true)
         // A host callback can synchronously cancel or leave the scene.
         if (state != State.WAITING || pausedAtMillis != null) return
@@ -184,7 +193,7 @@ internal class DisplayOpportunityController(
         cleanWaiting()
         val resolved = attempt.policy?.result(result.showResult) ?: result.showResult
         attempt.policy?.complete()
-        runCatching { callback?.invoke(result.copy(showResult = resolved)) }
+        runCatching { callback?.invoke(result.copy(showResult = resolved, sessionId = result.sessionId ?: attempt.positionSessionId)) }
     }
 
     private fun setLoading(value: Boolean) {
@@ -203,6 +212,7 @@ internal class DisplayOpportunityController(
         loadSnapshot = null
         ensureLoaded = null
         show = null
+        onQualified = null
         val cleanup = onCleanup
         onCleanup = null
         cleanup?.invoke()

@@ -560,8 +560,8 @@ eventListener = AdEventListener { event ->
 | `LOADED` | `ad_loaded` | 加载成功 |
 | `LOAD_FAIL` | `ad_load_fail` | 加载失败、超时或取消 |
 | `SCENE_SKIP` | `ad_scene_skip` | 展示机会建立前被策略拦截 |
-| `POSITION` | `ad_position` | 一次被允许进入广告模块的展示机会；Banner 每个页面 active 周期仅一次 |
-| `BID_RESULT` | `ad_bid_result` | 竞价诊断，不作为业务事件上报 |
+| `POSITION` | `ad_position` | 全部频控、开关与展示资格通过后、比价前的展示需求；同一机会不因重试或兜底重复 |
+| `BID_RESULT` | `ad_bid_result` | 比价结果，包含各平台候选与报价、胜出平台和胜出价 |
 | `IMPRESSION` | `ad_impression` | 按下表的平台回调发送，可携带展示级收益 |
 | `SHOW_FAIL` | `ad_show_fail` | 本次展示机会未产生展示并已失败收口 |
 | `CLICK` | `ad_click` | 用户点击广告 |
@@ -586,18 +586,18 @@ TopOn 开屏/Native 在展示回调缺少金额时仍记录曝光，省略收益
 竞价前失败没有 `ad_bid_result`。
 
 `AdEvent.analyticsParameters()` 直接提供 v2 业务字段，宿主无需转换事件名或字段。
-诊断事件（`BID_RESULT` / `BANNER_REFRESH`）以及不满足业务契约的事件返回空 Map；宿主只转发非空业务参数。
+刷新诊断事件（`BANNER_REFRESH`）以及不满足业务契约的事件返回空 Map；`BID_RESULT` 作为业务事件输出，宿主只转发非空业务参数。
 `AdEvent` 的原始类型化属性仍用于 SDK 日志、回调诊断和专用收益通道，不会全部进入业务埋点。
 
 | v2 analytics key | 说明 |
 | --- | --- |
 | `ad_type` | `app_open`、`interstitial`、`rewarded`、`native` 或 `banner` |
-| `ad_platform` | `admob`、`topon`；选定平台前的展示机会/失败为 `unknown` |
+| `ad_platform` | `admob`、`topon`；选定平台前的失败为 `unknown`；`ad_position` 不传 |
 | `mediation_mode` | `admob`、`topon` 或 `bidding` |
 | `position_id` / `ad_session_id` | 非加载事件的业务场景和展示会话；Banner 同一页面 active 周期共享会话，场景拦截只含 `position_id` |
 | `request_id` | 加载事件独立请求 ID，不携带展示会话 |
 | `latency_ms` | 加载成功/失败的非负耗时 |
-| `ad_unit_id` | 选定平台后可用的广告单元 |
+| `ad_unit_id` | 选定平台后可用的广告单元；`ad_position` 不传 |
 | `ad_source` | 加载成功、曝光和点击事件的实际广告源 |
 | `reason` / `error_code` | 受控失败/拦截原因；异常不透传异常详情或伪造 SDK 错误码 |
 | `revenue_amount` / `currency` | `ad_impression` 上可用的收益主货币单位金额和 ISO 币种；SDK 返回零金额时保留零 |
@@ -605,7 +605,19 @@ TopOn 开屏/Native 在展示回调缺少金额时仍记录曝光，省略收益
 | `refresh_index` | 仅 Banner 曝光：同一页面周期内广告序号，首条为 1；新广告递增，重复回调和刷新失败不递增，迟到收益保留原序号 |
 
 业务参数不包含 `position`、`session_id`、`slot_id`、`number`、`response_id`、
-`value_micros` 或竞价诊断字段。Firebase 保留事件的过滤由宿主上报器处理；独立收益回调继续使用原始收益 payload。
+`value_micros`。Firebase 保留事件的过滤由宿主上报器处理；独立收益回调继续使用原始收益 payload。
+
+`ad_bid_result` 复用 `position_id`、`ad_session_id` 和 `mediation_mode`，并提供：
+
+| 字段 | 说明 |
+| --- | --- |
+| `result` | `won` 或 `no_candidate`，统一全屏与 Native 比价结果 |
+| `ad_platform` / `winner_platform` | 胜出平台；无胜者为 `unknown`，此时不传 `ad_unit_id` |
+| `admob_available` / `topon_available` | 比价时该平台是否有可用素材；不是加载请求是否发起 |
+| `admob_price_available` / `topon_price_available` | 是否有有效报价；未知、负数、非有限值不作为有效价格 |
+| `admob_value` / `topon_value` / `winning_value` | USD 每次展示报价，不是 eCPM；未知金额上报字符串 `"unknow"`，已知金额为数值，真实零价保留 |
+| `currency` | `USD` |
+| `admob_ad_unit_id` / `topon_ad_unit_id` | 可用时记录候选平台广告单元；配置了广告单元不代表已有素材 |
 
 ## 6. 收益回调
 
@@ -690,7 +702,7 @@ TopOn 通过 `checkAdStatus().getTUTopAdInfo()` 读取当前最高优先级缓�
 预加载队列头部的 `AdValue.valueMicros`，同样只读取、不消费广告。
 
 自动竞价开屏会在进入前台后最多等待 7 秒，直到 Activity window 可用且至少有一个缓存；超时或
-退到后台都会用 `ad_bid_result + ad_show_fail` 收口，不会留下只有 `ad_position` 的会话。
+退到后台时，已通过准入检查的机会用同一业务会话的 `ad_show_fail` 收口；未通过准入检查则不补造 `ad_position`。
 
 重要兼容边界：当前竞价价格反射路径只支持 AdMob GMA Next-Gen `1.2.1`。升级 AdMob 后必须同时
 更新 `google_next_gen_preload_reflection_paths.json`、consumer ProGuard 规则和 R8 smoke 测试，

@@ -229,7 +229,8 @@ class AdsNativeView(
             },
             canDisplay = { activityResumed && connection?.canDisplay() == true },
             newSlot = { resolvedRequest?.let {
-                Ads.newNativeSlot(it, (activity as? NativeFullScreenActivity)?.onNativePosition)
+                Ads.newNativeSlot(it, (activity as? NativeFullScreenActivity)?.onNativePosition,
+                    (activity as? NativeFullScreenActivity)?.opportunityAttempt)
             } },
             load = {
                 requestedWidth = checkNotNull(connection).contentWidth

@@ -25,6 +25,35 @@ class DisplayOpportunityControllerTest {
         harnesses.forEach { it.controller.cancel(); it.controller.attempt.complete() }
     }
 
+    @Test fun `qualified opportunity precedes inventory and survives empty timeout`() {
+        val h = harness()
+        h.readReady = {
+            assertEquals(1, h.events.count { it.name == AdEventName.POSITION })
+            false
+        }
+        h.controller.start()
+        assertEquals(listOf(AdEventName.POSITION), h.events.map { it.name })
+        h.controller.start()
+        h.now = 500
+        h.tick()
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), h.events.map { it.name })
+        assertEquals(1, h.events.map { it.sessionId }.distinct().size)
+        assertEquals("wait_timeout", h.reason)
+        assertEquals(0, h.shows)
+    }
+
+    @Test fun `transient unready host cannot publish until all eligibility checks pass`() {
+        val h = harness()
+        h.hostFailure = "activity_window_not_focused"
+        h.controller.start()
+        assertTrue(h.events.isEmpty())
+        h.hostFailure = null
+        h.tick()
+        assertEquals(listOf(AdEventName.POSITION), h.events.map { it.name })
+        h.tick()
+        assertEquals(1, h.events.size)
+    }
+
     @Test fun `deadline includes main queue time and final check uses available cache`() {
         val queued = harness(queuedFor = 500)
         queued.controller.start()
@@ -837,6 +866,11 @@ class DisplayOpportunityControllerTest {
             onCleanup = { cleanups++ },
             onResult = { results += it; onResult(it) },
             onLoadingChanged = { loading += it; onLoading(it) },
+            onQualified = { attempt ->
+                AdShowSession(AdEventListener { events += it; onEvent(it) }, AdPlatform.ADMOB,
+                    AdMediationMode.BIDDING, AdFormat.REWARDED, "test_rewarded", "", "show-session", 1,
+                    attempt = attempt, platformKnown = false, platformDisabled = { false }).admit()
+            },
             excludeWaitingTime = { excludeWait },
         )
 
@@ -849,7 +883,7 @@ class DisplayOpportunityControllerTest {
                 format = AdFormat.REWARDED,
                 position = "test_rewarded",
                 adUnitId = "test-ad",
-                sessionId = "show-session",
+                sessionId = "provider-session",
                 number = 1,
                 attempt = attempt,
                 onCreated = controller::sessionStarted,

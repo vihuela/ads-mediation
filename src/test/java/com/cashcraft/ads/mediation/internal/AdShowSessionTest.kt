@@ -21,6 +21,7 @@ class AdShowSessionTest {
                 val events = mutableListOf<AdEvent>()
                 val session = AdShowSession(AdEventListener(events::add), platform, AdMediationMode.BIDDING,
                     format, "original-position", "unit", "original-session", 1)
+                session.admit()
                 val onShow = platform == AdPlatform.TOPON && format == AdFormat.APP_OPEN
                 var confirmed = 0
                 session.onImpressionConfirmed = { confirmed++ }
@@ -51,16 +52,19 @@ class AdShowSessionTest {
         val events = mutableListOf<AdEvent>()
         val session = AdShowSession(AdEventListener(events::add), AdPlatform.TOPON, AdMediationMode.TOPON,
             AdFormat.APP_OPEN, "open", "unit", "session", 1)
+        session.admit()
         session.impression("network", "response")
         assertFalse(events.single { it.name == AdEventName.IMPRESSION }.analyticsParameters().containsKey("revenue_amount"))
         assertTrue(session.revenue(valueMicros = 0, currency = "USD"))
         assertEquals(1, events.count { it.name == AdEventName.IMPRESSION })
     }
 
-    @Test fun `legacy native show session still announces its original position on creation`() {
+    @Test fun `native show session announces only after qualification`() {
         val events = mutableListOf<AdEvent>()
         val session = AdShowSession(AdEventListener(events::add), AdPlatform.ADMOB,
             AdMediationMode.ADMOB, AdFormat.NATIVE, "native_position", "unit", "legacy-id", 1)
+        assertTrue(events.isEmpty())
+        session.admit()
         assertEquals(listOf(AdEventName.POSITION), events.map { it.name })
         session.impression("source", "response")
         session.revenue(valueMicros = 1250, currency = "USD")
@@ -86,6 +90,9 @@ class AdShowSessionTest {
             val session = AdShowSession(AdEventListener(events::add), AdPlatform.ADMOB,
                 AdMediationMode.ADMOB, format, "  original position  ", "unit", "internal-id", 1)
             assertEquals(emptyList<AdEvent>(), events)
+            session.showFailure("no_preloaded_ad")
+            assertTrue("Failure cannot fabricate an unqualified opportunity", events.isEmpty())
+            session.admit()
             session.showFailure("no_preloaded_ad")
             session.showFailure("duplicate")
             assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL), events.map { it.name })
@@ -360,7 +367,7 @@ class AdShowSessionTest {
     }
 
     @Test
-    fun `bid result omits unavailable prices instead of reporting zero`() {
+    fun `bid result reports unknow for unavailable prices and preserves real zero`() {
         val events = mutableListOf<AdEvent>()
         val session = session(events, mediationMode = AdMediationMode.BIDDING)
 
@@ -383,7 +390,16 @@ class AdShowSessionTest {
         assertEquals(null, bid.admobValue)
         assertEquals(0.0, bid.topOnValue)
         assertEquals(0.0, bid.winningValue)
-        assertTrue(bid.analyticsParameters().isEmpty())
+        val properties = bid.analyticsParameters()
+        assertEquals("won", properties["result"])
+        assertEquals("topon", properties["winner_platform"])
+        assertEquals("topon", properties["ad_platform"])
+        assertEquals("topon-unit", properties["ad_unit_id"])
+        assertEquals(false, properties["admob_price_available"])
+        assertEquals("unknow", properties["admob_value"])
+        assertEquals(true, properties["topon_price_available"])
+        assertEquals(0.0, properties["topon_value"])
+        assertEquals(0.0, properties["winning_value"])
     }
 
     @Test
