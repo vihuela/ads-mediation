@@ -159,6 +159,38 @@ class AdEventTest {
         }
     }
 
+    @Test fun `bid analytics round numeric USD to six decimals consistently with impression micros`() {
+        val samples = listOf(
+            0.006080366991696392 to 6080L,
+            0.0038079163395000003 to 3808L,
+            0.0060805 to 6081L,
+            0.0000005 to 1L,
+            0.00000049 to 0L,
+            0.0 to 0L,
+        )
+        for (format in listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL, AdFormat.REWARDED, AdFormat.NATIVE)) {
+            for ((rawUsd, micros) in samples) {
+                val bid = event(AdEventName.BID_RESULT, format).copy(
+                    mediationMode = AdMediationMode.BIDDING, winnerPlatform = AdPlatform.TOPON,
+                    admobAvailable = true, topOnAvailable = true,
+                    admobValue = rawUsd, topOnValue = rawUsd, winningValue = rawUsd,
+                )
+                val parameters = bid.analyticsParameters()
+                val impression = event(AdEventName.IMPRESSION, format).copy(valueMicros = micros).analyticsParameters()
+                for (key in listOf("admob_value", "topon_value", "winning_value")) {
+                    assertTrue(parameters[key] is Double)
+                    assertEquals(micros / 1_000_000.0, parameters[key])
+                    assertEquals(impression["revenue_amount"], parameters[key])
+                }
+                assertEquals(true, parameters["admob_price_available"])
+                assertEquals(true, parameters["topon_price_available"])
+                assertEquals(rawUsd, bid.admobValue!!, 0.0)
+                assertEquals(rawUsd, bid.topOnValue!!, 0.0)
+                assertEquals(rawUsd, bid.winningValue!!, 0.0)
+            }
+        }
+    }
+
     @Test fun `no bid candidate reports unknow amounts without inventing a winner unit or zero prices`() {
         val parameters = event(AdEventName.BID_RESULT, AdFormat.NATIVE).copy(
             mediationMode = AdMediationMode.BIDDING, platformKnown = false,

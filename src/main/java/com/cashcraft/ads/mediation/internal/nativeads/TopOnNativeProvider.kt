@@ -31,7 +31,6 @@ import com.thinkup.nativead.api.TUNativePrepareInfo
 import com.thinkup.nativead.unitgroup.api.CustomNativeAd
 import java.math.BigDecimal
 import java.math.RoundingMode
-import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
@@ -622,7 +621,8 @@ internal class TopOnNativeProvider : NativeProvider {
     }
 
     private fun revenueOrNull(info: TUAdInfo): NativeRevenue? {
-        val value = info.getPublisherRevenue()
+        // Match the USD bid price even when the TopOn account currency is CNY.
+        val value = info.getPublisherRevenue(TUAdConst.CURRENCY.USD)
         if (value == null || !value.isFinite()) {
             Ads.nativeLog("TopOn", warning = true) { "忽略收益：金额缺失或非有限值" }
             return null
@@ -631,14 +631,6 @@ internal class TopOnNativeProvider : NativeProvider {
             Ads.nativeLog("TopOn", warning = true) { "忽略收益：金额为负数" }
             return null
         }
-        val currency = info.getCurrency()
-            ?.trim()
-            ?.uppercase(Locale.ROOT)
-            ?.takeIf(String::isNotEmpty)
-            ?: run {
-                Ads.nativeLog("TopOn", warning = true) { "忽略收益：缺少币种" }
-                return null
-            }
         val valueMicros = runCatching {
             BigDecimal.valueOf(value)
                 .movePointRight(6)
@@ -654,7 +646,7 @@ internal class TopOnNativeProvider : NativeProvider {
         }
         return NativeRevenue(
             valueMicros = valueMicros,
-            currencyCode = currency,
+            currencyCode = "USD",
             adSource = info.networkName,
             responseId = info.showId,
             precisionType = info.ecpmPrecision,

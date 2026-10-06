@@ -1,5 +1,8 @@
 package com.cashcraft.ads.mediation
 
+import java.math.BigDecimal
+import java.math.RoundingMode
+
 enum class AdFormat(val analyticsValue: String) {
     APP_OPEN("app_open"),
     INTERSTITIAL("interstitial"),
@@ -116,11 +119,11 @@ data class AdEvent(
                 val topOnPrice = topOnValue?.takeIf { it.isFinite() && it >= 0 }
                 properties["admob_price_available"] = admobPrice != null
                 properties["topon_price_available"] = topOnPrice != null
-                properties["admob_value"] = admobPrice ?: "unknow"
-                properties["topon_value"] = topOnPrice ?: "unknow"
+                properties["admob_value"] = admobPrice?.roundUsdForAnalytics() ?: "unknow"
+                properties["topon_value"] = topOnPrice?.roundUsdForAnalytics() ?: "unknow"
                 properties["winning_value"] = winningValue?.takeIf {
                     winnerPlatform != null && it.isFinite() && it >= 0
-                } ?: "unknow"
+                }?.roundUsdForAnalytics() ?: "unknow"
                 properties["currency"] = "USD"
                 admobAdUnitId?.takeIf { it.isNotBlank() }?.let { properties["admob_ad_unit_id"] = it }
                 topOnAdUnitId?.takeIf { it.isNotBlank() }?.let { properties["topon_ad_unit_id"] = it }
@@ -187,6 +190,10 @@ data class AdEvent(
         )
     }
 }
+
+/** Match impression micros rounding at the analytics boundary; auction inputs retain their precision. */
+private fun Double.roundUsdForAnalytics(): Double =
+    BigDecimal.valueOf(this).setScale(6, RoundingMode.HALF_UP).toDouble()
 
 fun interface AdEventListener {
     fun onEvent(event: AdEvent)
