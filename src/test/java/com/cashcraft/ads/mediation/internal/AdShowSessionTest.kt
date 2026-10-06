@@ -15,6 +15,38 @@ import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class AdShowSessionTest {
+    @Test fun `provider handoff flushes pending bid once without repeating the opportunity`() {
+        for (platform in AdPlatform.entries) {
+            for (format in listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL, AdFormat.REWARDED)) {
+                val events = mutableListOf<AdEvent>()
+                val attempt = FullScreenShowAttempt(isWaitingOpportunity = true)
+                val opportunity = AdShowSession(AdEventListener(events::add), platform,
+                    AdMediationMode.BIDDING, format, "position", "unit", "opportunity-id", 1,
+                    attempt = attempt)
+                assertTrue(opportunity.admit())
+                val provider = AdShowSession(AdEventListener(events::add), platform,
+                    AdMediationMode.BIDDING, format, "position", "unit", "provider-id", 2,
+                    attempt = attempt)
+                provider.bidResult(AdBidEventData(platform, true, true, 0.001, 0.002,
+                    if (platform == AdPlatform.ADMOB) 0.001 else 0.002, "admob-unit", "topon-unit", adSource = "Pangle"))
+                assertEquals(listOf(AdEventName.POSITION), events.map { it.name })
+                repeat(2) { assertTrue(provider.admit()) }
+                provider.impression("source", "response", 1000, "USD", "precise")
+                provider.revenue(valueMicros = 1000, currency = "USD")
+
+                assertEquals("$format/$platform",
+                    listOf(AdEventName.POSITION, AdEventName.BID_RESULT, AdEventName.IMPRESSION),
+                    events.map { it.name })
+                assertEquals(setOf("opportunity-id"), events.map { it.sessionId }.toSet())
+                val bid = events.single { it.name == AdEventName.BID_RESULT }.analyticsParameters()
+                assertEquals("opportunity-id", bid["ad_session_id"])
+                assertEquals(format.analyticsValue, bid["ad_type"])
+                assertEquals(platform.analyticsValue, bid["winner_platform"])
+                assertEquals("Pangle", bid["ad_source"])
+            }
+        }
+    }
+
     @Test fun `full screen impression follows EasyLoanCalc callback matrix in either order`() {
         for (platform in AdPlatform.entries) for (format in listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL, AdFormat.REWARDED)) {
             for (paidFirst in listOf(false, true)) {

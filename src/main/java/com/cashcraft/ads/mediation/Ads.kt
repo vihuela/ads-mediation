@@ -1319,6 +1319,11 @@ object Ads {
             winningValue = selection?.priceUsd,
             admobAdUnitId = provider.admob.adUnitId(format),
             topOnAdUnitId = provider.topon.adUnitId(format),
+            adSource = when (selection?.winner) {
+                AdPlatform.ADMOB -> AdMobAds.bidAdSource(format)
+                AdPlatform.TOPON -> TopOnAds.bidAdSource(format)
+                null -> null
+            },
         )
     }
 

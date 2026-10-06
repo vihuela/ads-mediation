@@ -155,7 +155,7 @@ internal class NativeAttempt(
         )
         emit(base.copy(
             name = AdEventName.BID_RESULT, result = if (selected == null) "unavailable" else "selected",
-            winnerPlatform = selected?.winner, currency = "USD",
+            winnerPlatform = selected?.winner, currency = "USD", adSource = decision.winnerAdSource,
             admobAvailable = decision.admobAvailable, topOnAvailable = decision.topOnAvailable,
             admobPriceAvailable = decision.admobPriceUsd != null, topOnPriceAvailable = decision.topOnPriceUsd != null,
             admobValue = decision.admobPriceUsd, topOnValue = decision.topOnPriceUsd,

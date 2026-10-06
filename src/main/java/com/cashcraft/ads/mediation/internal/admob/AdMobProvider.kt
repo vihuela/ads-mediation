@@ -592,6 +592,17 @@ object AdMobAds {
         return AdMobNextGenBidPrice.peek(format, format.preloadId())
     }
 
+    internal fun bidAdSource(format: AdMobFormat): String? = runCatching {
+        if (!isReady(format)) return@runCatching null
+        val info = pendingAd(format)?.ad?.getResponseInfo() ?: when (format) {
+            AdMobFormat.APP_OPEN -> AppOpenAdPreloader.peekAdResponseInfo(format.preloadId())
+            AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.peekAdResponseInfo(format.preloadId())
+            AdMobFormat.REWARDED -> RewardedAdPreloader.peekAdResponseInfo(format.preloadId())
+            else -> null
+        }
+        info?.loadedAdSourceResponseInfo?.name
+    }.getOrNull()
+
     private fun pendingAd(format: AdMobFormat): RetainedAd<Ad>? = synchronized(pendingAds) {
         val pending = pendingAds[format] ?: return@synchronized null
         if (pending.isUsable(SystemClock.elapsedRealtime())) return@synchronized pending

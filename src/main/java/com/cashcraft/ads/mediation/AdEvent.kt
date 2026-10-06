@@ -109,6 +109,7 @@ data class AdEvent(
             AdEventName.BID_RESULT -> {
                 properties["result"] = if (winnerPlatform == null) "no_candidate" else "won"
                 properties["winner_platform"] = winnerPlatform?.analyticsValue ?: "unknown"
+                adSource?.takeIf { winnerPlatform != null && it.isNotBlank() }?.let { properties["ad_source"] = it }
                 properties["admob_available"] = checkNotNull(admobAvailable)
                 properties["topon_available"] = checkNotNull(topOnAvailable)
                 val admobPrice = admobValue?.takeIf { it.isFinite() && it >= 0 }

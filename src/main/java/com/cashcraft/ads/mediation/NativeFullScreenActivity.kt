@@ -270,11 +270,13 @@ internal fun selectCachedNative(
     val selection = BidCandidateSelector.select(admob != null, runCatching { admob?.second?.bidPriceUsd }.getOrNull(),
         topon != null, runCatching { topon?.second?.bidPriceUsd }.getOrNull())
     val winner = selection?.winner
-    onBid(BidDecision(selection, admob != null, topon != null, selection?.admobPriceUsd, selection?.toponPriceUsd))
+    val selected = candidates.firstOrNull { it.first.platform == winner }
+    onBid(BidDecision(selection, admob != null, topon != null, selection?.admobPriceUsd, selection?.toponPriceUsd,
+        winnerAdSource = runCatching { selected?.second?.adSource }.getOrNull()))
     candidates.filterNot { it.first.platform == winner }.forEach { (candidate, ad) ->
         runCatching { retain(candidate, ad) }.onFailure { runCatching { ad.destroy() } }
     }
-    return candidates.firstOrNull { it.first.platform == winner }
+    return selected
 }
 
 private object EmptyNativeCallbacks : NativeCallbacks {

@@ -135,11 +135,12 @@ class AdEventTest {
             for (winner in AdPlatform.entries) {
                 val parameters = event(AdEventName.BID_RESULT, format).copy(
                     mediationMode = AdMediationMode.BIDDING, platformKnown = false,
-                    winnerPlatform = winner, admobAvailable = true, topOnAvailable = true,
+                    winnerPlatform = winner, admobAvailable = true, topOnAvailable = true, adSource = "Pangle",
                     admobValue = 0.0, topOnValue = 0.00125, winningValue = if (winner == AdPlatform.ADMOB) 0.0 else 0.00125,
                     admobAdUnitId = "admob-unit", topOnAdUnitId = "topon-unit", currency = "USD",
                 ).analyticsParameters()
                 assertEquals("won", parameters["result"])
+                assertEquals("Pangle", parameters["ad_source"])
                 assertEquals(winner.analyticsValue, parameters["ad_platform"])
                 assertEquals(winner.analyticsValue, parameters["winner_platform"])
                 assertEquals(if (winner == AdPlatform.ADMOB) "admob-unit" else "topon-unit", parameters["ad_unit_id"])
@@ -165,6 +166,7 @@ class AdEventTest {
             admobAdUnitId = "admob-unit", topOnAdUnitId = "topon-unit",
         ).analyticsParameters()
         assertEquals("no_candidate", parameters["result"])
+        assertFalse(parameters.containsKey("ad_source"))
         assertEquals("unknown", parameters["ad_platform"])
         assertEquals("unknown", parameters["winner_platform"])
         assertEquals(false, parameters["admob_available"])
@@ -191,6 +193,16 @@ class AdEventTest {
             assertTrue(bid.copy(sessionId = "").analyticsParameters().isEmpty())
             assertTrue(bid.copy(currency = "EUR").analyticsParameters().isEmpty())
             assertTrue(bid.copy(mediationMode = AdMediationMode.ADMOB).analyticsParameters().isEmpty())
+        }
+    }
+
+    @Test fun `bid source is omitted when unknown blank or there is no winner`() {
+        for (source in listOf(null, "", " ", "Pangle")) for (winner in listOf(null, AdPlatform.TOPON)) {
+            val parameters = event(AdEventName.BID_RESULT).copy(
+                mediationMode = AdMediationMode.BIDDING, winnerPlatform = winner,
+                admobAvailable = false, topOnAvailable = winner != null, currency = "USD", adSource = source,
+            ).analyticsParameters()
+            assertEquals(source == "Pangle" && winner != null, parameters.containsKey("ad_source"))
         }
     }
 

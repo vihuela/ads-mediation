@@ -21,12 +21,13 @@ class NativeFullScreenSessionTest {
         assertNull(selectCachedNative(request, { visited += it.platform!!; null }, { _, _ -> fail() }))
         assertEquals(listOf(AdPlatform.ADMOB, AdPlatform.TOPON), visited)
         val a = Ad(AdPlatform.ADMOB, .001)
-        val t = Ad(AdPlatform.TOPON, .002)
+        val t = Ad(AdPlatform.TOPON, .002).apply { adSource = "Pangle" }
         val retained = mutableListOf<NativeAdHandle>()
         var bid: com.cashcraft.ads.mediation.internal.BidDecision? = null
         val winner = selectCachedNative(request, { if (it.platform == AdPlatform.ADMOB) a else t },
             { _, ad -> retained += ad }, { bid = it })
         assertEquals(AdPlatform.TOPON, bid!!.selection!!.winner)
+        assertEquals("Pangle", bid!!.winnerAdSource)
         assertTrue(bid!!.admobAvailable && bid!!.topOnAvailable)
         assertEquals(.001, bid!!.admobPriceUsd!!, 0.0)
         assertEquals(.002, bid!!.topOnPriceUsd!!, 0.0)
@@ -195,7 +196,7 @@ class NativeFullScreenSessionTest {
         var listener: NativeCallbacks? = null
         var valid = true
         var destroyed = false
-        override val adSource = "test"
+        override var adSource: String? = "test"
         override val responseId = "id"
         override val isTemplate = false
         override val isValid get() = valid

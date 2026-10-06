@@ -63,7 +63,7 @@ class NativeAuctionTest {
     @Test fun `selection reads current actual object price once and ignores duplicate completion`() {
         val h = Host().start()
         val google = Ad(AdPlatform.ADMOB, 100.0)
-        val topon = Ad(AdPlatform.TOPON, 2.0)
+        val topon = Ad(AdPlatform.TOPON, 2.0).apply { adSource = "Pangle" }
         h.loaded(google)
         google.bidPriceUsd = 1.0
         h.loaded(topon)
@@ -71,6 +71,8 @@ class NativeAuctionTest {
         h.listeners.getValue(AdPlatform.ADMOB).failed("no_fill")
         assertSame(topon, h.rendered)
         val bid = h.events.single { it.name == AdEventName.BID_RESULT }
+        assertEquals("Pangle", bid.adSource)
+        assertEquals("Pangle", bid.analyticsParameters()["ad_source"])
         assertEquals(1.0, bid.admobValue!!, 0.0)
         assertEquals(2.0, bid.topOnValue!!, 0.0)
         assertEquals(1, google.releases)
@@ -577,7 +579,7 @@ class NativeAuctionTest {
                 expiresAtMillis = deadline
             }
         }
-        override val adSource = platform.name
+        override var adSource: String? = platform.name
         override val responseId = platform.name
         override fun render(activity: Activity, binding: NativeLayoutBinding?, widthPx: Int): View = error("unused")
         var onDestroy: () -> Unit = {}

@@ -20,6 +20,7 @@ internal data class BidDecision(
     val topOnAvailable: Boolean,
     val admobPriceUsd: Double?,
     val topOnPriceUsd: Double?,
+    val winnerAdSource: String? = null,
 )
 
 internal object BidCandidateSelector {

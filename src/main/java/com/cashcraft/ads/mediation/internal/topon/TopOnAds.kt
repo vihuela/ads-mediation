@@ -271,18 +271,24 @@ internal object TopOnAds {
         loadRewarded()
     }
 
-    fun bidPrice(format: AdFormat): Double? {
+    private fun bidInfo(format: AdFormat): TUAdInfo? {
         if (!isReady(format)) return null
         // Price the same highest-priority cache entry that TopOn is expected to consume on show().
         // checkValidAdCaches().firstOrNull() is only the first item in the cache snapshot and is
         // not documented as the next ad selected by TopOn when multiple ads are cached.
-        val info = when (format) {
+        return when (format) {
             AdFormat.BANNER -> return null
             AdFormat.APP_OPEN -> appOpenAd.checkAdStatus().getTUTopAdInfo()
             AdFormat.INTERSTITIAL -> interstitialAd.checkAdStatus().getTUTopAdInfo()
             AdFormat.REWARDED -> rewardedAd.checkAdStatus().getTUTopAdInfo()
             AdFormat.NATIVE -> null
-        } ?: return null
+        }
+    }
+
+    fun bidAdSource(format: AdFormat): String? = runCatching { bidInfo(format)?.networkName }.getOrNull()
+
+    fun bidPrice(format: AdFormat): Double? {
+        val info = bidInfo(format) ?: return null
         return info.getPublisherRevenue(TUAdConst.CURRENCY.USD)
             ?.takeIf { it.isFinite() && it >= 0.0 }
             ?: info.getEcpm(TUAdConst.CURRENCY.USD)

@@ -189,7 +189,8 @@ internal class NativeAuction(
             ad?.let { runCatching { retain(candidate.request, it) }.onFailure { _ -> runCatching { it.destroy() } } }
         }
         if (selection != null) callbacks.bidResult(BidDecision(selection, admobAvailable, topOnAvailable,
-            selection.admobPriceUsd, selection.toponPriceUsd))
+            selection.admobPriceUsd, selection.toponPriceUsd,
+            winnerAdSource = runCatching { winner?.ad?.adSource }.getOrNull()))
         if (!callbacks.isActive) cancel()
         if (cancelled) return
         val selected = winner

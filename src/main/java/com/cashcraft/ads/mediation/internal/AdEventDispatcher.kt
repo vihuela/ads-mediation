@@ -474,7 +474,11 @@ internal class AdShowSession(
     /** Publish a qualified business opportunity before candidate selection. Never consumes quota. */
     fun admit(qualify: Boolean = true): Boolean {
         if (admitted) return true
-        if (attempt.positionSessionId != null) { admitted = true; return true }
+        if (attempt.positionSessionId != null) {
+            admitted = true
+            pendingBid?.let { pendingBid = null; bidResult(it) }
+            return true
+        }
         if (skipped || position.isBlank()) return false
         val block = attempt.policy?.telemetryBlockReason()
         val reason = block?.sceneSkipReason()
@@ -576,6 +580,7 @@ internal class AdShowSession(
                 result = if (data.winnerPlatform == null) "no_candidate" else "won",
                 currency = "USD",
                 winnerPlatform = data.winnerPlatform,
+                adSource = data.adSource,
                 admobAvailable = data.admobAvailable,
                 topOnAvailable = data.topOnAvailable,
                 admobPriceAvailable = data.admobValue != null,
@@ -663,4 +668,5 @@ internal data class AdBidEventData(
     val winningValue: Double?,
     val admobAdUnitId: String,
     val topOnAdUnitId: String,
+    val adSource: String? = null,
 )
