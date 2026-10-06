@@ -264,7 +264,9 @@ internal class TopOnNativeProvider : NativeProvider {
 
         fun available(): Boolean = readyInfo() != null
 
-        fun peekIdentity(): String? = readyInfo()?.requestId
+        fun peekAdInfo(): TUAdInfo? = readyInfo()
+
+        fun peekIdentity(): String? = peekAdInfo()?.requestId
 
         fun take(request: ResolvedNativeRequest, widthPx: Int, callbacks: NativeCallbacks): NativeAdHandle? {
             val ad = takeOwnedAd(loader, requestGeneration, request.position, sessionId) { !closed }

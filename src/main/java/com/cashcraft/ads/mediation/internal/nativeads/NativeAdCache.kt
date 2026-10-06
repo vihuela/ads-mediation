@@ -21,11 +21,14 @@ internal object NativeAdCache {
     private val preloads = mutableMapOf<NativeInventoryKey, AdMobNativeInventory>()
     private val topOnInventories = mutableMapOf<NativeInventoryKey, TopOnNativeProvider.Inventory>()
     private val loadEvents = mutableMapOf<NativeInventoryKey, com.cashcraft.ads.mediation.internal.AdLoadSession>()
-    private fun inventoryLoaded(key: NativeInventoryKey, events: com.cashcraft.ads.mediation.internal.AdLoadSession, success: Boolean) {
+    private fun inventoryLoaded(key: NativeInventoryKey, events: com.cashcraft.ads.mediation.internal.AdLoadSession,
+        success: Boolean, metadata: () -> Pair<String?, String?>) {
         if (loadEvents[key] !== events) return
         loadEvents.remove(key)
-        if (success) events.loaded(null, null)
-        else events.failed("failed", null, "native_inventory_load_failed", null)
+        if (success) {
+            val info = runCatching(metadata).getOrNull()
+            events.loaded(info?.first, info?.second)
+        } else events.failed("failed", null, "native_inventory_load_failed", null)
     }
     private var environmentInstalled = false
     private var inventoryContext: android.content.Context? = null
@@ -84,7 +87,10 @@ internal object NativeAdCache {
                         AdMobNativeInventory("cashcraft-native-${++preloadSequence}", key.id)
                     }
                     session.prepare(checkNotNull(deadline)) { success ->
-                        inventoryLoaded(key, events, success)
+                        inventoryLoaded(key, events, success) {
+                            val info = session.peekResponseInfo()
+                            info?.loadedAdSourceResponseInfo?.name to info?.responseId
+                        }
                         complete(success)
                         Ads.nativeLog(key.platform.name, debug = true) { "备用库存 | 可领取=$success（不代表当前展示对象状态）" }
                         inventoryChanged()
@@ -94,7 +100,10 @@ internal object NativeAdCache {
                         TopOnNativeProvider().inventory(checkNotNull(inventoryContext), key)
                     }
                     session.prepare { success ->
-                        inventoryLoaded(key, events, success)
+                        inventoryLoaded(key, events, success) {
+                            val info = session.peekAdInfo()
+                            info?.networkName to info?.requestId
+                        }
                         complete(success)
                         Ads.nativeLog(key.platform.name, debug = true) { "备用库存 | 可领取=$success（不代表当前展示对象状态）" }
                         inventoryChanged()

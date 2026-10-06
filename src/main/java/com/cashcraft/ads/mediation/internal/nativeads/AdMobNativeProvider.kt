@@ -120,7 +120,9 @@ internal class AdMobNativeInventory(
     fun available(): Boolean = active && deadline?.let { SystemClock.elapsedRealtime() < it } == true &&
         NativeAdPreloader.getNumAdsAvailable(id) > 0
 
-    fun peekIdentity(): String? = if (available()) NativeAdPreloader.peekAdResponseInfo(id)?.responseId else null
+    fun peekResponseInfo(): ResponseInfo? = if (available()) NativeAdPreloader.peekAdResponseInfo(id) else null
+
+    fun peekIdentity(): String? = peekResponseInfo()?.responseId
 
     fun take(callbacks: NativeCallbacks): NativeAdHandle? {
         if (!available()) return null
