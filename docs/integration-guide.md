@@ -576,6 +576,10 @@ TopOn 模板广告使用默认布局入口，并在 `NativeRequest.topOnTemplate
 
 在初始化的 `eventListener` 中转发 `event.name.analyticsName` 和 `event.analyticsParameters()`。后者是 `Map<String, Any>`，接入 Firebase 等统计 SDK 时由宿主转换为对应参数类型；本库没有替宿主直接调用统计平台。
 
+`ad_load_fail` / `ad_show_fail` 保留稳定分类 `reason` 和 SDK 主错误码 `error_code`（有值时），并在 SDK 返回错误对象时附加 `error_detail`。TopOn 使用 `AdError.getFullErrorInfo()`，包含其 `platformCode` / `platformMsg`；AdMob 包含错误消息及有错误的广告源响应，不包含响应凭据和 extras。`error_detail` 最多 8192 字符，超长时附加 `error_detail_truncated=true`。超时、取消等没有平台错误对象的事件不会伪造错误码或详情。Native 库存加载失败也遵守此规则。
+
+Native 的每次实际加载尝试分别计数：TopOn 首次加载及 2/4/8 秒重试若全部失败，产生 4 条不同 `request_id` 的 `ad_load_fail`；同一请求的重复或迟到回调不重复计数。AdMob Native 持续预加载的每个成功/失败回调代表一次 SDK 加载尝试，首次之后的自动补货和重试也使用新的 `request_id`，在收到结果时依次补报 `ad_load` 和 `ad_loaded`/`ad_load_fail`，并附加 `load_trigger=sdk_auto`。SDK 不提供这些自动请求的开始时刻，因此不传 `latency_ms`；不要把两条事件的时间差当作加载耗时。库存耗尽通知不代表失败，不产生加载事件。关闭或替换会话后，旧会话回调被忽略。相同错误码可以来自多次真实失败，不能按错误码去重；按 `request_id` 统计失败请求。
+
 | 事件名 | 用途 |
 | --- | --- |
 | `ad_load_request` / `ad_load_result` | 加载请求及结果，通过 request/session 关联 |
