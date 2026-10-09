@@ -256,6 +256,21 @@ class AdEventTest {
         }
     }
 
+    @Test fun `sdk error detail accompanies load and show failures without changing reason`() {
+        for (name in listOf(AdEventName.LOAD_FAIL, AdEventName.SHOW_FAIL)) {
+            val properties = event(name, AdFormat.NATIVE).copy(
+                reason = "native_inventory_load_failed", errorCode = "4001",
+                errorDetail = "code[ 4001 ],platformCode[ 3 ],platformMSG[ no fill ]",
+            ).analyticsParameters()
+            assertEquals("ad_error", properties["reason"])
+            assertEquals("4001", properties["error_code"])
+            assertEquals("code[ 4001 ],platformCode[ 3 ],platformMSG[ no fill ]", properties["error_detail"])
+        }
+        val oversized = event(AdEventName.LOAD_FAIL).copy(errorDetail = "x".repeat(8_193)).analyticsParameters()
+        assertEquals(8_192, (oversized["error_detail"] as String).length)
+        assertEquals(true, oversized["error_detail_truncated"])
+    }
+
     @Test fun `impression revenue is in currency units while raw provider fields remain in the callback`() {
         val ad = event(AdEventName.IMPRESSION)
         assertEquals(0.00125, ad.analyticsParameters()["revenue_amount"])

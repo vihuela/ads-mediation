@@ -18,6 +18,8 @@ import com.cashcraft.ads.mediation.observeNativeVideoSize
 import com.google.android.libraries.ads.mobile.sdk.common.AdValue
 import com.google.android.libraries.ads.mobile.sdk.common.FullScreenContentError
 import com.google.android.libraries.ads.mobile.sdk.common.LoadAdError
+import com.cashcraft.ads.mediation.internal.SdkFailure
+import com.cashcraft.ads.mediation.internal.analyticsErrorDetail
 import com.google.android.libraries.ads.mobile.sdk.common.ResponseInfo
 import com.google.android.libraries.ads.mobile.sdk.common.PreloadCallback
 import com.google.android.libraries.ads.mobile.sdk.common.PreloadConfiguration
@@ -70,6 +72,7 @@ internal class AdMobNativeProvider : NativeProvider {
                     callbacks.failed(
                         if (adError.code == LoadAdError.ErrorCode.NO_FILL) "no_fill" else "native_load_failed",
                         adError.code.toString(),
+                        adError.analyticsErrorDetail(),
                     )
                 }
             },
@@ -87,8 +90,10 @@ internal class AdMobNativeInventory(
     private var token = 0L
     private var active = false
     private var deadline: Long? = null
-
-    fun prepare(expiresAt: Long, complete: (Boolean) -> Unit): NativeLoad {
+    @JvmOverloads
+    fun prepare(expiresAt: Long,
+        onLoadResult: (ResponseInfo?, SdkFailure?) -> Unit = { _, _ -> },
+        complete: (Boolean) -> Unit): NativeLoad {
         check(!active) { "native_preload_already_started" }
         active = true
         deadline = expiresAt
@@ -97,10 +102,21 @@ internal class AdMobNativeInventory(
         val started = try {
             NativeAdPreloader.start(id, PreloadConfiguration(request, 1), object : PreloadCallback {
                 override fun onAdPreloaded(preloadId: String, responseInfo: ResponseInfo) {
-                    NativeMainThread.post { if (active && token == generation) complete(available()) }
+                    NativeMainThread.post {
+                        if (active && token == generation) {
+                            onLoadResult(responseInfo, null)
+                            if (active && token == generation) complete(available())
+                        }
+                    }
                 }
                 override fun onAdFailedToPreload(preloadId: String, adError: LoadAdError) {
-                    NativeMainThread.post { if (active && token == generation) complete(available()) }
+                    val failure = SdkFailure(adError.code.name, adError.analyticsErrorDetail())
+                    NativeMainThread.post {
+                        if (active && token == generation) {
+                            onLoadResult(null, failure)
+                            if (active && token == generation) complete(available())
+                        }
+                    }
                 }
                 override fun onAdsExhausted(preloadId: String) {
                     NativeMainThread.post { if (active && token == generation) complete(false) }
@@ -110,7 +126,7 @@ internal class AdMobNativeInventory(
             close()
             throw failure
         }
-        if (!started) { close(); complete(false) }
+        if (!started) { close(); onLoadResult(null, SdkFailure(null, null)); complete(false) }
         return NativeLoad {
             // 停止本层状态交付；实际 SDK 会话由 close 显式销毁。
             if (token == generation) token++

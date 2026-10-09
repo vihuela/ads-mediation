@@ -22,6 +22,7 @@ import com.cashcraft.ads.mediation.internal.BannerReadiness
 import com.cashcraft.ads.mediation.internal.BannerSlot
 import com.cashcraft.ads.mediation.admob.AdMobAds
 import com.cashcraft.ads.mediation.internal.admob.AdMobBannerEvents
+import com.cashcraft.ads.mediation.internal.analyticsErrorDetail
 import com.cashcraft.ads.mediation.internal.admob.BannerResponse
 import com.cashcraft.ads.mediation.internal.admob.analyticsLoadResult
 import com.google.android.libraries.ads.mobile.sdk.banner.AdSize
@@ -376,10 +377,11 @@ class AdsBannerView(
         if (isCurrent(generation)) showIfEligible()
     }
 
-    private fun onFailed(generation: Long, reason: String, errorCode: String, analyticsReason: String) {
+    private fun onFailed(generation: Long, reason: String, errorCode: String, analyticsReason: String,
+        errorDetail: String) {
         if (!isCurrent(generation)) return
         val size = requestedSize
-        slot?.showFailure(analyticsReason, errorCode)
+        slot?.showFailure(analyticsReason, errorCode, errorDetail)
         releaseAd()
         requestedSize = size
         failed = true
@@ -540,9 +542,10 @@ class AdsBannerView(
                     val result = adError.analyticsLoadResult()
                     val analyticsReason = if (result == "error") "ad_error" else result
                     val response = adError.responseInfo?.responseId
+                    val detail = adError.analyticsErrorDetail()
                     main.post {
-                        relay.failed(code, analyticsReason, response, result)
-                        owner.get()?.onFailed(generation, reason, code, analyticsReason)
+                        relay.failed(code, analyticsReason, response, result, detail)
+                        owner.get()?.onFailed(generation, reason, code, analyticsReason, detail)
                     }
                 }
             }

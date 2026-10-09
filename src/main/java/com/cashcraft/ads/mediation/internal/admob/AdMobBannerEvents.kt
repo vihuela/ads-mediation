@@ -60,9 +60,9 @@ internal class AdMobBannerEvents(
     }
 
     @Synchronized
-    fun failed(code: String?, reason: String?, responseId: String?, result: String = "failed") {
+    fun failed(code: String?, reason: String?, responseId: String?, result: String = "failed", errorDetail: String? = null) {
         loadFinished = true
-        if (trackLoad) load.failed(result, code, reason, responseId)
+        if (trackLoad) load.failed(result, code, reason, responseId, errorDetail)
     }
 
     @Synchronized

@@ -31,6 +31,7 @@ import com.cashcraft.ads.mediation.AdSceneType
 import com.cashcraft.ads.mediation.internal.AdPolicyAttempt
 import com.cashcraft.ads.mediation.internal.AdPolicyRequest
 import com.cashcraft.ads.mediation.internal.dismissedResult
+import com.cashcraft.ads.mediation.internal.analyticsErrorDetail
 import com.thinkup.core.api.AdError
 import com.thinkup.core.api.TUAdConst
 import com.thinkup.core.api.TUAdInfo
@@ -1012,13 +1013,15 @@ internal object TopOnAds {
     }
 
     private fun finishInterstitialFailed(error: AdError) =
-        finishInterstitialFailed(error.desc.ifBlank { "show_failed" }, error.code, eventReason = "ad_error")
+        finishInterstitialFailed(error.desc.ifBlank { "show_failed" }, error.code,
+            eventReason = "ad_error", errorDetail = error.analyticsErrorDetail())
 
-    private fun finishInterstitialFailed(reason: String, errorCode: String?, eventReason: String = reason) {
+    private fun finishInterstitialFailed(reason: String, errorCode: String?, eventReason: String = reason,
+        errorDetail: String? = null) {
         val active = activeInterstitial ?: return
         if (!active.session.attempt.complete()) return
         activeInterstitial = null
-        finishFailed(active, reason, errorCode, eventReason = eventReason)
+        finishFailed(active, reason, errorCode, eventReason = eventReason, errorDetail = errorDetail)
         loadInterstitial()
     }
 
@@ -1035,13 +1038,15 @@ internal object TopOnAds {
     }
 
     private fun finishRewardedFailed(error: AdError) =
-        finishRewardedFailed(error.desc.ifBlank { "show_failed" }, error.code, eventReason = "ad_error")
+        finishRewardedFailed(error.desc.ifBlank { "show_failed" }, error.code,
+            eventReason = "ad_error", errorDetail = error.analyticsErrorDetail())
 
-    private fun finishRewardedFailed(reason: String, errorCode: String?, eventReason: String = reason) {
+    private fun finishRewardedFailed(reason: String, errorCode: String?, eventReason: String = reason,
+        errorDetail: String? = null) {
         val active = activeRewarded ?: return
         if (!active.session.attempt.complete()) return
         activeRewarded = null
-        active.session.showFailure(eventReason, errorCode)
+        active.session.showFailure(eventReason, errorCode, errorDetail = errorDetail)
         runCatching {
             active.onResult(
                 AdRewardResult(
@@ -1084,8 +1089,9 @@ internal object TopOnAds {
         errorCode: String?,
         cause: Throwable? = null,
         eventReason: String = reason,
+        errorDetail: String? = null,
     ) {
-        active.session.showFailure(eventReason, errorCode, cause)
+        active.session.showFailure(eventReason, errorCode, cause, errorDetail)
         runCatching { active.onResult(AdShowResult.Failed(reason)) }
     }
 
@@ -1217,6 +1223,7 @@ internal object TopOnAds {
             errorCode = error.code,
             reason = error.desc,
             responseId = null,
+            errorDetail = error.analyticsErrorDetail(),
         )
     }
 

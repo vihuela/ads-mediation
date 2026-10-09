@@ -17,6 +17,8 @@ import com.cashcraft.ads.mediation.NativeLayoutBinding
 import com.cashcraft.ads.mediation.ResolvedNativeRequest
 import com.cashcraft.ads.mediation.AdPlatform
 import com.thinkup.core.api.AdError
+import com.cashcraft.ads.mediation.internal.SdkFailure
+import com.cashcraft.ads.mediation.internal.analyticsErrorDetail
 import com.thinkup.core.api.TUAdConst
 import com.thinkup.core.api.TUAdInfo
 import com.thinkup.core.api.TUAdRevenueListener
@@ -167,7 +169,7 @@ internal class TopOnNativeProvider : NativeProvider {
                         error.code.contains("no_fill", ignoreCase = true) ||
                         error.desc.contains("no fill", ignoreCase = true)
                     ) "no_fill" else "native_load_failed"
-                    callbacks.failed(reason, error.code)
+                    callbacks.failed(reason, error.code, error.analyticsErrorDetail())
                 }
             }
         }
@@ -208,18 +210,21 @@ internal class TopOnNativeProvider : NativeProvider {
         private var closed = false
         private var token = 0L
 
-        fun prepare(complete: (Boolean) -> Unit): NativeLoad {
+        fun prepare(complete: (Boolean, SdkFailure?) -> Unit): NativeLoad {
             check(!closed) { "native_inventory_closed" }
             val generation = ++token
             val listener = object : TUNativeNetworkListener {
                 override fun onNativeAdLoaded() {
                     NativeMainThread.post {
                         if (closed) clearOwnedCaches()
-                        else if (token == generation) complete(available())
+                        else if (token == generation) complete(available(), null)
                     }
                 }
                 override fun onNativeAdLoadFail(error: AdError) {
-                    NativeMainThread.post { if (!closed && token == generation) complete(false) }
+                    val failure = SdkFailure(error.code, error.analyticsErrorDetail())
+                    NativeMainThread.post {
+                        if (!closed && token == generation) complete(false, failure)
+                    }
                 }
             }
             val extra = mutableMapOf<String, Any>(

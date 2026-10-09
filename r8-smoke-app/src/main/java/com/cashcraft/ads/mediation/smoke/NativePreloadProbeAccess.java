@@ -73,7 +73,7 @@ public final class NativePreloadProbeAccess {
         String identity = managed.peekIdentity();
         managedAd = managed.take(new com.cashcraft.ads.mediation.internal.nativeads.NativeCallbacks() {
             @Override public void loaded(com.cashcraft.ads.mediation.internal.nativeads.NativeAdHandle ad) {}
-            @Override public void failed(String reason, String code) { throw new AssertionError(reason); }
+            @Override public void failed(String reason, String code, String detail) { throw new AssertionError(reason); }
             @Override public void impression(String source, String response,
                     com.cashcraft.ads.mediation.internal.nativeads.NativeRevenue revenue) {}
             @Override public void clicked(String source, String response) {}

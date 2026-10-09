@@ -66,6 +66,10 @@ data class AdEvent(
     val platformKnown: Boolean = true,
     /** 同一 Banner 页面周期内的广告序号，首条为 1。 */
     val refreshIndex: Long? = null,
+    /** SDK error text for diagnostics; absent for local policy/cancellation failures. */
+    val errorDetail: String? = null,
+    /** SDK-reported automatic load; its start time is not observable by the host. */
+    val sdkAutoLoad: Boolean = false,
 ) {
     internal val isLoadEvent: Boolean
         get() = name in setOf(AdEventName.LOAD, AdEventName.LOADED, AdEventName.LOAD_FAIL)
@@ -90,7 +94,8 @@ data class AdEvent(
         properties["mediation_mode"] = mediationMode.analyticsValue
         if (isLoadEvent) {
             properties["request_id"] = requestId?.takeIf { it.isNotBlank() } ?: return emptyMap()
-            if (name != AdEventName.LOAD) {
+            if (sdkAutoLoad) properties["load_trigger"] = "sdk_auto"
+            if (name != AdEventName.LOAD && !sdkAutoLoad) {
                 properties["latency_ms"] = latencyMillis?.takeIf { it >= 0 } ?: return emptyMap()
             }
         } else {
@@ -134,6 +139,10 @@ data class AdEvent(
                 val failure = failureReason()
                 properties["reason"] = failure
                 if (failure != "exception") errorCode?.takeIf { it.isNotBlank() }?.let { properties["error_code"] = it }
+                errorDetail?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                    properties["error_detail"] = it.take(MAX_ERROR_DETAIL_LENGTH)
+                    if (it.length > MAX_ERROR_DETAIL_LENGTH) properties["error_detail_truncated"] = true
+                }
             }
             AdEventName.IMPRESSION -> {
                 if (format == AdFormat.BANNER) {
@@ -177,6 +186,7 @@ data class AdEvent(
     }
 
     private companion object {
+        const val MAX_ERROR_DETAIL_LENGTH = 8_192
         val skipReasons = mapOf(
             "global_disabled" to "global_disabled",
             "platform_disabled" to "platform_disabled",

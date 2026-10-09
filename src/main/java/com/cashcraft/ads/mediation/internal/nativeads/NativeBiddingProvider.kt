@@ -131,7 +131,9 @@ internal class NativeAuction(
             if (!callbacks.isActive) { cancel(); return@dispatch }
             if (candidates.all { it.settled }) finish()
         }
-        override fun failed(reason: String, errorCode: String?) = dispatch { failed(candidate, reason, errorCode) }
+        override fun failed(reason: String, errorCode: String?, errorDetail: String?) = dispatch {
+            failed(candidate, reason, errorCode, errorDetail)
+        }
         override fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue?) = dispatch {
             if (isWinner(candidate)) callbacks.impression(adSource, responseId, revenue)
         }
@@ -149,12 +151,12 @@ internal class NativeAuction(
 
     private fun isWinner(candidate: Candidate) = !cancelled && winner === candidate && delivered
 
-    private fun failed(candidate: Candidate, reason: String, errorCode: String?) {
-        if (isWinner(candidate)) { callbacks.failed(reason, errorCode); return }
+    private fun failed(candidate: Candidate, reason: String, errorCode: String?, errorDetail: String? = null) {
+        if (isWinner(candidate)) { callbacks.failed(reason, errorCode, errorDetail); return }
         if (finished || cancelled || candidate.settled) return
         candidate.settled = true
         candidate.reason = reason
-        callbacks.candidateFailed(candidate.platform, reason, errorCode)
+        callbacks.candidateFailed(candidate.platform, reason, errorCode, errorDetail)
         if (candidates.all { it.settled }) finish()
     }
 

@@ -3,6 +3,7 @@ package com.cashcraft.ads.mediation.internal
 import com.cashcraft.ads.mediation.*
 import com.cashcraft.ads.mediation.internal.nativeads.NativeAdCache
 import com.cashcraft.ads.mediation.internal.nativeads.NativeInventoryKey
+import com.cashcraft.ads.mediation.internal.SdkFailure
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
@@ -78,10 +79,31 @@ class NativeInventorySourceTest {
         assertEquals(0, reads)
     }
 
-    private fun complete(load: AdLoadSession, success: Boolean = true, metadata: () -> Pair<String?, String?>) {
+    @Test fun `failed inventory keeps SDK code and full detail`() {
+        complete(load("failed"), success = false,
+            failure = SdkFailure("4001", "platformCode[ 3 ],platformMSG[ no fill ]")) { null to null }
+        val event = events.single()
+        assertEquals("4001", event.analyticsParameters()["error_code"])
+        assertEquals("platformCode[ 3 ],platformMSG[ no fill ]", event.analyticsParameters()["error_detail"])
+    }
+
+    @Test fun `TopOn retry gets a new failure but duplicate and stale callbacks do not`() {
+        val failure = SdkFailure("4001", "no fill")
+        val first = load("first")
+        repeat(2) { complete(first, false, failure) { null to null } }
+        val retry = load("retry")
+        complete(first, false, failure) { null to null }
+        repeat(2) { complete(retry, false, failure) { null to null } }
+        assertEquals(listOf("first", "retry"), events.map { it.requestId })
+        assertTrue(events.all { it.name == AdEventName.LOAD_FAIL && it.errorDetail == "no fill" })
+    }
+
+    private fun complete(load: AdLoadSession, success: Boolean = true, failure: SdkFailure? = null,
+        metadata: () -> Pair<String?, String?>) {
         ReflectionHelpers.callInstanceMethod<Unit>(NativeAdCache, "inventoryLoaded",
             from(NativeInventoryKey::class.java, key), from(AdLoadSession::class.java, load),
-            from(Boolean::class.javaPrimitiveType!!, success), from(Function0::class.java, metadata))
+            from(Boolean::class.javaPrimitiveType!!, success), from(SdkFailure::class.java, failure),
+            from(Function0::class.java, metadata))
     }
 
     private fun load(id: String) = AdLoadSession(

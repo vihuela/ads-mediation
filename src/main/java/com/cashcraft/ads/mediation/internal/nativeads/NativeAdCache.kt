@@ -7,6 +7,7 @@ import android.os.SystemClock
 import com.cashcraft.ads.mediation.AdPlatform
 import com.cashcraft.ads.mediation.Ads
 import com.cashcraft.ads.mediation.ResolvedNativeRequest
+import com.cashcraft.ads.mediation.internal.SdkFailure
 
 /** Unrendered inventory only. Every operation runs on the main thread. */
 internal object NativeAdCache {
@@ -22,13 +23,13 @@ internal object NativeAdCache {
     private val topOnInventories = mutableMapOf<NativeInventoryKey, TopOnNativeProvider.Inventory>()
     private val loadEvents = mutableMapOf<NativeInventoryKey, com.cashcraft.ads.mediation.internal.AdLoadSession>()
     private fun inventoryLoaded(key: NativeInventoryKey, events: com.cashcraft.ads.mediation.internal.AdLoadSession,
-        success: Boolean, metadata: () -> Pair<String?, String?>) {
+        success: Boolean, failure: SdkFailure? = null, metadata: () -> Pair<String?, String?>) {
         if (loadEvents[key] !== events) return
         loadEvents.remove(key)
         if (success) {
             val info = runCatching(metadata).getOrNull()
             events.loaded(info?.first, info?.second)
-        } else events.failed("failed", null, "native_inventory_load_failed", null)
+        } else events.failed("failed", failure?.code, "native_inventory_load_failed", null, failure?.detail)
     }
     private var environmentInstalled = false
     private var inventoryContext: android.content.Context? = null
@@ -86,11 +87,17 @@ internal object NativeAdCache {
                     val session = preloads.getOrPut(key) {
                         AdMobNativeInventory("cashcraft-native-${++preloadSequence}", key.id)
                     }
-                    session.prepare(checkNotNull(deadline)) { success ->
-                        inventoryLoaded(key, events, success) {
-                            val info = session.peekResponseInfo()
-                            info?.loadedAdSourceResponseInfo?.name to info?.responseId
+                    session.prepare(checkNotNull(deadline), onLoadResult = { response, failure ->
+                        // Each SDK callback is a distinct attempt, including automatic retries.
+                        // Exhaustion only changes availability and must not consume a load result.
+                        val load = loadEvents.remove(key)
+                            ?: Ads.beginNativeInventoryLoad(key.platform, key.id, sdkAutoLoad = true)
+                        if (failure != null) {
+                            load.failed("failed", failure.code, "native_inventory_load_failed", null, failure.detail)
+                        } else {
+                            load.loaded(response?.loadedAdSourceResponseInfo?.name, response?.responseId)
                         }
+                    }) { success ->
                         complete(success)
                         Ads.nativeLog(key.platform.name, debug = true) { "备用库存 | 可领取=$success（不代表当前展示对象状态）" }
                         inventoryChanged()
@@ -99,8 +106,8 @@ internal object NativeAdCache {
                     val session = topOnInventories.getOrPut(key) {
                         TopOnNativeProvider().inventory(checkNotNull(inventoryContext), key)
                     }
-                    session.prepare { success ->
-                        inventoryLoaded(key, events, success) {
+                    session.prepare { success, failure ->
+                        inventoryLoaded(key, events, success, failure) {
                             val info = session.peekAdInfo()
                             info?.networkName to info?.requestId
                         }

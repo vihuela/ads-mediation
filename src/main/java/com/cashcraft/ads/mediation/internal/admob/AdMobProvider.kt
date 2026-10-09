@@ -44,6 +44,7 @@ import com.cashcraft.ads.mediation.internal.FullScreenLoadSignals
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdLoadSession
+import com.cashcraft.ads.mediation.internal.analyticsErrorDetail
 import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.cashcraft.ads.mediation.internal.AutoAppOpenController
 import com.cashcraft.ads.mediation.internal.FullScreenShowGate
@@ -492,6 +493,7 @@ object AdMobAds {
                         errorCode = adError.code.name,
                         reason = adError.message,
                         responseId = adError.responseInfo?.responseId,
+                        errorDetail = adError.analyticsErrorDetail(),
                     )
                     FullScreenLoadSignals.changed()
                 }
@@ -563,6 +565,7 @@ object AdMobAds {
                 loadSession.failed(
                     result, adError.code.name, if (result == "error") "ad_error" else result,
                     adError.responseInfo?.responseId,
+                    adError.analyticsErrorDetail(),
                 )
                 if (descriptor.generation != generation) return@onMain
                 descriptor.settled = true // No retry or replenishment, including after a failure.
@@ -886,7 +889,7 @@ object AdMobAds {
     ) {
         if (!session.attempt.complete()) return
         val reason = error.message.ifBlank { "show_failed" }
-        session.showFailure("ad_error", error.code.toString())
+        session.showFailure("ad_error", error.code.toString(), errorDetail = error.analyticsErrorDetail())
         ad.destroy()
         runCatching { onResult(AdShowResult.Failed(reason)) }
     }

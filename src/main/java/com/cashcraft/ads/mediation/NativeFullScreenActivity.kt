@@ -281,7 +281,7 @@ internal fun selectCachedNative(
 
 private object EmptyNativeCallbacks : NativeCallbacks {
     override fun loaded(ad: NativeAdHandle) = Unit
-    override fun failed(reason: String, errorCode: String?) = Unit
+    override fun failed(reason: String, errorCode: String?, errorDetail: String?) = Unit
     override fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue?) = Unit
     override fun clicked(adSource: String?, responseId: String?) = Unit
     override fun closed() = Unit

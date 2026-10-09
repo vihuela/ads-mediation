@@ -58,10 +58,10 @@ internal interface NativeCallbacks {
     val isActive: Boolean get() = true
     fun loadStarted(platform: AdPlatform) = Unit
     fun candidateLoaded(platform: AdPlatform, ad: NativeAdHandle) = Unit
-    fun candidateFailed(platform: AdPlatform, reason: String, errorCode: String? = null) = Unit
+    fun candidateFailed(platform: AdPlatform, reason: String, errorCode: String? = null, errorDetail: String? = null) = Unit
     fun bidResult(decision: BidDecision) = Unit
     fun loaded(ad: NativeAdHandle)
-    fun failed(reason: String, errorCode: String? = null)
+    fun failed(reason: String, errorCode: String? = null, errorDetail: String? = null)
     /** Actual SDK exposure; revenue is supplied only by TopOn onAdImpressed. */
     fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue? = null)
     fun clicked(adSource: String?, responseId: String?)

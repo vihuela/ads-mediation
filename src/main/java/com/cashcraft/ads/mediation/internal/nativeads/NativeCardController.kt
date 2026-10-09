@@ -362,7 +362,7 @@ internal class NativeCardController(
             }
         }
         callbacks.onActualImpression = onActualImpression
-        callbacks.onFailed = { reason, code -> if (generation == token) fail(reason, code) }
+        callbacks.onFailed = { reason, code, detail -> if (generation == token) fail(reason, code, detail) }
         callbacks.onClosed = {
             if (generation == token) {
                 closed = true
@@ -386,7 +386,7 @@ internal class NativeCardController(
         }
     }
 
-    private fun fail(reason: String, code: String? = null) {
+    private fun fail(reason: String, code: String? = null, errorDetail: String? = null) {
         if (state == NativeState.Destroyed || closed) return
         if (state == NativeState.Failed(reason, code)) return
         val failed = NativeState.Failed(reason, code)
@@ -395,7 +395,7 @@ internal class NativeCardController(
         // Commit before host events: an immediate retry must see Failed.
         state = failed
         val released = release(reason, reportCancellation = false)
-        events?.fail(reason, code)
+        events?.fail(reason, code, errorDetail)
         if (events == null) oldSlot?.end(reason)
         if (generation == released && state == failed) {
             runCatching { onStateChanged(failed) }
@@ -469,7 +469,7 @@ private class NativeDelivery(
     var interactive: (() -> Boolean)? = null
     var onActualImpression: (() -> Unit)? = null
     var onLoaded: ((NativeAdHandle) -> Unit)? = null
-    var onFailed: ((String, String?) -> Unit)? = null
+    var onFailed: ((String, String?, String?) -> Unit)? = null
     var onClosed: (() -> Unit)? = null
     fun detach() { onActualImpression = null; current = null; interactive = null; onLoaded = null; onFailed = null; onClosed = null }
     override val isActive: Boolean get() = current?.invoke() == true
@@ -479,8 +479,8 @@ private class NativeDelivery(
     override fun candidateLoaded(platform: com.cashcraft.ads.mediation.AdPlatform, ad: NativeAdHandle) = dispatch {
         if (current?.invoke() == true) events.candidateLoaded(platform, ad)
     }
-    override fun candidateFailed(platform: com.cashcraft.ads.mediation.AdPlatform, reason: String, errorCode: String?) = dispatch {
-        if (current?.invoke() == true) events.candidateFailed(platform, reason, errorCode)
+    override fun candidateFailed(platform: com.cashcraft.ads.mediation.AdPlatform, reason: String, errorCode: String?, errorDetail: String?) = dispatch {
+        if (current?.invoke() == true) events.candidateFailed(platform, reason, errorCode, errorDetail)
     }
     override fun bidResult(decision: com.cashcraft.ads.mediation.internal.BidDecision) = dispatch {
         if (current?.invoke() == true) events.bidResult(decision)
@@ -489,8 +489,8 @@ private class NativeDelivery(
         val receiver = onLoaded
         if (current?.invoke() == true && receiver != null) receiver(ad) else runCatching { ad.destroy() }
     }
-    override fun failed(reason: String, errorCode: String?) = dispatch {
-        if (current?.invoke() == true) onFailed?.invoke(reason, errorCode)
+    override fun failed(reason: String, errorCode: String?, errorDetail: String?) = dispatch {
+        if (current?.invoke() == true) onFailed?.invoke(reason, errorCode, errorDetail)
     }
     override fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue?) = dispatch {
         policy?.impression()

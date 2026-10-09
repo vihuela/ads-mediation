@@ -335,6 +335,9 @@ class AdsBannerViewTest {
                 assertEquals(reason, failedDisplay.reason)
                 assertEquals(code.name, failedLoad.errorCode)
                 assertEquals(code.name, failedDisplay.errorCode)
+                assertTrue(failedLoad.analyticsParameters()["error_detail"].toString().contains("SDK diagnostic message"))
+                assertEquals(failedLoad.analyticsParameters()["error_detail"],
+                    failedDisplay.analyticsParameters()["error_detail"])
                 assertEquals("request", failedLoad.requestId)
                 assertEquals(observed.single { it.name == AdEventName.POSITION }.sessionId, failedDisplay.sessionId)
                 assertEquals(AdShowResult.Failed("SDK diagnostic message"), states.last())

@@ -3,6 +3,7 @@
 package com.cashcraft.ads.mediation
 
 import android.app.Activity
+import android.os.Bundle
 import android.os.Looper
 import android.os.SystemClock
 import android.view.View
@@ -15,6 +16,8 @@ import com.cashcraft.ads.mediation.internal.topon.TopOnState
 import com.cashcraft.ads.mediation.internal.nativeads.*
 import com.google.android.libraries.ads.mobile.sdk.common.PreloadCallback
 import com.google.android.libraries.ads.mobile.sdk.common.PreloadConfiguration
+import com.google.android.libraries.ads.mobile.sdk.common.LoadAdError
+import com.google.android.libraries.ads.mobile.sdk.common.ResponseInfo
 import java.time.Duration
 import org.junit.After
 import org.junit.Assert.*
@@ -41,14 +44,18 @@ class NativePreloadTest {
     private val pending = ReflectionHelpers.getStaticField<MutableMap<Pair<AdPlatform, String>, ResolvedNativeRequest>>(
         Ads::class.java, "pendingNativePreloads")
     private val request = ResolvedNativeRequest(AdPlatform.ADMOB, "native-unit", "page")
+    private val events = mutableListOf<AdEvent>()
 
     @Before fun prepare() {
         pending.clear()
         ShadowNativePreloader.calls.clear()
+        ShadowNativePreloader.callbacks.clear()
+        ShadowNativePreloader.available = 0
         val app = RuntimeEnvironment.getApplication()
         ReflectionHelpers.setStaticField(Ads::class.java, "application", app)
         ReflectionHelpers.setStaticField(Ads::class.java, "config", AdsConfig(
-            AdMobProviderConfig(AdMobIds.TEST.copy(nativeId = request.adUnitId)), loggingEnabled = false))
+            AdMobProviderConfig(AdMobIds.TEST.copy(nativeId = request.adUnitId)), loggingEnabled = false,
+            eventListener = AdEventListener(events::add)))
         ReflectionHelpers.setStaticField(Ads::class.java, "umpConsentManager",
             UmpConsentManager(app, UmpConsentConfig(enabled = false), false, "test"))
         stage("PROVIDER_INITIALIZING")
@@ -114,7 +121,7 @@ class NativePreloadTest {
         var delivered: NativeAdHandle? = null
         val demand = NativeAdCache.load(Activity(), request, 320, false, object : NativeCallbacks {
             override fun loaded(ad: NativeAdHandle) { delivered = ad }
-            override fun failed(reason: String, errorCode: String?) { error(reason) }
+            override fun failed(reason: String, errorCode: String?, errorDetail: String?) { error(reason) }
             override fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue?) = Unit
             override fun clicked(adSource: String?, responseId: String?) = Unit
             override fun closed() = Unit
@@ -132,6 +139,68 @@ class NativePreloadTest {
         cached.destroy()
     }
 
+    @Test fun `SDK refill and retry failures each report once even with cached inventory`() {
+        NativeAdCache.acquirePreload(request)
+        val (id, callback) = ShadowNativePreloader.callbacks.entries.single().let { it.key to it.value }
+        callback.onAdsExhausted(id)
+        advance(0)
+        assertEquals(listOf(AdEventName.LOAD), events.map { it.name })
+        // A real success must not turn into failure if inventory was consumed before delivery.
+        callback.onAdPreloaded(id, ResponseInfo(null, "first-response", Bundle(), null, emptyList()))
+        advance(0)
+        assertEquals("first-response", events.last().responseId)
+        assertEquals(AdEventName.LOADED, events.last().name)
+
+        ShadowNativePreloader.available = 1
+        repeat(2) {
+            callback.onAdFailedToPreload(id, LoadAdError(LoadAdError.ErrorCode.NO_FILL, "no fill detail", null))
+            advance(0)
+        }
+        assertEquals(listOf(AdEventName.LOAD, AdEventName.LOADED,
+            AdEventName.LOAD, AdEventName.LOAD_FAIL, AdEventName.LOAD, AdEventName.LOAD_FAIL), events.map { it.name })
+        val failures = events.filter { it.name == AdEventName.LOAD_FAIL }
+        failures.forEach {
+            val properties = it.analyticsParameters()
+            assertEquals("sdk_auto", properties["load_trigger"])
+            assertEquals("NO_FILL", properties["error_code"])
+            assertTrue(properties["error_detail"].toString().contains("no fill detail"))
+            assertFalse(properties.containsKey("latency_ms"))
+            assertNull(it.latencyMillis)
+        }
+        val requests = events.filter { it.name == AdEventName.LOAD }
+        assertEquals(3, requests.map { it.requestId }.toSet().size)
+        events.chunked(2).forEach { assertEquals(it[0].requestId, it[1].requestId) }
+        callback.onAdsExhausted(id)
+        advance(0)
+        assertEquals(6, events.size)
+
+        NativeAdCache.closePreload(request)
+        NativeAdCache.acquirePreload(request)
+        val count = events.size
+        callback.onAdFailedToPreload(id, LoadAdError(LoadAdError.ErrorCode.INTERNAL_ERROR, "late", null))
+        callback.onAdPreloaded(id, ResponseInfo(null, "late", Bundle(), null, emptyList()))
+        advance(0)
+        assertEquals(count, events.size)
+    }
+
+    @Test fun `first failure then SDK retry recovery has separate paired results`() {
+        NativeAdCache.acquirePreload(request)
+        val (id, callback) = ShadowNativePreloader.callbacks.entries.single().let { it.key to it.value }
+        callback.onAdFailedToPreload(id, LoadAdError(LoadAdError.ErrorCode.NO_FILL, "initial failure", null))
+        advance(0)
+        val first = events.last()
+        assertEquals(AdEventName.LOAD_FAIL, first.name)
+        assertFalse(first.analyticsParameters().containsKey("load_trigger"))
+        assertTrue(first.analyticsParameters().containsKey("latency_ms"))
+        callback.onAdPreloaded(id, ResponseInfo(null, "recovered-response", Bundle(), null, emptyList()))
+        advance(0)
+        assertEquals(listOf(AdEventName.LOAD, AdEventName.LOAD_FAIL, AdEventName.LOAD, AdEventName.LOADED),
+            events.map { it.name })
+        assertEquals("sdk_auto", events.last().analyticsParameters()["load_trigger"])
+        assertNotEquals(first.requestId, events.last().requestId)
+        assertEquals(events[2].requestId, events[3].requestId)
+    }
+
     private fun stage(name: String) = ReflectionHelpers.setStaticField(Ads::class.java, "initializationStage",
         checkNotNull(fields.getValue("initializationStage")!!.javaClass.enumConstants).single { (it as Enum<*>).name == name })
     private fun advance(millis: Long) = shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(millis))
@@ -142,8 +211,14 @@ class NativePreloadTest {
 class ShadowNativePreloader {
     @Implementation fun start(id: String, configuration: PreloadConfiguration, callback: PreloadCallback): Boolean {
         calls += "start:${configuration.bufferSize}"
+        callbacks[id] = callback
         return true
     }
+    @Implementation fun getNumAdsAvailable(id: String): Int = available
     @Implementation fun destroy(id: String): Boolean { calls += "destroy"; return true }
-    companion object { val calls = mutableListOf<String>() }
+    companion object {
+        val calls = mutableListOf<String>()
+        val callbacks = mutableMapOf<String, PreloadCallback>()
+        var available = 0
+    }
 }

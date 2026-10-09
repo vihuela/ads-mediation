@@ -77,12 +77,12 @@ internal class AdEventDispatcher(
         )
     }
 
-    fun beginLoad(format: AdFormat, adUnitId: String, bufferSize: Int): AdLoadSession {
-        return createLoad(format, adUnitId, bufferSize).also(AdLoadSession::request)
+    fun beginLoad(format: AdFormat, adUnitId: String, bufferSize: Int, sdkAutoLoad: Boolean = false): AdLoadSession {
+        return createLoad(format, adUnitId, bufferSize, sdkAutoLoad).also(AdLoadSession::request)
     }
 
     /** Allocate ownership before invoking the SDK; publish only for an actual load call. */
-    fun createLoad(format: AdFormat, adUnitId: String, bufferSize: Int): AdLoadSession {
+    fun createLoad(format: AdFormat, adUnitId: String, bufferSize: Int, sdkAutoLoad: Boolean = false): AdLoadSession {
         require(format != AdFormat.BANNER) { "Banner requires createBannerLoad" }
         val number = nextNumber(format, "load")
         val requestId = UUID.randomUUID().toString()
@@ -100,6 +100,7 @@ internal class AdEventDispatcher(
             startedAtMillis = SystemClock.elapsedRealtime(),
             logger = logger,
             deferUntilRequest = true,
+            sdkAutoLoad = sdkAutoLoad,
         )
     }
 
@@ -192,6 +193,7 @@ internal class AdLoadSession(
     private val logger: AdsModuleLogger? = null,
     private val slotId: String? = null,
     private val deferUntilRequest: Boolean = false,
+    private val sdkAutoLoad: Boolean = false,
 ) {
     private val terminal = AtomicBoolean(false)
 
@@ -225,7 +227,7 @@ internal class AdLoadSession(
         )
     }
 
-    fun failed(result: String, errorCode: String?, reason: String?, responseId: String?) {
+    fun failed(result: String, errorCode: String?, reason: String?, responseId: String?, errorDetail: String? = null) {
         finish(
             result = result,
             errorCode = errorCode,
@@ -237,6 +239,7 @@ internal class AdLoadSession(
                 }
             } else reason,
             responseId = responseId,
+            errorDetail = errorDetail,
         )
     }
 
@@ -247,9 +250,10 @@ internal class AdLoadSession(
         reason: String? = null,
         adSource: String? = null,
         responseId: String? = null,
+        errorDetail: String? = null,
     ) {
         if (!terminal.compareAndSet(false, true)) return
-        val latency = (clock.nowMillis() - startedAtMillis).coerceAtLeast(0L)
+        val latency = if (sdkAutoLoad) null else (clock.nowMillis() - startedAtMillis).coerceAtLeast(0L)
         val publish = {
             emit(
                 name = if (result == "filled") AdEventName.LOADED else AdEventName.LOAD_FAIL,
@@ -258,6 +262,7 @@ internal class AdLoadSession(
                 reason = reason,
                 adSource = adSource,
                 responseId = responseId,
+                errorDetail = errorDetail,
                 latencyMillis = latency,
             )
         }
@@ -271,6 +276,7 @@ internal class AdLoadSession(
         reason: String? = null,
         adSource: String? = null,
         responseId: String? = null,
+        errorDetail: String? = null,
         latencyMillis: Long? = null,
     ) {
         val event = AdEvent(
@@ -288,9 +294,11 @@ internal class AdLoadSession(
             reason = reason,
             adSource = adSource,
             responseId = responseId,
+            errorDetail = errorDetail,
             latencyMillis = latencyMillis,
             bufferSize = bufferSize,
             slotId = slotId,
+            sdkAutoLoad = sdkAutoLoad,
         )
         logger?.event(event)
         runCatching { listener.onEvent(event) }
@@ -331,11 +339,11 @@ internal class BannerSlot(
         if (ended.compareAndSet(false, true)) finishPending(reason)
     }
 
-    private fun finishPending(reason: String, errorCode: String? = null) {
+    private fun finishPending(reason: String, errorCode: String? = null, errorDetail: String? = null) {
         val display = currentDisplay
-        if (display != null) display.endOpportunity(reason, errorCode)
+        if (display != null) display.endOpportunity(reason, errorCode, errorDetail)
         else if (initialTerminal.compareAndSet(false, true)) {
-            emit(AdEventName.SHOW_FAIL, initialSessionId, reason = reason, errorCode = errorCode)
+            emit(AdEventName.SHOW_FAIL, initialSessionId, reason = reason, errorCode = errorCode, errorDetail = errorDetail)
         }
     }
 
@@ -400,8 +408,8 @@ internal class BannerSlot(
     }
 
     /** Failure belongs to the qualified host opportunity, even before an SDK response exists. */
-    fun showFailure(reason: String, errorCode: String? = null) {
-        if (!isEnded) finishPending(reason, errorCode)
+    fun showFailure(reason: String, errorCode: String? = null, errorDetail: String? = null) {
+        if (!isEnded) finishPending(reason, errorCode, errorDetail)
     }
 
     /** Refresh failure need not identify a new display and must leave the old one usable. */
@@ -416,6 +424,7 @@ internal class BannerSlot(
         result: String? = null,
         reason: String? = null,
         errorCode: String? = null,
+        errorDetail: String? = null,
     ) {
         val event = AdEvent(
             name = name,
@@ -430,6 +439,7 @@ internal class BannerSlot(
             result = result,
             reason = reason,
             errorCode = errorCode,
+            errorDetail = errorDetail,
         )
         logger?.event(event)
         runCatching { listener.onEvent(event) }
@@ -546,11 +556,12 @@ internal class AdShowSession(
         return true
     }
 
-    fun showFailure(reason: String, errorCode: String? = null, cause: Throwable? = null) {
+    fun showFailure(reason: String, errorCode: String? = null, cause: Throwable? = null, errorDetail: String? = null) {
         if (!admit(qualify = false)) return
         if (terminal.compareAndSet(false, true)) {
             onImpressionConfirmed = null
-            emit(AdEventName.SHOW_FAIL, reason = attempt.policy?.blocked?.let { it.sceneSkipReason() ?: it.code } ?: reason, errorCode = errorCode)
+            emit(AdEventName.SHOW_FAIL, reason = attempt.policy?.blocked?.let { it.sceneSkipReason() ?: it.code } ?: reason,
+                errorCode = errorCode, errorDetail = errorDetail)
             cause?.let { error ->
                 logger?.showFailureException(
                     format = format,
@@ -598,6 +609,7 @@ internal class AdShowSession(
         name: AdEventName,
         reason: String? = null,
         errorCode: String? = null,
+        errorDetail: String? = null,
         adSource: String? = null,
         responseId: String? = null,
         value: Double? = null,
@@ -632,6 +644,7 @@ internal class AdShowSession(
             number = number,
             reason = reason,
             errorCode = errorCode,
+            errorDetail = errorDetail,
             adSource = adSource,
             responseId = responseId,
             value = value,

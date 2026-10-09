@@ -1374,10 +1374,11 @@ object Ads {
         runCatching { nativeLogger?.native(position, debug, warning, error, message) }
     }
 
-    internal fun beginNativeInventoryLoad(platform: AdPlatform, adUnitId: String): com.cashcraft.ads.mediation.internal.AdLoadSession {
+    internal fun beginNativeInventoryLoad(platform: AdPlatform, adUnitId: String,
+        sdkAutoLoad: Boolean = false): com.cashcraft.ads.mediation.internal.AdLoadSession {
         val mode = if (platform == AdPlatform.ADMOB) AdMediationMode.ADMOB else AdMediationMode.TOPON
         return AdEventDispatcher(application, platform, mode, observedEvents,
-            config.loggingEnabled, config.logTag).beginLoad(AdFormat.NATIVE, adUnitId, 1)
+            config.loggingEnabled, config.logTag).beginLoad(AdFormat.NATIVE, adUnitId, 1, sdkAutoLoad)
     }
 
     internal fun newNativeSlot(request: ResolvedNativeRequest, onPosition: (() -> Unit)? = null,

@@ -211,7 +211,7 @@ class NativeFullScreenSessionTest {
         var failure: String? = null
         var impressions = 0
         override fun loaded(ad: NativeAdHandle) { this.ad = ad }
-        override fun failed(reason: String, errorCode: String?) { failure = reason }
+        override fun failed(reason: String, errorCode: String?, errorDetail: String?) { failure = reason }
         override fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue?) { impressions++ }
         override fun clicked(adSource: String?, responseId: String?) = Unit
         override fun closed() = Unit

@@ -140,9 +140,9 @@ internal class NativeAttempt(
     fun candidateLoaded(platform: AdPlatform, ad: NativeAdHandle) {
         candidates[platform]?.takeIf { recordLoadEvents && it.started }?.events?.loaded(ad.adSource, ad.responseId)
     }
-    fun candidateFailed(platform: AdPlatform, reason: String, errorCode: String?) {
+    fun candidateFailed(platform: AdPlatform, reason: String, errorCode: String?, errorDetail: String? = null) {
         candidates[platform]?.takeIf { recordLoadEvents && it.started }?.events?.failed(
-            if (reason == "no_fill") "no_fill" else "failed", errorCode, reason, null,
+            if (reason == "no_fill") "no_fill" else "failed", errorCode, reason, null, errorDetail,
         )
     }
     fun bidResult(decision: BidDecision) {
@@ -164,9 +164,9 @@ internal class NativeAttempt(
             topOnAdUnitId = candidates[AdPlatform.TOPON]?.request?.adUnitId,
         ))
     }
-    fun fail(reason: String, errorCode: String? = null) {
-        if (started) finishLoads(if (reason == "no_fill") "no_fill" else "failed", errorCode, reason)
-        showFailure(reason, errorCode)
+    fun fail(reason: String, errorCode: String? = null, errorDetail: String? = null) {
+        if (started) finishLoads(if (reason == "no_fill") "no_fill" else "failed", errorCode, reason, errorDetail)
+        showFailure(reason, errorCode, errorDetail)
     }
     fun block() {
         failed = true
@@ -176,15 +176,15 @@ internal class NativeAttempt(
         if (started) finishLoads("cancelled", null, reason)
         showFailure(reason)
     }
-    private fun finishLoads(result: String, code: String?, reason: String) {
+    private fun finishLoads(result: String, code: String?, reason: String, errorDetail: String? = null) {
         if (!recordLoadEvents) return
-        if (candidates.isEmpty()) load.failed(result, code, reason, null)
-        else candidates.values.filter { it.started }.forEach { it.events.failed(result, code, reason, null) }
+        if (candidates.isEmpty()) load.failed(result, code, reason, null, errorDetail)
+        else candidates.values.filter { it.started }.forEach { it.events.failed(result, code, reason, null, errorDetail) }
     }
-    private fun showFailure(reason: String, errorCode: String? = null) {
+    private fun showFailure(reason: String, errorCode: String? = null, errorDetail: String? = null) {
         if (shown || failed) return
         failed = true
-        emit(base.copy(name = AdEventName.SHOW_FAIL, reason = reason, errorCode = errorCode))
+        emit(base.copy(name = AdEventName.SHOW_FAIL, reason = reason, errorCode = errorCode, errorDetail = errorDetail))
     }
     fun impression(source: String?, response: String?, revenue: NativeRevenue? = null, onActualImpression: (() -> Unit)? = null) {
         if (shown || failed) return

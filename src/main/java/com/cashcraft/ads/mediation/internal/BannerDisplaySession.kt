@@ -47,14 +47,15 @@ internal class BannerDisplaySession(
     }
 
     /** Failure of a qualified display opportunity, including cancellation before exposure. */
-    fun showFailure(reason: String, errorCode: String? = null) {
-        if (!slotEnded.get()) endOpportunity(reason, errorCode)
+    fun showFailure(reason: String, errorCode: String? = null, errorDetail: String? = null) {
+        if (!slotEnded.get()) endOpportunity(reason, errorCode, errorDetail)
     }
 
     /** Slot ownership may already be ended; metadata and paid delivery remain valid. */
-    fun endOpportunity(reason: String, errorCode: String? = null) {
+    fun endOpportunity(reason: String, errorCode: String? = null, errorDetail: String? = null) {
         if (impressionOrFailure.compareAndSet(false, true)) {
-            dispatch(event.copy(name = AdEventName.SHOW_FAIL, reason = reason, errorCode = errorCode))
+            dispatch(event.copy(name = AdEventName.SHOW_FAIL, reason = reason, errorCode = errorCode,
+                errorDetail = errorDetail))
         }
     }
 
