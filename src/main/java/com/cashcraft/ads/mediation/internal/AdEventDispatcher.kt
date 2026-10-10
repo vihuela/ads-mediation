@@ -3,6 +3,7 @@ package com.cashcraft.ads.mediation.internal
 import android.content.Context
 import android.os.SystemClock
 import androidx.core.content.edit
+import com.cashcraft.ads.mediation.AdBidCandidate
 import com.cashcraft.ads.mediation.AdEvent
 import com.cashcraft.ads.mediation.AdEventListener
 import com.cashcraft.ads.mediation.AdEventName
@@ -233,6 +234,10 @@ internal class AdShowSession(
                 result = if (data.winnerPlatform == null) "no_candidate" else "won",
                 currency = "USD",
                 winnerPlatform = data.winnerPlatform,
+                requestedFormat = data.requestedFormat,
+                eligibleFormats = data.eligibleFormats,
+                winnerFormat = data.winnerFormat,
+                bidCandidates = data.candidates,
                 admobAvailable = data.admobAvailable,
                 topOnAvailable = data.topOnAvailable,
                 admobPriceAvailable = data.admobValue != null,
@@ -304,4 +309,8 @@ internal data class AdBidEventData(
     val winningValue: Double?,
     val admobAdUnitId: String,
     val topOnAdUnitId: String,
+    val requestedFormat: AdFormat? = null,
+    val eligibleFormats: List<AdFormat> = emptyList(),
+    val winnerFormat: AdFormat? = null,
+    val candidates: List<AdBidCandidate> = emptyList(),
 )

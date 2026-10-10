@@ -95,6 +95,14 @@ internal fun formatAdEventLogMessage(event: AdEvent): String = buildString {
     if (event.name == AdEventName.BID_RESULT) {
         append(" winner_platform=")
             .append(event.winnerPlatform?.analyticsValue ?: "none")
+        append(" winner_format=").append(event.winnerFormat?.analyticsValue ?: "none")
+        event.requestedFormat?.let { append(" requested_ad_type=").append(it.analyticsValue) }
+        event.bidCandidates.forEach { candidate ->
+            val prefix = "${candidate.platform.analyticsValue}_${candidate.format.analyticsValue}"
+            append(" ").append(prefix).append("_available=").append(candidate.available)
+            append(" ").append(prefix).append("_value=")
+                .append(candidate.priceUsd?.toPlainLogString() ?: "unknown")
+        }
     }
     event.admobAvailable?.let { append(" admob_available=").append(it) }
     event.topOnAvailable?.let { append(" topon_available=").append(it) }

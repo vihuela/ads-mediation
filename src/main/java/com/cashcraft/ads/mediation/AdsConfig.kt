@@ -133,6 +133,18 @@ data class BiddingProviderConfig(
     override fun adUnitId(format: AdFormat): String = admob.adUnitId(format)
 }
 
+/** Auto app-open keeps its original format unless cross-format selection is explicitly enabled. */
+enum class AutoAppOpenMode {
+    APP_OPEN_ONLY,
+    APP_OPEN_OR_INTERSTITIAL,
+}
+
+internal val AutoAppOpenMode.formats: List<AdFormat>
+    get() = when (this) {
+        AutoAppOpenMode.APP_OPEN_ONLY -> listOf(AdFormat.APP_OPEN)
+        AutoAppOpenMode.APP_OPEN_OR_INTERSTITIAL -> listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL)
+    }
+
 /** One immutable object is the complete host-side integration surface. */
 data class AdsConfig(
     val provider: AdProviderConfig,
@@ -151,6 +163,7 @@ data class AdsConfig(
     val logTag: String = "AdsMediation",
     val autoShowAppOpen: Boolean = true,
     val appOpenPosition: String = "app_foreground",
+    val autoAppOpenMode: AutoAppOpenMode = AutoAppOpenMode.APP_OPEN_ONLY,
 ) {
     init {
         require(logTag.isNotBlank()) { "logTag must not be blank" }

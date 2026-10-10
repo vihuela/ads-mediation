@@ -221,6 +221,7 @@ SDK 崩溃；展示回调会返回 `Failed("sdk_initialization_failed")`。如�
 | `loggingEnabled` | `Boolean` | SDK Debug 包为 `true` | 控制模块 Logcat 和平台调试日志 |
 | `logTag` | `String` | `AdsMediation` | 模块 Logcat tag，不允许为空 |
 | `autoShowAppOpen` | `Boolean` | `true` | App 进入前台时自动尝试展示开屏广告 |
+| `autoAppOpenMode` | `AutoAppOpenMode` | `APP_OPEN_ONLY` | 自动开屏只用开屏，或通过 `APP_OPEN_OR_INTERSTITIAL` 同时比较插屏 |
 | `appOpenPosition` | `String` | `app_foreground` | 自动开屏对应的业务场景名 |
 
 ### 2.2 Provider 参数
@@ -388,6 +389,65 @@ TopOn 开屏会优先使用调用方传入的 `hostContainer`，否则依次尝�
 | `rewardEarned` | 广告平台是否明确触发奖励回调，业务只能据此发奖 |
 | `showResult` | 本次展示是关闭还是失败 |
 | `sessionId` | 将广告奖励与业务发奖事件关联起来的会话 ID |
+
+### 跨格式缓存竞价
+
+原来的 `showAppOpen`、`showInterstitial`、`showRewarded` 仍然只展示对应格式。
+新增两个跨格式入口，单平台和 `BiddingProviderConfig` 均可使用：
+
+```kotlin
+// 开屏与插屏比价。hostContainer 可省略，TopOn 开屏沿用自动查找容器的逻辑。
+Ads.showAppOpenOrInterstitial(
+    activity = this,
+    position = "manual_open",
+) { result ->
+    // result.platform / result.format 是本次选中的平台和格式。
+    // result.showResult 为 Dismissed 或 Failed；未选中候选时平台和格式为 null。
+}
+
+// 激励与插屏比价，默认插屏不会产生业务奖励。
+Ads.showRewardedOrInterstitial(
+    activity = this,
+    position = "game_tool_refresh",
+) { result ->
+    if (result.rewardEarned) grantReward(result.sessionId)
+}
+
+// 只有业务明确允许“插屏曝光后关闭也发奖”时才启用该策略。
+Ads.showRewardedOrInterstitial(
+    activity = this,
+    position = "game_tool_refresh",
+    interstitialRewardPolicy = InterstitialRewardPolicy.ON_DISMISSED,
+) { result ->
+    if (result.rewardEarned) grantReward(result.sessionId)
+}
+
+val openReady = Ads.isAppOpenOrInterstitialReady()
+val rewardReady = Ads.isRewardedOrInterstitialReady()
+```
+
+`AdMixedShowResult` 返回选中的 `platform`、`format`、`showResult`、`sessionId`，以及：
+
+- `sdkRewardEarned`：仅表示激励 SDK 是否触发奖励回调，普通插屏始终为 `false`。
+- `rewardEarned`：本次业务是否可以发奖。默认与 SDK 激励奖励一致；显式选择
+  `ON_DISMISSED` 时，插屏产生曝光并关闭也可为 `true`。这不代表完整观看，不会伪造
+  `ad_reward_earned` 事件。展示失败或未曝光就关闭的插屏不会发奖。
+
+激励与插屏混合的调用方需要接受“插屏胜出但默认不发奖”的结果。需要保证奖励机会仅由
+激励广告承接的场景，继续使用 `showRewarded`。
+
+自动开屏默认保持 `APP_OPEN_ONLY`。需要自动开屏也参与跨格式竞价时，在初始化配置中设置：
+
+```kotlin
+val config = AdsConfig(
+    provider = provider,
+    autoShowAppOpen = true,
+    autoAppOpenMode = AutoAppOpenMode.APP_OPEN_OR_INTERSTITIAL,
+)
+```
+
+混合自动开屏会同时检查开屏和插屏缓存，在现有 7 秒前台窗口内有任一种可用即可进入选择。
+手动混合展示仍不等待新广告加载。每次只展示一个胜出广告，胜出广告展示失败时不连播另一候选。
 
 ## 4. UMP 与隐私选项
 
@@ -560,6 +620,24 @@ AdMob 保留官方回调的币种；只接受美元的宿主接口必须检查 `
 4. 价格相同或都未知时，使用 AdMob 作为确定性兜底。
 5. 两边都没有缓存时，产生 `ad_bid_result(result=no_candidate)` 和
    `ad_show_fail(reason=no_preloaded_ad)`。
+
+跨格式入口将两个格式的候选放在同一次比较中；双平台配置最多有四个候选，单平台配置有两个。
+仍然只使用当前缓存，已知价格优先，高价优先；同价或都未知时先选场景原本的格式
+（开屏或激励），再优先 AdMob。未启用的平台和其他格式不会参与，TopOn 对本次两个格式分别
+尝试补充缓存，但本次选择不会等待加载完成。
+
+跨格式 `ad_bid_result` 的 `analyticsParameters()` 保留汇总信息：场景、会话、请求格式、
+参与格式、胜出平台和格式、收益价格等。旧的 `admob_value` / `topon_value` 等平台字段继续
+表示请求的主格式；新增 `requested_ad_type`、`eligible_ad_types`、`winner_format`。
+SDK 生成的竞价事件最多 22 个属性，不再展开每个候选的属性，避免超过 Firebase 每事件 25 个
+属性的限制。宿主额外追加属性（包括默认事件属性）时仍需控制总数。
+
+完整候选列表通过 `AdEvent.bidCandidates` 获取，每项包含 `platform`、`format`、`adUnitId`、
+`available` 和 `priceUsd`；价格未知时 `priceUsd` 为 null，真实零价格保持为 0。
+跨格式的逐候选分析应读取这个列表，按需发送到业务后端；候选明细仍可在 SDK 调试日志中查看。
+
+曝光、收益和关闭事件的 `ad_type` / `ad_unit_id` 使用实际展示格式及其广告位，`position` 使用
+业务场景加实际格式后缀；可用同一 `session_id` 关联竞价事件中的原始请求格式。
 
 TopOn 通过 `checkAdStatus().getTUTopAdInfo()` 读取当前最高优先级缓存广告，优先使用
 `getPublisherRevenue(USD)`；缺失时使用 `getEcpm(USD) / 1000`。这可以保证和 AdMob 使用同一种

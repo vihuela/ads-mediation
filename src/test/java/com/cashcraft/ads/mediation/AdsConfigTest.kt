@@ -107,6 +107,17 @@ class AdsConfigTest {
         assertEquals(AdMediationMode.TOPON, testTopOnProvider().mediationMode)
     }
 
+    @Test
+    fun `automatic mixed selection is opt in and TopOn needs no explicit container`() {
+        val config = AdsConfig(provider = testTopOnProvider())
+        assertEquals(AutoAppOpenMode.APP_OPEN_ONLY, config.autoAppOpenMode)
+        assertEquals(listOf(AdFormat.APP_OPEN), config.autoAppOpenMode.formats)
+        assertEquals(
+            listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL),
+            config.copy(autoAppOpenMode = AutoAppOpenMode.APP_OPEN_OR_INTERSTITIAL).autoAppOpenMode.formats,
+        )
+    }
+
     private fun testTopOnProvider() = TopOnProviderConfig(
         ids = TopOnIds(
             applicationId = "app-id",

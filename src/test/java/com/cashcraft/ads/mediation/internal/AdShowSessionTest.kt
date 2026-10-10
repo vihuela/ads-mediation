@@ -1,5 +1,6 @@
 package com.cashcraft.ads.mediation.internal
 
+import com.cashcraft.ads.mediation.AdBidCandidate
 import com.cashcraft.ads.mediation.AdEvent
 import com.cashcraft.ads.mediation.AdEventListener
 import com.cashcraft.ads.mediation.AdEventName
@@ -11,9 +12,127 @@ import com.cashcraft.ads.mediation.admob.AdMobState
 import com.cashcraft.ads.mediation.admob.showFailureReason
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AdShowSessionTest {
+    @Test
+    fun `mixed bid reports actual interstitial and original reward request without SDK reward event`() {
+        val events = mutableListOf<AdEvent>()
+        val session = AdShowSession(
+            listener = AdEventListener(events::add),
+            platform = AdPlatform.TOPON,
+            mediationMode = AdMediationMode.BIDDING,
+            format = AdFormat.INTERSTITIAL,
+            position = "double_reward_interstitial",
+            adUnitId = "topon-interstitial",
+            sessionId = "mixed-session",
+            number = 1L,
+        )
+        session.bidResult(
+            AdBidEventData(
+                winnerPlatform = AdPlatform.TOPON,
+                admobAvailable = false,
+                topOnAvailable = false,
+                admobValue = null,
+                topOnValue = null,
+                winningValue = 0.002,
+                admobAdUnitId = "admob-rewarded",
+                topOnAdUnitId = "topon-rewarded",
+                requestedFormat = AdFormat.REWARDED,
+                eligibleFormats = listOf(AdFormat.REWARDED, AdFormat.INTERSTITIAL),
+                winnerFormat = AdFormat.INTERSTITIAL,
+                candidates = listOf(
+                    AdBidCandidate(AdPlatform.ADMOB, AdFormat.REWARDED, "admob-rewarded", false, null),
+                    AdBidCandidate(AdPlatform.TOPON, AdFormat.INTERSTITIAL, "topon-interstitial", true, 0.002),
+                ),
+            ),
+        )
+        session.impression("Pangle", "response-1")
+        session.emit(AdEventName.DISMISS)
+        val bid = events.single { it.name == AdEventName.BID_RESULT }
+        val parameters = bid.analyticsParameters()
+        assertEquals("rewarded", parameters["requested_ad_type"])
+        assertEquals("rewarded,interstitial", parameters["eligible_ad_types"])
+        assertEquals("interstitial", parameters["winner_format"])
+        assertEquals("interstitial", parameters["ad_type"])
+        assertEquals("topon-interstitial", parameters["ad_unit_id"])
+        assertEquals(0.002, parameters["winning_value"])
+        assertEquals(false, parameters["admob_price_available"])
+        assertEquals(2, bid.bidCandidates.size)
+        assertEquals(0.002, bid.bidCandidates.single { it.format == AdFormat.INTERSTITIAL }.priceUsd)
+        assertEquals(null, bid.bidCandidates.single { it.format == AdFormat.REWARDED }.priceUsd)
+        assertFalse(parameters.containsKey("topon_interstitial_value"))
+        assertFalse(parameters.containsKey("admob_rewarded_price_available"))
+        assertTrue(parameters.size <= 25)
+        assertFalse(events.any { it.name == AdEventName.REWARD_EARNED })
+        assertEquals(setOf("mixed-session"), events.map { it.sessionId }.toSet())
+        assertEquals(setOf(AdFormat.INTERSTITIAL), events.map { it.format }.toSet())
+    }
+
+    @Test
+    fun `fully priced bid summaries stay within 25 parameters without losing candidate detail`() {
+        val formatGroups = AdFormat.entries.map { listOf(it) } + listOf(
+            listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL),
+            listOf(AdFormat.REWARDED, AdFormat.INTERSTITIAL),
+        )
+        for (formats in formatGroups) {
+            val candidates = AdPlatform.entries.flatMap { platform ->
+                formats.map { format ->
+                    AdBidCandidate(platform, format, "${platform.name}_${format.name}", true, 0.002)
+                }
+            }
+            val events = mutableListOf<AdEvent>()
+            val session = AdShowSession(
+                listener = AdEventListener(events::add),
+                platform = AdPlatform.ADMOB,
+                mediationMode = AdMediationMode.BIDDING,
+                format = formats.first(),
+                position = "test",
+                adUnitId = "admob-unit",
+                sessionId = "summary-session",
+                number = 1L,
+            )
+            session.bidResult(
+                AdBidEventData(
+                    winnerPlatform = AdPlatform.ADMOB,
+                    admobAvailable = true,
+                    topOnAvailable = true,
+                    admobValue = 0.002,
+                    topOnValue = 0.002,
+                    winningValue = 0.002,
+                    admobAdUnitId = "admob-unit",
+                    topOnAdUnitId = "topon-unit",
+                    requestedFormat = formats.first(),
+                    eligibleFormats = formats,
+                    winnerFormat = formats.first(),
+                    candidates = candidates,
+                ),
+            )
+            val bid = events.single { it.name == AdEventName.BID_RESULT }
+            val parameters = bid.analyticsParameters()
+            assertTrue("$formats emitted ${parameters.size} parameters", parameters.size <= 25)
+            assertEquals(22, parameters.size)
+            assertEquals("admob", parameters["winner_platform"])
+            assertEquals(formats.first().analyticsValue, parameters["winner_format"])
+            assertEquals(formats.first().analyticsValue, parameters["requested_ad_type"])
+            assertEquals("test", parameters["position"])
+            assertEquals("summary-session", parameters["session_id"])
+            assertEquals("USD", parameters["currency"])
+            assertEquals(0.002, parameters["winning_value"])
+            assertEquals(0.002, parameters["admob_value"])
+            assertEquals(0.002, parameters["topon_value"])
+            assertEquals("admob-unit", parameters["admob_ad_unit_id"])
+            assertEquals("topon-unit", parameters["topon_ad_unit_id"])
+            assertEquals(candidates, bid.bidCandidates)
+            assertEquals(parameters, bid.copy(bidCandidates = emptyList()).analyticsParameters())
+            for (candidate in candidates) {
+                val prefix = "${candidate.platform.analyticsValue}_${candidate.format.analyticsValue}"
+                assertFalse(parameters.keys.any { it.startsWith(prefix) })
+            }
+        }
+    }
+
     @Test
     fun `load session reports one correlated terminal result with latency`() {
         val events = mutableListOf<AdEvent>()

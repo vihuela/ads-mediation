@@ -19,6 +19,16 @@ enum class AdEventName(val analyticsName: String) {
     REWARD_EARNED("ad_reward_earned"),
 }
 
+/** A snapshot of one configured platform/format in a cached-ad auction. */
+data class AdBidCandidate(
+    val platform: AdPlatform,
+    val format: AdFormat,
+    val adUnitId: String,
+    val available: Boolean,
+    /** USD per impression; null means no usable price, distinct from a genuine zero. */
+    val priceUsd: Double?,
+)
+
 /** SDK-neutral event payload shared by AdMob and TopOn. */
 data class AdEvent(
     val name: AdEventName,
@@ -55,8 +65,13 @@ data class AdEvent(
         AdPlatform.ADMOB -> AdMediationMode.ADMOB
         AdPlatform.TOPON -> AdMediationMode.TOPON
     },
+    val requestedFormat: AdFormat? = null,
+    val eligibleFormats: List<AdFormat> = emptyList(),
+    val winnerFormat: AdFormat? = null,
+    /** Full candidate detail for listeners; deliberately excluded from analyticsParameters(). */
+    val bidCandidates: List<AdBidCandidate> = emptyList(),
 ) {
-    /** Field names intentionally retain the existing analytics contract. */
+    /** Keeps the existing summary fields; candidate detail stays in [bidCandidates]. */
     fun analyticsParameters(): Map<String, Any> = buildMap {
         put("ad_type", format.analyticsValue)
         put("ad_platform", platform.analyticsValue)
@@ -80,6 +95,7 @@ data class AdEvent(
         bufferSize?.let { put("buffer_size", it) }
         if (name == AdEventName.BID_RESULT) {
             put("winner_platform", winnerPlatform?.analyticsValue ?: "none")
+            put("winner_format", winnerFormat?.analyticsValue ?: "none")
         }
         admobAvailable?.let { put("admob_available", it) }
         topOnAvailable?.let { put("topon_available", it) }
@@ -90,6 +106,10 @@ data class AdEvent(
         winningValue?.let { put("winning_value", it) }
         admobAdUnitId?.let { put("admob_ad_unit_id", it) }
         topOnAdUnitId?.let { put("topon_ad_unit_id", it) }
+        requestedFormat?.let { put("requested_ad_type", it.analyticsValue) }
+        if (eligibleFormats.isNotEmpty()) {
+            put("eligible_ad_types", eligibleFormats.joinToString(",") { it.analyticsValue })
+        }
     }
 
     private companion object {

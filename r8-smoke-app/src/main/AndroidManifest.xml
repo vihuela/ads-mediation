@@ -5,5 +5,7 @@
     <application
         android:name="com.cashcraft.ads.mediation.smoke.SmokeApplication"
         android:allowBackup="false"
-        android:label="Ads Mediation R8 Smoke" />
+        android:label="Ads Mediation R8 Smoke">
+        <activity android:name=".SmokeActivity" android:exported="false" />
+    </application>
 </manifest>
