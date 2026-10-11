@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.Application
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import com.cashcraft.ads.mediation.AdEventName
@@ -62,6 +63,14 @@ internal object TopOnAds {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
     private var removePolicyListener: (() -> Unit)? = null
+    private var readinessSubscription: AutoCloseable? = null
+    private val fullScreenLoadControl = TopOnFullScreenLoadControl(
+        clock = SystemClock::elapsedRealtime,
+        cooldown = TopOnLoadCooldown.shared,
+        postDelayed = { task, delay -> mainHandler.postDelayed(task, delay) },
+        cancel = mainHandler::removeCallbacks,
+        canLoad = ::canLoadFullScreenAds,
+    )
 
     @Volatile
     var state: TopOnState = TopOnState.NOT_INITIALIZED
@@ -110,6 +119,14 @@ internal object TopOnAds {
     private lateinit var autoAppOpenController: AutoAppOpenController<AdShowSession>
 
     private val lifecycleListener = object : AdLifecycleMonitor.Listener {
+        override fun onAppEnteredBackground() = onMain {
+            fullScreenLoadControl.pause()
+        }
+
+        override fun onAppEnteredForeground(activity: Activity) = onMain {
+            fullScreenLoadControl.resume()
+        }
+
         override fun onActivityDestroyed(activity: Activity) {
             if (splashContainer?.context === activity) {
                 if (activeAppOpen != null) {
@@ -200,6 +217,7 @@ internal object TopOnAds {
                 },
                 fail = { session, reason -> session.showFailure(reason) },
                 noAdFailureReason = NO_AD_AVAILABLE,
+                ensureLoaded = { ensureLoaded(AdFormat.APP_OPEN) },
             )
             AdLifecycleMonitor.addListener(lifecycleListener)
         }
@@ -207,6 +225,9 @@ internal object TopOnAds {
         onMain {
             if (removePolicyListener == null) {
                 removePolicyListener = Ads.addPolicyListener(::onPolicyChanged)
+            }
+            if (readinessSubscription == null) {
+                readinessSubscription = Ads.observeNativeReadiness(::onPolicyChanged)
             }
             AdLifecycleMonitor.install(application, initialActivity)
             TUSDK.setNetworkLogDebug(commonConfig.loggingEnabled)
@@ -256,17 +277,18 @@ internal object TopOnAds {
         onMain {
             when (format) {
                 AdFormat.BANNER -> Unit
-                AdFormat.APP_OPEN -> loadAppOpen()
-                AdFormat.INTERSTITIAL -> loadInterstitial()
-                AdFormat.REWARDED -> loadRewarded()
+                AdFormat.APP_OPEN -> loadAppOpen(newOpportunity = true)
+                AdFormat.INTERSTITIAL -> loadInterstitial(newOpportunity = true)
+                AdFormat.REWARDED -> loadRewarded(newOpportunity = true)
                 AdFormat.NATIVE -> Unit
             }
         }
     }
 
-    /** Existing SDK requests may finish; every new request checks the current policy below. */
+    /** 已发起的请求可完成；只有加载许可从禁止恢复允许才重开耗尽轮次。 */
     internal fun onPolicyChanged() = onMain {
-        if (state != TopOnState.READY || !Ads.canLoadAds(AdPlatform.TOPON)) return@onMain
+        fullScreenLoadControl.onPolicyChanged(fullScreenLoadAllowed())
+        if (state != TopOnState.READY) return@onMain
         loadAppOpen()
         loadInterstitial()
         loadRewarded()
@@ -455,6 +477,7 @@ internal object TopOnAds {
     }
 
     private fun loadAll() {
+        fullScreenLoadControl.onPolicyChanged(fullScreenLoadAllowed())
         loadAppOpen()
         // Stagger formats so the latency-sensitive splash request is not competing with two other
         // waterfalls at process start.
@@ -466,90 +489,140 @@ internal object TopOnAds {
         }
     }
 
-    private fun loadAppOpen(afterShow: Boolean = false) {
-        if (!Ads.canLoadAds(AdPlatform.TOPON)) return
+    private fun fullScreenLoadAllowed(): Boolean =
+        Ads.canLoadAds(AdPlatform.TOPON) && Ads.consentSnapshot.canRequestAds
+
+    private fun canLoadFullScreenAds(): Boolean =
+        state == TopOnState.READY && AdLifecycleMonitor.isAppInForeground && fullScreenLoadAllowed()
+
+    private fun loadAppOpen(afterShow: Boolean = false, newOpportunity: Boolean = false) {
         if (!::config.isInitialized || !config.isFormatEnabled(AdFormat.APP_OPEN) ||
             !::appOpenAd.isInitialized
         ) return
-        if (state != TopOnState.READY || appOpenLoading || (!afterShow && appOpenAd.isAdReady)) return
-        appOpenLoading = true
-        appOpenLoadSession = events.createLoad(
-            AdFormat.APP_OPEN,
-            config.ids.appOpenPlacementId,
-            TOPON_BUFFER_SIZE,
+        fullScreenLoadControl.request(
+            placementId = config.ids.appOpenPlacementId,
+            newOpportunity = newOpportunity,
+            afterShow = afterShow,
+            isReady = { appOpenAd.isAdReady },
+            isLoading = { appOpenLoading },
+            load = load@{ refill ->
+                if (!canLoadFullScreenAds() || appOpenLoading || (!refill && appOpenAd.isAdReady)) return@load false
+                appOpenLoading = true
+                val loadSession = events.createLoad(
+                    AdFormat.APP_OPEN,
+                    config.ids.appOpenPlacementId,
+                    TOPON_BUFFER_SIZE,
+                )
+                appOpenLoadSession = loadSession
+                // 分配会话不发请求事件；SDK 调用前再次检查许可和库存。
+                if (!canLoadFullScreenAds() || (!refill && appOpenAd.isAdReady)) {
+                    appOpenLoading = false
+                    return@load false
+                }
+                runCatching { loadSession.invokeLoad(appOpenAd::loadAd) }.onFailure { error ->
+                    // 同步终态回调已处理时，后续抛异常不能再计失败或污染新请求。
+                    if (!appOpenLoading || appOpenLoadSession !== loadSession) return@onFailure
+                    appOpenLoading = false
+                    if (!fullScreenLoadControl.failed(config.ids.appOpenPlacementId)) return@onFailure
+                    recordLoadFailure(AdFormat.APP_OPEN)
+                    loadSession.failed("error", "exception", error.message, null)
+                }
+                true
+            },
         )
-        // Final policy check before the actual SDK call; allocation publishes no host event.
-        if (!Ads.canLoadAds(AdPlatform.TOPON)) {
-            appOpenLoading = false
-            return
-        }
-        val loadSession = appOpenLoadSession ?: return
-        runCatching { loadSession.invokeLoad(appOpenAd::loadAd) }.onFailure { error ->
-            appOpenLoading = false
-            recordLoadFailure(AdFormat.APP_OPEN)
-            loadSession.failed("error", "exception", error.message, null)
-        }
     }
 
-    private fun loadInterstitial(afterShow: Boolean = false) {
-        if (!Ads.canLoadAds(AdPlatform.TOPON)) return
+    private fun loadInterstitial(afterShow: Boolean = false, newOpportunity: Boolean = false) {
         if (!::config.isInitialized || !config.isFormatEnabled(AdFormat.INTERSTITIAL) ||
             !::interstitialAd.isInitialized
         ) return
-        if (state != TopOnState.READY || interstitialLoading || (!afterShow && interstitialAd.isAdReady)) return
-        interstitialLoading = true
-        interstitialLoadSession = events.createLoad(
-            AdFormat.INTERSTITIAL,
-            config.ids.interstitialPlacementId,
-            TOPON_BUFFER_SIZE,
+        fullScreenLoadControl.request(
+            placementId = config.ids.interstitialPlacementId,
+            newOpportunity = newOpportunity,
+            afterShow = afterShow,
+            isReady = { interstitialAd.isAdReady },
+            isLoading = { interstitialLoading },
+            load = load@{ refill ->
+                if (!canLoadFullScreenAds() || interstitialLoading || (!refill && interstitialAd.isAdReady)) return@load false
+                interstitialLoading = true
+                val loadSession = events.createLoad(
+                    AdFormat.INTERSTITIAL,
+                    config.ids.interstitialPlacementId,
+                    TOPON_BUFFER_SIZE,
+                )
+                interstitialLoadSession = loadSession
+                // 分配会话不发请求事件；SDK 调用前再次检查许可和库存。
+                if (!canLoadFullScreenAds() || (!refill && interstitialAd.isAdReady)) {
+                    interstitialLoading = false
+                    return@load false
+                }
+                runCatching { loadSession.invokeLoad(interstitialAd::load) }.onFailure { error ->
+                    // 同步终态回调已处理时，后续抛异常不能再计失败或污染新请求。
+                    if (!interstitialLoading || interstitialLoadSession !== loadSession) return@onFailure
+                    interstitialLoading = false
+                    if (!fullScreenLoadControl.failed(config.ids.interstitialPlacementId)) return@onFailure
+                    recordLoadFailure(AdFormat.INTERSTITIAL)
+                    loadSession.failed("error", "exception", error.message, null)
+                }
+                true
+            },
         )
-        if (!Ads.canLoadAds(AdPlatform.TOPON)) {
-            interstitialLoading = false
-            return
-        }
-        val loadSession = interstitialLoadSession ?: return
-        runCatching { loadSession.invokeLoad(interstitialAd::load) }.onFailure { error ->
-            interstitialLoading = false
-            recordLoadFailure(AdFormat.INTERSTITIAL)
-            loadSession.failed("error", "exception", error.message, null)
-        }
     }
 
-    private fun loadRewarded(afterShow: Boolean = false) {
-        if (!Ads.canLoadAds(AdPlatform.TOPON)) return
+    private fun loadRewarded(afterShow: Boolean = false, newOpportunity: Boolean = false) {
         if (!::config.isInitialized || !config.isFormatEnabled(AdFormat.REWARDED) ||
             !::rewardedAd.isInitialized
         ) return
-        if (state != TopOnState.READY || rewardedLoading || (!afterShow && rewardedAd.isAdReady)) return
-        rewardedLoading = true
-        rewardedLoadSession = events.createLoad(
-            AdFormat.REWARDED,
-            config.ids.rewardedPlacementId,
-            TOPON_BUFFER_SIZE,
+        fullScreenLoadControl.request(
+            placementId = config.ids.rewardedPlacementId,
+            newOpportunity = newOpportunity,
+            afterShow = afterShow,
+            isReady = { rewardedAd.isAdReady },
+            isLoading = { rewardedLoading },
+            load = load@{ refill ->
+                if (!canLoadFullScreenAds() || rewardedLoading || (!refill && rewardedAd.isAdReady)) return@load false
+                rewardedLoading = true
+                val loadSession = events.createLoad(
+                    AdFormat.REWARDED,
+                    config.ids.rewardedPlacementId,
+                    TOPON_BUFFER_SIZE,
+                )
+                rewardedLoadSession = loadSession
+                // 分配会话不发请求事件；SDK 调用前再次检查许可和库存。
+                if (!canLoadFullScreenAds() || (!refill && rewardedAd.isAdReady)) {
+                    rewardedLoading = false
+                    return@load false
+                }
+                runCatching { loadSession.invokeLoad(rewardedAd::load) }.onFailure { error ->
+                    // 同步终态回调已处理时，后续抛异常不能再计失败或污染新请求。
+                    if (!rewardedLoading || rewardedLoadSession !== loadSession) return@onFailure
+                    rewardedLoading = false
+                    if (!fullScreenLoadControl.failed(config.ids.rewardedPlacementId)) return@onFailure
+                    recordLoadFailure(AdFormat.REWARDED)
+                    loadSession.failed("error", "exception", error.message, null)
+                }
+                true
+            },
         )
-        if (!Ads.canLoadAds(AdPlatform.TOPON)) {
-            rewardedLoading = false
-            return
-        }
-        val loadSession = rewardedLoadSession ?: return
-        runCatching { loadSession.invokeLoad(rewardedAd::load) }.onFailure { error ->
-            rewardedLoading = false
-            recordLoadFailure(AdFormat.REWARDED)
-            loadSession.failed("error", "exception", error.message, null)
-        }
     }
 
     private val interstitialListener = object : TUInterstitialListener {
         override fun onInterstitialAdLoaded() = onMain {
+            if (!interstitialLoading) return@onMain
+            val loadSession = interstitialLoadSession
             interstitialLoading = false
-            interstitialLoadSession?.loadedFrom(interstitialAd.checkValidAdCaches())
+            if (!fullScreenLoadControl.loaded(config.ids.interstitialPlacementId)) return@onMain
+            loadSession?.loadedFrom(interstitialAd.checkValidAdCaches())
             FullScreenLoadSignals.changed()
         }
 
         override fun onInterstitialAdLoadFail(error: AdError) = onMain {
+            if (!interstitialLoading) return@onMain
+            val loadSession = interstitialLoadSession
             interstitialLoading = false
+            if (!fullScreenLoadControl.failed(config.ids.interstitialPlacementId)) return@onMain
             recordLoadFailure(AdFormat.INTERSTITIAL)
-            interstitialLoadSession?.failedFrom(error)
+            loadSession?.failedFrom(error)
         }
 
         override fun onInterstitialAdShow(info: TUAdInfo) {
@@ -615,14 +688,20 @@ internal object TopOnAds {
 
     private val rewardedListener = object : TURewardVideoListener {
         override fun onRewardedVideoAdLoaded() = onMain {
+            if (!rewardedLoading) return@onMain
+            val loadSession = rewardedLoadSession
             rewardedLoading = false
-            rewardedLoadSession?.loadedFrom(rewardedAd.checkValidAdCaches())
+            if (!fullScreenLoadControl.loaded(config.ids.rewardedPlacementId)) return@onMain
+            loadSession?.loadedFrom(rewardedAd.checkValidAdCaches())
         }
 
         override fun onRewardedVideoAdFailed(error: AdError) = onMain {
+            if (!rewardedLoading) return@onMain
+            val loadSession = rewardedLoadSession
             rewardedLoading = false
+            if (!fullScreenLoadControl.failed(config.ids.rewardedPlacementId)) return@onMain
             recordLoadFailure(AdFormat.REWARDED)
-            rewardedLoadSession?.failedFrom(error)
+            loadSession?.failedFrom(error)
         }
 
         override fun onRewardedVideoAdPlayStart(info: TUAdInfo) {
@@ -702,16 +781,22 @@ internal object TopOnAds {
 
     private val splashListener = object : TUSplashAdEZListener() {
         override fun onAdLoaded() = onMain {
+            if (!appOpenLoading) return@onMain
+            val loadSession = appOpenLoadSession
             appOpenLoading = false
-            appOpenLoadSession?.loadedFrom(appOpenAd.checkValidAdCaches())
+            if (!fullScreenLoadControl.loaded(config.ids.appOpenPlacementId)) return@onMain
+            loadSession?.loadedFrom(appOpenAd.checkValidAdCaches())
             FullScreenLoadSignals.changed()
             autoAppOpenController.onAdAvailable()
         }
 
         override fun onNoAdError(error: AdError) = onMain {
+            if (!appOpenLoading) return@onMain
+            val loadSession = appOpenLoadSession
             appOpenLoading = false
+            if (!fullScreenLoadControl.failed(config.ids.appOpenPlacementId)) return@onMain
             recordLoadFailure(AdFormat.APP_OPEN)
-            appOpenLoadSession?.failedFrom(error)
+            loadSession?.failedFrom(error)
         }
 
         override fun onAdShow(info: TUAdInfo) {
@@ -773,7 +858,7 @@ internal object TopOnAds {
         if (!canShow(activity, session, onResult = onResult)) return
         if (!appOpenAd.isAdReady) {
             failBeforeShow(session, NO_AD_AVAILABLE, onResult)
-            if (!session.attempt.isWaitingOpportunity) loadAppOpen()
+            if (!session.attempt.isWaitingOpportunity) loadAppOpen(newOpportunity = true)
             return
         }
         val hostResult = runCatching {
@@ -883,7 +968,7 @@ internal object TopOnAds {
         if (!canShow(activity, session, onResult)) return
         if (!interstitialAd.isAdReady) {
             failBeforeShow(session, NO_AD_AVAILABLE, onResult)
-            if (!session.attempt.isWaitingOpportunity) loadInterstitial()
+            if (!session.attempt.isWaitingOpportunity) loadInterstitial(newOpportunity = true)
             return
         }
         if (!commitForShow(
@@ -893,7 +978,7 @@ internal object TopOnAds {
                 finalCheck = { if (!interstitialAd.isAdReady) NO_AD_AVAILABLE else null },
             )
         ) {
-            if (!session.attempt.isWaitingOpportunity && !interstitialAd.isAdReady) loadInterstitial()
+            if (!session.attempt.isWaitingOpportunity && !interstitialAd.isAdReady) loadInterstitial(newOpportunity = true)
             return
         }
         activeInterstitial = ActiveShow(session, onResult)
@@ -918,7 +1003,7 @@ internal object TopOnAds {
         if (!canShow(activity, session, showResultCallback)) return
         if (!rewardedAd.isAdReady) {
             failBeforeShow(session, NO_AD_AVAILABLE, showResultCallback)
-            if (!session.attempt.isWaitingOpportunity) loadRewarded()
+            if (!session.attempt.isWaitingOpportunity) loadRewarded(newOpportunity = true)
             return
         }
         if (!commitForShow(
@@ -928,7 +1013,7 @@ internal object TopOnAds {
                 finalCheck = { if (!rewardedAd.isAdReady) NO_AD_AVAILABLE else null },
             )
         ) {
-            if (!session.attempt.isWaitingOpportunity && !rewardedAd.isAdReady) loadRewarded()
+            if (!session.attempt.isWaitingOpportunity && !rewardedAd.isAdReady) loadRewarded(newOpportunity = true)
             return
         }
         activeRewarded = ActiveRewardedShow(session, onResult)

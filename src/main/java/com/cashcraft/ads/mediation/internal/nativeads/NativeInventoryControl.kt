@@ -18,6 +18,7 @@ internal class NativeInventoryControl(
     private val prepare: (NativeInventoryKey, Long?, (Boolean) -> Unit) -> NativeLoad,
     private val closeSession: (NativeInventoryKey) -> Unit,
     private val reportError: (NativeInventoryKey, String, Throwable) -> Unit,
+    private val loadDelayMillis: (NativeInventoryKey) -> Long = { 0L },
 ) {
     private class Entry(val key: NativeInventoryKey) {
         var demand = 0
@@ -132,6 +133,19 @@ internal class NativeInventoryControl(
         if (entries[entry.key] !== entry || !foreground || entry.key.platform !in permitted || entry.ready ||
             entry.pending || entry.retry != null || entry.exhausted) return
         if (entry.key.platform == AdPlatform.ADMOB && entry.started) return
+        val delay = loadDelayMillis(entry.key)
+        if (delay > 0L) {
+            val token = entry.token
+            val retry = Runnable {
+                if (current(entry, token)) {
+                    entry.retry = null
+                    ensure(entry)
+                }
+            }
+            entry.retry = retry
+            schedule(retry, delay)
+            return
+        }
         entry.started = true
         entry.pending = true
         val token = ++entry.token

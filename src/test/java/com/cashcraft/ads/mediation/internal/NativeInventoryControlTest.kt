@@ -2,6 +2,7 @@ package com.cashcraft.ads.mediation.internal
 
 import com.cashcraft.ads.mediation.AdPlatform
 import com.cashcraft.ads.mediation.internal.nativeads.*
+import com.cashcraft.ads.mediation.internal.topon.TopOnLoadCooldown
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -407,10 +408,111 @@ class NativeInventoryControlTest {
         assertEquals(8, h.calls.size)
     }
 
-    private class Host(platform: AdPlatform = AdPlatform.TOPON) {
+    @Test fun `SDK failure cooldown combines with backoff without using an extra retry`() {
+        val h = Host(cooldownEnabled = true)
+        h.control.acquire(h.key)
+        for (delay in listOf(2_100L, 4_000L, 8_000L)) {
+            h.complete(false)
+            val count = h.calls.size
+            repeat(3) { h.control.acquire(h.key); h.control.retry(h.key) }
+            h.advance(delay - 1)
+            assertEquals(count, h.calls.size)
+            h.advance(1)
+            assertEquals(count + 1, h.calls.size)
+        }
+        h.complete(false)
+        h.advance(60_000)
+        assertEquals(4, h.calls.size)
+        assertTrue(h.timers.isEmpty())
+    }
+
+    @Test fun `quick background and permission changes retain placement cooldown`() {
+        val h = Host(cooldownEnabled = true)
+        h.control.acquire(h.key)
+        h.complete(false)
+        h.advance(300)
+        h.control.updateEnvironment(false, true)
+        h.control.updateEnvironment(true, true)
+        h.advance(300)
+        h.control.updateEnvironment(true, false)
+        h.control.updateEnvironment(true, true)
+        h.advance(1_499)
+        assertEquals(1, h.calls.size)
+        assertEquals(1, h.timers.size)
+        h.advance(1)
+        assertEquals(2, h.calls.size)
+    }
+
+    @Test fun `network recovery opens an exhausted round only after failure cooldown`() {
+        val h = Host(cooldownEnabled = true)
+        h.control.acquire(h.key)
+        for (delay in listOf(2_100L, 4_000L, 8_000L)) {
+            h.complete(false)
+            h.advance(delay)
+        }
+        h.complete(false)
+        repeat(3) { h.control.networkRecovered() }
+        assertEquals(4, h.calls.size)
+        assertEquals(1, h.timers.size)
+        h.advance(2_099)
+        assertEquals(4, h.calls.size)
+        h.advance(1)
+        assertEquals(5, h.calls.size)
+    }
+
+    @Test fun `closing and recreating a different size cannot bypass placement cooldown`() {
+        val h = Host(cooldownEnabled = true)
+        h.control.acquire(h.key)
+        h.complete(false)
+        h.control.close(h.key)
+        val resized = h.key.copy(widthPx = 640, templateRatio = 2f)
+        h.control.acquire(resized)
+        val other = h.key.copy(id = "other")
+        h.control.acquire(other)
+        assertEquals(listOf(h.key, other), h.calls.map { it.key })
+        h.advance(2_100)
+        assertEquals(listOf(h.key, other, resized), h.calls.map { it.key })
+    }
+
+    @Test fun `closing or staying blocked cancels a pending cooldown load`() {
+        for (close in listOf(true, false)) {
+            val h = Host(cooldownEnabled = true)
+            h.cooldown.failed(h.key.id)
+            h.control.acquire(h.key)
+            assertTrue(h.calls.isEmpty())
+            if (close) h.control.close(h.key) else h.control.updateEnvironment(false, false)
+            h.advance(10_000)
+            assertTrue(h.calls.isEmpty())
+            assertTrue(h.timers.isEmpty())
+        }
+    }
+
+    @Test fun `idle prewarm retains its valid load and AdMob ignores TopOn cooldown`() {
+        val h = Host(cooldownEnabled = true)
+        h.cooldown.failed(h.key.id)
+        h.control.acquire(h.key).close()
+        val admob = h.key.copy(platform = AdPlatform.ADMOB)
+        h.control.acquire(admob)
+        assertEquals(listOf(admob), h.calls.map { it.key })
+        h.advance(2_100)
+        assertEquals(listOf(admob, h.key), h.calls.map { it.key })
+    }
+
+    @Test fun `take failure does not create SDK failure cooldown`() {
+        val h = Host(cooldownEnabled = true)
+        h.control.acquire(h.key)
+        h.complete(true)
+        h.control.takeFailed(h.key)
+        h.advance(2_000)
+        assertEquals(2, h.calls.size)
+        assertEquals(0L, h.cooldown.remainingMillis(h.key.id))
+    }
+
+    private class Host(platform: AdPlatform = AdPlatform.TOPON, cooldownEnabled: Boolean = false) {
         data class Call(val key: NativeInventoryKey, val deadline: Long?, val complete: (Boolean) -> Unit)
         val key = NativeInventoryKey(platform, "placement")
         var now = 0L
+        val cooldown = TopOnLoadCooldown { now }
         val calls = mutableListOf<Call>()
         val closes = mutableListOf<NativeInventoryKey>()
         val errors = mutableListOf<Throwable>()
@@ -423,12 +525,19 @@ class NativeInventoryControlTest {
             schedule = { action, delay -> timers[action] = now + delay },
             unschedule = { timers.remove(it) },
             prepare = { key, deadline, complete ->
-                calls += Call(key, deadline, complete)
-                onPrepare(complete)
+                val result: (Boolean) -> Unit = { success ->
+                    if (cooldownEnabled && key.platform == AdPlatform.TOPON && !success) cooldown.failed(key.id)
+                    complete(success)
+                }
+                calls += Call(key, deadline, result)
+                onPrepare(result)
                 NativeLoad { cancels++ }
             },
             closeSession = { closes += it; onClose() },
             reportError = { _, _, error -> errors += error },
+            loadDelayMillis = { key ->
+                if (cooldownEnabled && key.platform == AdPlatform.TOPON) cooldown.remainingMillis(key.id) else 0L
+            },
         )
         fun complete(success: Boolean) = calls.last().complete(success)
         fun advance(millis: Long) {

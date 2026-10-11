@@ -389,6 +389,7 @@ object Ads {
                     attempt.complete()
                 },
                 noAdFailureReason = NO_BID_CANDIDATE,
+                ensureLoaded = { TopOnAds.ensureLoaded(AdFormat.APP_OPEN) },
             )
             initializationStage = InitializationStage.WAITING_FOR_UMP
             onInitialized?.let { callback -> onMain { observeInitialization(callback) } }

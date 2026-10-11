@@ -8,6 +8,7 @@ import com.cashcraft.ads.mediation.AdPlatform
 import com.cashcraft.ads.mediation.Ads
 import com.cashcraft.ads.mediation.ResolvedNativeRequest
 import com.cashcraft.ads.mediation.internal.SdkFailure
+import com.cashcraft.ads.mediation.internal.topon.TopOnLoadCooldown
 
 /** Unrendered inventory only. Every operation runs on the main thread. */
 internal object NativeAdCache {
@@ -126,6 +127,9 @@ internal object NativeAdCache {
             reportError = { key, message, error ->
                 loadEvents.remove(key)?.failed("failed", null, "native_inventory_load_failed", null)
                 Ads.nativeLog(key.platform.name, warning = true, error = error) { message }
+            },
+            loadDelayMillis = { key ->
+                if (key.platform == AdPlatform.TOPON) TopOnLoadCooldown.shared.remainingMillis(key.id) else 0L
             })
     }
     private var preloadSequence = 0L

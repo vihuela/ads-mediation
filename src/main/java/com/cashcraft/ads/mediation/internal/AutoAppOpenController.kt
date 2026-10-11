@@ -23,11 +23,13 @@ internal class AutoAppOpenController<T>(
     private val windowMillis: Long = DEFAULT_WINDOW_MILLIS,
     private val checkIntervalMillis: Long = DEFAULT_CHECK_INTERVAL_MILLIS,
     private val onQualified: (Activity, T) -> String? = { _, _ -> null },
+    private val ensureLoaded: () -> Unit = {},
 ) {
     private var foregroundStartedAtMillis = 0L
     private var attempted = false
     private var checkScheduled = false
     private var pendingOpportunity: T? = null
+    private var loadEnsured = false
 
     private val lifecycleListener = object : AdLifecycleMonitor.Listener {
         override fun onActivityResumed(activity: Activity) {
@@ -74,6 +76,7 @@ internal class AutoAppOpenController<T>(
     private fun beginOpportunityIfNeeded() {
         if (!isEnabled() || !isProviderReady() || attempted || pendingOpportunity != null) return
         if (NativeInteractions.blocksAutoAppOpen()) { attempted = true; return }
+        loadEnsured = false
         pendingOpportunity = beginOpportunity()
     }
 
@@ -113,6 +116,12 @@ internal class AutoAppOpenController<T>(
             onQualified(checkNotNull(activity), opportunity)?.let { finishOpportunity(it); return }
             // Qualification callbacks may synchronously background or cancel this opportunity.
             if (attempted || pendingOpportunity !== opportunity || !AdLifecycleMonitor.isAppInForeground) return
+            if (!loadEnsured) {
+                // 真正的新机会只触发一次补库存，后续检查不能重开耗尽轮次。
+                loadEnsured = true
+                ensureLoaded()
+                if (attempted || pendingOpportunity !== opportunity || !AdLifecycleMonitor.isAppInForeground) return
+            }
         }
         val adAvailable = isAdAvailable()
         when (

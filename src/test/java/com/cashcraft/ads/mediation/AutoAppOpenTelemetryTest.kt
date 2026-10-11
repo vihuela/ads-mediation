@@ -96,9 +96,12 @@ class AutoAppOpenTelemetryTest {
         assertEquals(1, events.size) // Repeated qualification checks cannot publish another POSITION.
         advance(7_001)
         assertCorrelatedFailure(attempt, "no_preloaded_ad")
+        spyOnReadyInventory()
         automatic.onAdAvailable()
         advance(1_000)
         assertEquals(2, events.size)
+        assertEquals(0, inventoryReads)
+        assertEquals(0, shows)
         assertGateReleased()
     }
 
@@ -113,6 +116,30 @@ class AutoAppOpenTelemetryTest {
         assertEquals(0, inventoryReads)
         assertEquals(0, shows)
         assertGateReleased()
+    }
+
+    @Test fun `each qualified automatic opportunity ensures stock once without reviving the expired one`() {
+        var loads = 0
+        val ensure: () -> Unit = { loads++ }
+        ReflectionHelpers.setField(automatic, "ensureLoaded", ensure)
+        val first = begin()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(1, loads)
+        advance(500)
+        assertEquals(1, loads)
+        advance(7_001)
+        assertCorrelatedFailure(first, "no_preloaded_ad")
+        automatic.onAdAvailable()
+        advance(1_000)
+        assertEquals(1, loads)
+
+        host.pause().stop()
+        host.start().resume().visible().windowFocusChanged(true)
+        advance(100)
+        assertEquals(2, loads)
+        advance(500)
+        assertEquals(2, loads)
+        assertEquals(2, events.count { it.name == AdEventName.POSITION })
     }
 
     @Test fun `show binding reuses the early session when a readiness signal has no actual bidder`() {
@@ -177,6 +204,9 @@ class AutoAppOpenTelemetryTest {
     }
 
     @Test fun `position listener cancellation prevents inventory read and show`() {
+        var loads = 0
+        val ensure: () -> Unit = { loads++ }
+        ReflectionHelpers.setField(automatic, "ensureLoaded", ensure)
         spyOnReadyInventory()
         onEvent = { if (it.name == AdEventName.POSITION) automatic.finishOpportunity("opportunity_cancelled") }
         val attempt = begin()
@@ -185,6 +215,7 @@ class AutoAppOpenTelemetryTest {
         assertCorrelatedFailure(attempt, "opportunity_cancelled")
         assertEquals(0, inventoryReads)
         assertEquals(0, shows)
+        assertEquals(0, loads)
         assertGateReleased()
     }
 

@@ -18,6 +18,7 @@ import com.cashcraft.ads.mediation.ResolvedNativeRequest
 import com.cashcraft.ads.mediation.AdPlatform
 import com.thinkup.core.api.AdError
 import com.cashcraft.ads.mediation.internal.SdkFailure
+import com.cashcraft.ads.mediation.internal.topon.TopOnLoadCooldown
 import com.cashcraft.ads.mediation.internal.analyticsErrorDetail
 import com.thinkup.core.api.TUAdConst
 import com.thinkup.core.api.TUAdInfo
@@ -82,124 +83,10 @@ internal class TopOnNativeProvider : NativeProvider {
         callbacks: NativeCallbacks,
     ): NativeLoad {
         require(widthPx > 0) { "native_width_invalid" }
-
-        val requestGeneration = NativeAdCache.generation
-        val completion = AtomicBoolean(false)
-        var refreshed = false
-        var refresh: NativeLoad? = null
-        val loader = try {
-            TUNative(activity.applicationContext, request.adUnitId, null)
-        } catch (failure: Throwable) {
-            NativeMainThread.run { callbacks.failed("native_load_exception") }
-            return NativeLoad { }
-        }
-        fun finish(): Boolean {
-            if (!completion.compareAndSet(false, true)) return false
-            refresh?.cancel()
-            refresh = null
-            runCatching { loader.setAdListener(null) }
-                .onFailure { Ads.nativeLog("TopOn", warning = true, error = it) { "移除加载监听失败" } }
-            return true
-        }
-        val networkListener = object : TUNativeNetworkListener {
-            override fun onNativeAdLoaded() {
-                NativeMainThread.run {
-                    if (completion.get()) return@run
-                    val candidate = try {
-                        check(requestGeneration == NativeAdCache.generation) { "native_consent_changed" }
-                        clearStaleSdkAds(loader, requestGeneration)
-                        findTopOnNativeCache(loader.checkValidAdCaches(), requestGeneration) { it?.localExtra }
-                    } catch (failure: Throwable) {
-                        if (finish()) callbacks.failed(failure.message ?: "native_load_setup_failed")
-                        return@run
-                    }
-                    if (candidate == null) {
-                        if (refresh != null) return@run
-                        if (refreshed) {
-                            if (finish()) callbacks.failed("native_consent_generation_mismatch")
-                            return@run
-                        }
-                        // 清除旧库存后SDK仍可能回调旧成功；退出回调栈后只刷新一次，不递归消耗队列。
-                        refreshed = true
-                        refresh = NativeMainThread.post {
-                            refresh = null
-                            if (!completion.get()) {
-                                try {
-                                    check(requestGeneration == NativeAdCache.generation) { "native_consent_changed" }
-                                    clearStaleSdkAds(loader, requestGeneration)
-                                    loader.makeAdRequest()
-                                } catch (failure: Throwable) {
-                                    if (finish()) callbacks.failed(failure.message ?: "native_load_exception")
-                                }
-                            }
-                        }
-                        return@run
-                    }
-                    // Claim before getNativeAd: duplicate/late callbacks must not consume the cache.
-                    if (!finish()) return@run
-                    var acquired: NativeAd? = null
-                    var initialized: TopOnNativeAd? = null
-                    val handle = try {
-                        check(requestGeneration == NativeAdCache.generation) { "native_consent_changed" }
-                        val ad = takeOwnedAd(loader, requestGeneration, request.position)
-                            ?: throw IllegalStateException("native_owned_inventory_unavailable")
-                        acquired = ad
-                        TopOnNativeAd(ad, request, widthPx, callbacks).also {
-                            initialized = it
-                            it.installListeners()
-                        }
-                    } catch (failure: Throwable) {
-                        initialized?.destroy() ?: acquired?.let { releaseTopOnAd(it) }
-                        callbacks.failed(failure.message ?: "native_load_setup_failed")
-                        return@run
-                    }
-                    try {
-                        callbacks.loaded(handle)
-                    } catch (failure: Throwable) {
-                        handle.destroy()
-                        throw failure
-                    }
-                }
-            }
-
-            override fun onNativeAdLoadFail(error: AdError) {
-                NativeMainThread.run {
-                    if (!finish()) return@run
-                    val reason = if (
-                        error.code.contains("no_fill", ignoreCase = true) ||
-                        error.desc.contains("no fill", ignoreCase = true)
-                    ) "no_fill" else "native_load_failed"
-                    callbacks.failed(reason, error.code, error.analyticsErrorDetail())
-                }
-            }
-        }
-        try {
-            loader.setAdListener(networkListener)
-            val extra = mutableMapOf<String, Any>(
-                TUAdConst.KEY.AD_CHOICES_PLACEMENT to TUAdConst.AD_CHOICES_PLACEMENT_TOP_RIGHT,
-                NATIVE_CONSENT_GENERATION to requestGeneration,
-            )
-            request.topOnTemplateAspectRatio?.let { ratio ->
-                extra[TUAdConst.KEY.AD_WIDTH] = widthPx
-                extra[TUAdConst.KEY.AD_HEIGHT] = templateHeight(widthPx, ratio)
-            }
-            loader.setLocalExtra(extra)
-            clearStaleSdkAds(loader, requestGeneration)
-            loader.makeAdRequest()
-        } catch (failure: Throwable) {
-            if (finish()) NativeMainThread.run { callbacks.failed("native_load_exception") }
-        }
-        return NativeLoad {
-            if (completion.compareAndSet(false, true)) NativeMainThread.run {
-                refresh?.cancel()
-                refresh = null
-                runCatching { loader.setAdListener(null) }
-                    .onFailure { Ads.nativeLog("TopOn", warning = true, error = it) { "移除加载监听失败" } }
-            }
-        }
+        // 直载也走共享库存，避免同一广告位绕过冷却和加载去重。
+        return NativeAdCache.load(activity, request, widthPx, allowTemplate = true, callbacks = callbacks)
     }
 
-    /** 与一次性过渡加载共用许可标记、句柄和素材绑定，不持有页面。 */
     fun inventory(context: android.content.Context, key: NativeInventoryKey): Inventory =
         Inventory(context.applicationContext, key)
 
@@ -213,9 +100,12 @@ internal class TopOnNativeProvider : NativeProvider {
         fun prepare(complete: (Boolean, SdkFailure?) -> Unit): NativeLoad {
             check(!closed) { "native_inventory_closed" }
             val generation = ++token
+            var settled = false
             val listener = object : TUNativeNetworkListener {
                 override fun onNativeAdLoaded() {
                     NativeMainThread.post {
+                        if (settled) return@post
+                        settled = true
                         if (closed) clearOwnedCaches()
                         else if (token == generation) complete(available(), null)
                     }
@@ -223,6 +113,9 @@ internal class TopOnNativeProvider : NativeProvider {
                 override fun onNativeAdLoadFail(error: AdError) {
                     val failure = SdkFailure(error.code, error.analyticsErrorDetail())
                     NativeMainThread.post {
+                        if (settled) return@post
+                        settled = true
+                        TopOnLoadCooldown.shared.failed(key.id)
                         if (!closed && token == generation) complete(false, failure)
                     }
                 }
@@ -246,7 +139,13 @@ internal class TopOnNativeProvider : NativeProvider {
                     session is String && session != sessionId
                 }
                 if (!previous.isNullOrEmpty()) loader.clearCache(previous)
-                loader.makeAdRequest()
+                try {
+                    loader.makeAdRequest()
+                } catch (failure: Exception) {
+                    settled = true
+                    TopOnLoadCooldown.shared.failed(key.id)
+                    throw failure
+                }
             } catch (failure: Exception) {
                 token++
                 runCatching { loader.setAdListener(null) }
