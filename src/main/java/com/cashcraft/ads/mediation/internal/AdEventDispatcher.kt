@@ -170,7 +170,7 @@ internal class AdEventDispatcher(
     }
 }
 
-/** Keep the business ID intact; ad_type already identifies the format. */
+/** Keep the business ID intact; ad_format already identifies the format. */
 internal fun String.normalizedAdPosition(): String = trim().ifEmpty { "unknown" }
 
 internal fun interface AdLoadClock {

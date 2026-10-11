@@ -126,7 +126,7 @@ internal class AdsModuleLogger(
             tag,
             buildString {
                 append("ad_show_exception")
-                append(" ad_type=").append(format.analyticsValue)
+                append(" ad_format=").append(format.analyticsValue)
                 append(" position=").append(position.oneLine())
                 append(" session_id=").append(sessionId)
                 append(" reason=").append(reason.oneLine())
@@ -141,7 +141,7 @@ internal fun formatAdEventLogMessage(event: AdEvent): String = buildString {
     append("ad_event=").append(event.name.analyticsName)
     append(" ad_platform=").append(event.platform.analyticsValue)
     append(" mediation_mode=").append(event.mediationMode.analyticsValue)
-    append(" ad_type=").append(event.format.analyticsValue)
+    append(" ad_format=").append(event.format.analyticsValue)
     if (!event.isLoadEvent) append(" position=").append(event.position.oneLine())
     append(" session_id=").append(event.sessionId)
     append(" number=").append(event.number)

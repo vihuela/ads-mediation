@@ -457,7 +457,7 @@ TopOn SDK 管理，目前没有在 `BiddingProviderConfig` 暴露缓存数量。
 需要等待广告就绪、并让展示资格绑定到页面或业务场景时，请使用[全屏展示机会接入说明](docs/fullscreen-display-opportunities.md)。其中包含开屏、插屏、激励的新 API、取消和超时结果、Activity/Navigation/Compose 生命周期接入，以及关闭旧自动开屏的迁移方式。
 
 `position` 保留接入方传入的业务场景 ID（去除首尾空白，空值使用 `unknown`），不追加广告类型后缀。
-展示相关日志和事件上报使用同一个 ID，广告类型由独立的 `ad_type` 字段表示。
+展示相关日志和事件上报使用同一个 ID，广告类型由独立的 `ad_format` 字段表示。
 加载事件（`ad_load` / `ad_loaded` / `ad_load_fail`）以独立 `request_id` 关联加载过程，不携带业务场景或展示会话。
 
 ```kotlin
@@ -593,7 +593,7 @@ TopOn 开屏/Native 在展示回调缺少金额时仍记录曝光，省略收益
 
 | v2 analytics key | 说明 |
 | --- | --- |
-| `ad_type` | `app_open`、`interstitial`、`rewarded`、`native` 或 `banner` |
+| `ad_format` | `app_open`、`interstitial`、`rewarded`、`native` 或 `banner` |
 | `ad_platform` | `admob`、`topon`；选定平台前的失败为 `unknown`；`ad_position` 不传 |
 | `mediation_mode` | `admob`、`topon` 或 `bidding` |
 | `position_id` / `ad_session_id` | 非加载事件的业务场景和展示会话；Banner 同一页面 active 周期共享会话，场景拦截只含 `position_id` |

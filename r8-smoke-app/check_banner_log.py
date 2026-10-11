@@ -9,7 +9,7 @@ if len(sys.argv) != 3:
 events = [
     dict(re.findall(r"(\w+)=(\S+)", line))
     for line in dict.fromkeys(Path(sys.argv[1]).read_text().splitlines())
-    if "ad_type=banner " in line and f"slot_id={sys.argv[2]} " in line
+    if "ad_format=banner " in line and f"slot_id={sys.argv[2]} " in line
 ]
 
 def named(name):

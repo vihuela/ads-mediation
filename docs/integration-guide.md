@@ -605,7 +605,7 @@ Native 的每次实际加载尝试分别计数：TopOn 首次加载及有限重�
 | `ad_reward_earned` | 激励平台确认奖励 |
 | `ad_banner_refresh` | Banner 刷新事件 |
 
-`position` 使用稳定的业务场景名，如 `startup`、`level_complete`、`home_bottom`，不要传 SDK 广告位 ID。全屏展示会去除首尾空白，空值归一为 `unknown`；Native 则拒绝空位置。展示事件的广告类型由 `ad_type` 区分，加载事件不携带 `position`。
+`position` 使用稳定的业务场景名，如 `startup`、`level_complete`、`home_bottom`，不要传 SDK 广告位 ID。全屏展示会去除首尾空白，空值归一为 `unknown`；Native 则拒绝空位置。展示事件的广告类型由 `ad_format` 区分，加载事件不携带 `position`。
 
 全屏机会准入通过即上报一次 `ad_position`，等待超时、取消或无填充均用同一 `ad_session_id` 收口；未通过准入的请求不补造 position。Banner 页面周期及 Native 同一周期内的失败重试不重复上报 position，不能直接套用一次 position 等于一次曝光或失败的数量等式。
 
@@ -679,7 +679,7 @@ if (Ads.isPrivacyOptionsRequired) {
 adb logcat -v threadtime AdsMediation:D '*:S'
 ```
 
-定位一次展示时保留 `position`、`ad_type`、`session_id`、`reason` 和平台错误码；加载通过 `request_id` 关联。不要只看 `READY` 状态判断展示、曝光或收益已经发生。
+定位一次展示时保留 `position`、`ad_format`、`session_id`、`reason` 和平台错误码；加载通过 `request_id` 关联。不要只看 `READY` 状态判断展示、曝光或收益已经发生。
 
 ## 10 宿主接入验收
 

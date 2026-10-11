@@ -24,7 +24,7 @@ class AdEventTest {
                 (name == AdEventName.DISMISS && format == AdFormat.BANNER) ||
                 (name == AdEventName.REWARD && format != AdFormat.REWARDED)
             if (unsupported) { assertTrue(parameters.isEmpty()); continue }
-            assertEquals(format.analyticsValue, parameters["ad_type"])
+            assertEquals(format.analyticsValue, parameters["ad_format"])
             if (name in setOf(AdEventName.POSITION, AdEventName.SCENE_SKIP)) {
                 assertFalse(parameters.containsKey("ad_platform"))
                 assertFalse(parameters.containsKey("ad_unit_id"))
@@ -94,7 +94,7 @@ class AdEventTest {
     @Test fun `scene skip has only canonical identity type and reason`() {
         for ((raw, canonical) in mapOf("platform_disabled" to "platform_disabled",
             "daily_show_limit" to "show_rate_limited", "daily_click_limit" to "click_rate_limited")) {
-            assertEquals(mapOf("position_id" to "business-position", "ad_type" to "interstitial", "reason" to canonical),
+            assertEquals(mapOf("position_id" to "business-position", "ad_format" to "interstitial", "reason" to canonical),
                 event(AdEventName.SCENE_SKIP).copy(reason = raw, platformKnown = false).analyticsParameters())
         }
         assertTrue(event(AdEventName.SCENE_SKIP).copy(reason = "private-body").analyticsParameters().isEmpty())
@@ -107,7 +107,7 @@ class AdEventTest {
                     platform = platform, mediationMode = mode, platformKnown = known,
                 ).analyticsParameters()
                 assertEquals(mapOf(
-                    "ad_type" to format.analyticsValue,
+                    "ad_format" to format.analyticsValue,
                     "mediation_mode" to mode.analyticsValue,
                     "position_id" to "business-position",
                     "ad_session_id" to if (format == AdFormat.BANNER || format == AdFormat.NATIVE) "slot-1" else "display-1",

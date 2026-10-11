@@ -78,7 +78,7 @@ data class AdEvent(
     fun analyticsParameters(): Map<String, Any> {
         if (name == AdEventName.BANNER_REFRESH ||
             (format == AdFormat.BANNER && name == AdEventName.DISMISS)) return emptyMap()
-        val properties = linkedMapOf<String, Any>("ad_type" to format.analyticsValue)
+        val properties = linkedMapOf<String, Any>("ad_format" to format.analyticsValue)
         if (name == AdEventName.SCENE_SKIP) {
             properties["position_id"] = position.takeIf { it.isNotBlank() } ?: return emptyMap()
             properties["reason"] = skipReasons[reason] ?: return emptyMap()

@@ -40,7 +40,7 @@ class AdShowSessionTest {
                 assertEquals(setOf("opportunity-id"), events.map { it.sessionId }.toSet())
                 val bid = events.single { it.name == AdEventName.BID_RESULT }.analyticsParameters()
                 assertEquals("opportunity-id", bid["ad_session_id"])
-                assertEquals(format.analyticsValue, bid["ad_type"])
+                assertEquals(format.analyticsValue, bid["ad_format"])
                 assertEquals(platform.analyticsValue, bid["winner_platform"])
                 assertEquals("Pangle", bid["ad_source"])
             }
