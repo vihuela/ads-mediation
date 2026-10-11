@@ -745,6 +745,25 @@ GMA Next-Gen 同时打包。
 R8 smoke app 会让 AdMob、TopOn 和竞价路径都保持可达，然后构建开启压缩和资源收缩的 Release
 APK，用于验证 AAR 的 consumer rules 和 GMA 反射字段。
 
+TopOn 实网测试位于 `src/topOnLiveTest/java`，默认设备测试不编译或运行它。
+运行前需在 TopOn 控制台为设备 GAID 启用测试模式，并在测试目标应用的 `filesDir`
+预置私有 `topon-test.properties`，包含 `applicationId`、`applicationKey`、
+`appOpenPlacement`、`interstitialPlacement`、`rewardedPlacement` 和 `nativePlacement`。
+不要提交该配置。
+
+使用 `topOnLiveTest` 显式选择一个方法；每条命令单独启动 instrumentation 进程，
+避免 TopOn 单例初始化状态串扰。运行全部实网场景时逐条执行，任一失败即停止：
+
+```shell
+for method in testRealLoadsAndSharedNativeRefill \
+  testRealFailuresRespectCooldownAndRetryBudget \
+  testRealSharedNativeTakeRefillAndRender; do
+  ./gradlew :connectedDebugAndroidTest -PtopOnLiveTest="$method" || break
+done
+```
+
+此入口仅接受上述单个方法名；不要额外覆盖 instrumentation 的 `class` 参数。
+
 GitHub Actions 中的 `CI` 和 `Publish GitHub Package` 都只支持在 Actions 页面手动触发，不会因
 push、PR 或 tag 自动运行。发布时可填写 `version` 指定版本；本次填写 `1.0.6`。
 

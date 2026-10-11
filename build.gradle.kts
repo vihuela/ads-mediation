@@ -34,6 +34,18 @@ android {
         consumerProguardFiles("consumer-rules.pro")
     }
 
+    providers.gradleProperty("topOnLiveTest").orNull?.let { method ->
+        require(method in listOf(
+            "testRealLoadsAndSharedNativeRefill",
+            "testRealFailuresRespectCooldownAndRetryBudget",
+            "testRealSharedNativeTakeRefillAndRender",
+        )) { "topOnLiveTest must name exactly one TopOnLiveDeviceTest method" }
+        // TopOn cannot be reset between methods; each invocation must start a fresh process.
+        sourceSets.getByName("androidTest").java.srcDir("src/topOnLiveTest/java")
+        defaultConfig.testInstrumentationRunnerArguments["class"] =
+            "com.cashcraft.ads.mediation.TopOnLiveDeviceTest#$method"
+    }
+
     buildFeatures {
         buildConfig = true
     }
