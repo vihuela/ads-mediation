@@ -137,7 +137,7 @@ class AdsApplication : Application() {
             config = AdsConfig(
                 provider = AdMobProviderConfig(ids = AdMobIds.TEST),
                 umpConsent = UmpConsentConfig(enabled = true),
-                // 本文由业务显式触发开屏，避免与旧自动开屏重复。
+                // 关闭已弃用的自动开屏，由业务显式触发。
                 autoShowAppOpen = false,
                 loggingEnabled = BuildConfig.DEBUG,
                 logTag = "AdsMediation",
@@ -313,7 +313,9 @@ val appOpenOpportunity = Ads.showAppOpenWhenReady(
 
 开屏默认等待 `12_000ms`，示例覆盖为 7 秒。当前新接口在原 Activity 暂停或 App 退后台时暂停计时、保留等待；回到同一个 Activity 后继续剩余预算。不要把它按插屏的方式无条件放在 `onPause` 里取消。页面销毁、另一 Activity 恢复、主动取消或场景失效会结束机会。
 
-TopOn 开屏容器由库创建并清理，宿主不用传容器。保留旧自动开屏行为时使用 `autoShowAppOpen = true`，其前台等待窗口为 7 秒；同一场景不要再显式触发一次开屏。本文的 `autoShowAppOpen = false` 也意味着前台返回的开屏由宿主按业务规则自行触发。
+TopOn 开屏容器由库创建并清理，宿主不用传容器。旧自动开屏配置 `AdsConfig.autoShowAppOpen`、`AdsConfig.appOpenPosition` 已标记为弃用（`DeprecationLevel.WARNING`），默认值仍为 `true` 和 `"app_foreground"`，保留旧行为及 7 秒前台等待窗口。
+
+迁移时显式设置 `autoShowAppOpen = false`，在需要展示的业务入口调用 `Ads.showOpen(position)`，将原 `appOpenPosition` 作为 `position` 传入。`showOpen` 会进行开屏/插屏的多平台、多类型竞价，并在没有候选时尝试缓存 Native 兜底；旧自动开屏仅选择开屏类型。已有 `showOpen` 任务退后台会暂停等待，回到原 Activity 后继续；任务已结束后如需再次展示，由宿主重新调用。同一场景不要同时保留旧自动开屏和显式调用。
 
 ### 插屏广告
 

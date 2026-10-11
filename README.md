@@ -47,6 +47,10 @@ implementation("com.cashcraft:ads-mediation:1.0.6")
 `AdsConfig.nativeFullScreenLayout` 一次配置原生兜底布局。现有 `showAppOpenWhenReady`、
 `showRewardedWhenReady` 仍保留原有行为。
 
+旧自动开屏配置 `autoShowAppOpen`、`appOpenPosition` 已标记为弃用（`WARNING`），兼容行为和默认值保持不变。
+新接入或迁移时显式设置 `autoShowAppOpen = false`，在业务入口调用 `Ads.showOpen(position)`，
+原 `appOpenPosition` 通过该调用的 `position` 传入。已有任务回前台后会继续；任务结束后如需再次展示，需重新调用。
+
 `showOpen` 同时等开屏/插页 × AdMob/TopOn：全部候选返回或预算用完后，先做同类型平台比价，
 再比较两个类型胜者；有效 USD/次展示报价越高越优先，已知价优先未知价，同价优先开屏、AdMob。
 没有候选时直接领取全屏原生缓存，原生也没有则结束，不追加网络等待。
@@ -229,8 +233,7 @@ class App : Application() {
                 },
                 loggingEnabled = BuildConfig.DEBUG,
                 logTag = "AdsMediation",
-                autoShowAppOpen = true,
-                appOpenPosition = "app_foreground",
+                autoShowAppOpen = false, // 关闭已弃用的自动开屏，由业务调用 Ads.showOpen(position)。
             ),
             onInitialized = { success ->
                 // success=false 不会崩溃；Ads.state 会变为 FAILED。
@@ -303,8 +306,8 @@ SDK 崩溃；展示回调会返回 `Failed("sdk_initialization_failed")`。如�
 | `revenueListener` | `AdRevenueListener` | 空实现 | 接收 AdMob/TopOn 原生展示级收益对象，专门用于 Tenjin 等 ILRD 接口 |
 | `loggingEnabled` | `Boolean` | SDK Debug 包为 `true` | 控制模块 Logcat 和平台调试日志 |
 | `logTag` | `String` | `AdsMediation` | 模块 Logcat tag，不允许为空 |
-| `autoShowAppOpen` | `Boolean` | `true` | 已启用开屏格式时，App 进入前台自动尝试展示 |
-| `appOpenPosition` | `String` | `app_foreground` | 自动开屏对应的业务场景名 |
+| `autoShowAppOpen` | `Boolean` | `true` | 已弃用；兼容旧前台自动展示。新接入设为 `false`，由业务调用 `Ads.showOpen(position)` |
+| `appOpenPosition` | `String` | `app_foreground` | 已弃用；仅供旧自动开屏使用。迁移后通过 `showOpen(position)` 传入 |
 
 开屏日志沿用原生广告的两层结构，由现有 `loggingEnabled` 控制：
 
@@ -440,8 +443,7 @@ AdsConfig(
     revenueListener = revenueListener,
     loggingEnabled = BuildConfig.DEBUG,
     logTag = "AdsMediation",
-    autoShowAppOpen = true,
-    appOpenPosition = "app_foreground",
+    autoShowAppOpen = false, // 开屏由业务调用 Ads.showOpen(position)。
 )
 ```
 
@@ -832,7 +834,7 @@ Ads.initialize(
             }
         },
         loggingEnabled = BuildConfig.DEBUG,
-        autoShowAppOpen = true,
+        autoShowAppOpen = false, // 开屏由业务调用 Ads.showOpen(position)。
     ),
     onInitialized = { success -> /* 记录状态，不要崩溃 */ },
 )

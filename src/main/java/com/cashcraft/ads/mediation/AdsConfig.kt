@@ -209,7 +209,17 @@ data class AdsConfig(
     val loggingEnabled: Boolean = BuildConfig.DEBUG,
     /** Logcat tag for module-owned ad and UMP diagnostics. */
     val logTag: String = "AdsMediation",
+    /** Legacy foreground trigger; the true default is retained for compatibility. */
+    @Deprecated(
+        message = "Legacy automatic app-open is deprecated. Set autoShowAppOpen = false and call Ads.showOpen(position) from the host.",
+        level = DeprecationLevel.WARNING,
+    )
     val autoShowAppOpen: Boolean = true,
+    /** Business position used only by the legacy automatic app-open flow. */
+    @Deprecated(
+        message = "Legacy automatic app-open position is deprecated. Pass position to Ads.showOpen(position) instead.",
+        level = DeprecationLevel.WARNING,
+    )
     val appOpenPosition: String = "app_foreground",
     /** Foreground waiting budget for showOpen; configure position-specific cold/hot budgets once. */
     val openTimeoutMillis: (position: String) -> Long = { 12_000L },
