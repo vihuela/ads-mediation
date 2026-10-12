@@ -7,36 +7,33 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NativeInventoryControlTest {
-    @Test fun `shared demand merges preparation and last release starts idle window once`() {
+    @Test fun `last page release preserves ready inventory for a six minute return`() {
         val h = Host()
         val a = h.control.acquire(h.key)
         val b = h.control.acquire(h.key)
-        assertEquals(1, h.calls.size)
         h.complete(true)
-        assertTrue(h.control.isReady(h.key))
         a.close()
         assertTrue(h.control.hasDemand(h.key))
-        h.advance(300_000)
-        assertTrue(h.closes.isEmpty())
+        b.close()
         b.close()
         assertFalse(h.control.hasDemand(h.key))
-        h.advance(299_999)
-        b.close()
+        h.advance(360_000)
         assertTrue(h.closes.isEmpty())
-        h.advance(1)
-        assertEquals(listOf(h.key), h.closes)
-        assertFalse(h.control.isReady(h.key))
+        assertTrue(h.control.isReady(h.key))
+        h.control.acquire(h.key)
+        assertEquals(1, h.calls.size)
     }
 
-    @Test fun `idle capacity evicts oldest idle key but never active demand`() {
+    @Test fun `enabled placements are not evicted by unused inventory count`() {
         val h = Host()
-        val active = h.control.acquire(h.key)
-        val idle = (1..5).map { h.key.copy(id = "$it") }
-        idle.forEach { h.control.acquire(it).close() }
-        assertEquals(listOf(idle.first()), h.closes)
+        val keys = (1..6).map { h.key.copy(id = "$it") }
+        keys.forEach { h.control.acquire(it).close(); h.complete(true) }
+        h.advance(360_000)
+        assertTrue(h.closes.isEmpty())
+        keys.forEach { assertTrue(h.control.isReady(it)) }
         assertEquals(6, h.calls.size)
-        active.close()
-        assertEquals(listOf(idle.first(), idle[1]), h.closes)
+        h.control.clear()
+        assertEquals(keys, h.closes)
     }
 
     @Test fun `TopOn retries two four eight seconds and duplicate demand cannot reset exhaustion`() {
@@ -80,21 +77,21 @@ class NativeInventoryControlTest {
         }
     }
 
-    @Test fun `background and consent cancel retries and stale results cannot revive sessions`() {
+    @Test fun `revoked permission cancels retries and stale results cannot revive sessions`() {
         val h = Host()
         h.control.acquire(h.key)
         val stale = h.calls.last().complete
         h.complete(false)
-        h.control.updateEnvironment(foreground = false, permitted = true)
+        h.control.updateEnvironment(permitted = false)
         stale(true)
         h.advance(10_000)
         assertEquals(1, h.calls.size)
         assertFalse(h.control.isReady(h.key))
-        h.control.updateEnvironment(foreground = true, permitted = true)
+        h.control.updateEnvironment(permitted = true)
         assertEquals(2, h.calls.size)
         val previous = h.calls.last().complete
-        h.control.updateEnvironment(foreground = true, permitted = false)
-        h.control.updateEnvironment(foreground = true, permitted = true)
+        h.control.updateEnvironment(permitted = false)
+        h.control.updateEnvironment(permitted = true)
         previous(true)
         assertFalse(h.control.isReady(h.key))
         h.complete(true)
@@ -103,14 +100,14 @@ class NativeInventoryControlTest {
         assertEquals(2, h.closes.size)
     }
 
-    @Test fun `idle inventory is discarded in background and only active demand resumes`() {
+    @Test fun `permission restoration restarts enabled inventory even without page demand`() {
         val h = Host()
         h.control.acquire(h.key).close()
         val active = h.key.copy(id = "active")
         h.control.acquire(active)
-        h.control.updateEnvironment(false, true)
-        h.control.updateEnvironment(true, true)
-        assertEquals(listOf(h.key, active, active), h.calls.map { it.key })
+        h.control.updateEnvironment(false)
+        h.control.updateEnvironment(true)
+        assertEquals(listOf(h.key, active, h.key, active), h.calls.map { it.key })
     }
 
     @Test fun `AdMob session expires from start and replenishment does not renew deadline`() {
@@ -138,7 +135,7 @@ class NativeInventoryControlTest {
         h.onPrepare = { it(false) }
         h.control.acquire(h.key)
         assertEquals(1, h.calls.size)
-        h.onClose = { h.control.updateEnvironment(false, false) }
+        h.onClose = { h.control.updateEnvironment(false) }
         h.control.close(h.key)
         h.advance(10_000)
         assertEquals(1, h.closes.size)
@@ -146,9 +143,9 @@ class NativeInventoryControlTest {
         assertEquals(1, h.cancels)
     }
 
-    @Test fun `network recovery starts only exhausted TopOn rounds with active demand`() {
+    @Test fun `network recovery restarts exhausted TopOn inventory without page demand`() {
         val h = Host()
-        h.control.acquire(h.key)
+        h.control.acquire(h.key).close()
         repeat(4) { index ->
             h.complete(false)
             if (index < 3) h.advance(2_000L shl index)
@@ -194,14 +191,14 @@ class NativeInventoryControlTest {
         val other = h.key.copy(id = "other")
         h.control.acquire(other)
         h.onClose = { error("close failed") }
-        h.control.updateEnvironment(false, false)
+        h.control.updateEnvironment(false)
         assertEquals(listOf(h.key, other), h.closes)
         assertEquals(2, h.cancels)
         assertEquals(2, h.errors.size)
         assertTrue(h.timers.isEmpty())
     }
 
-    @Test fun `reacquiring idle key cancels eviction without preparing it twice`() {
+    @Test fun `reacquiring unused key does not prepare twice and explicit close stops it`() {
         val h = Host()
         h.control.acquire(h.key).close()
         h.advance(299_999)
@@ -211,6 +208,8 @@ class NativeInventoryControlTest {
         assertTrue(h.closes.isEmpty())
         demand.close()
         h.advance(300_000)
+        assertTrue(h.closes.isEmpty())
+        h.control.close(h.key)
         assertEquals(listOf(h.key), h.closes)
     }
 
@@ -256,12 +255,12 @@ class NativeInventoryControlTest {
         h.control.acquire(h.key)
         h.control.acquire(other)
         val stale = h.calls.first().complete
-        h.control.updateEnvironment(true, setOf(AdPlatform.ADMOB))
+        h.control.updateEnvironment(setOf(AdPlatform.ADMOB))
         stale(true)
         assertEquals(listOf(h.key), h.closes)
         assertFalse(h.control.isReady(h.key))
         assertEquals(2, h.calls.size)
-        h.control.updateEnvironment(true, AdPlatform.entries.toSet())
+        h.control.updateEnvironment(AdPlatform.entries.toSet())
         assertEquals(listOf(h.key, other, h.key), h.calls.map { it.key })
         h.complete(true)
         assertTrue(h.control.isReady(h.key))
@@ -270,9 +269,9 @@ class NativeInventoryControlTest {
     @Test fun `clear removes stopped demand and old subscriptions cannot release new demand`() {
         val h = Host()
         val old = h.control.acquire(h.key)
-        h.control.updateEnvironment(false, true)
+        h.control.updateEnvironment(false)
         h.control.clear()
-        h.control.updateEnvironment(true, true)
+        h.control.updateEnvironment(true)
         assertEquals(1, h.calls.size)
         h.control.acquire(h.key)
         old.close()
@@ -281,11 +280,11 @@ class NativeInventoryControlTest {
         assertEquals(1, h.closes.size)
     }
 
-    @Test fun `background demand still reserves its incompatible placement key`() {
+    @Test fun `blocked demand still reserves its incompatible placement key`() {
         val h = Host()
         val key = h.key.copy(widthPx = 320, templateRatio = 2f)
         h.control.acquire(key)
-        h.control.updateEnvironment(false, true)
+        h.control.updateEnvironment(false)
         assertFalse(h.control.hasIncompatibleKey(key))
         assertTrue(h.control.hasIncompatibleKey(key.copy(widthPx = 640)))
         assertFalse(h.control.hasIncompatibleKey(key.copy(id = "other")))
@@ -396,9 +395,9 @@ class NativeInventoryControlTest {
         assertEquals(6, h.calls.size)
         h.complete(true)
         h.control.takeFailed(h.key)
-        h.control.updateEnvironment(false, true)
+        h.control.updateEnvironment(false)
         assertTrue(h.timers.isEmpty())
-        h.control.updateEnvironment(true, true)
+        h.control.updateEnvironment(true)
         assertEquals(7, h.calls.size)
         h.complete(true)
         h.control.takeFailed(h.key)
@@ -426,16 +425,16 @@ class NativeInventoryControlTest {
         assertTrue(h.timers.isEmpty())
     }
 
-    @Test fun `quick background and permission changes retain placement cooldown`() {
+    @Test fun `repeated permission changes retain placement cooldown`() {
         val h = Host(cooldownEnabled = true)
         h.control.acquire(h.key)
         h.complete(false)
         h.advance(300)
-        h.control.updateEnvironment(false, true)
-        h.control.updateEnvironment(true, true)
+        h.control.updateEnvironment(false)
+        h.control.updateEnvironment(true)
         h.advance(300)
-        h.control.updateEnvironment(true, false)
-        h.control.updateEnvironment(true, true)
+        h.control.updateEnvironment(false)
+        h.control.updateEnvironment(true)
         h.advance(1_499)
         assertEquals(1, h.calls.size)
         assertEquals(1, h.timers.size)
@@ -480,7 +479,7 @@ class NativeInventoryControlTest {
             h.cooldown.failed(h.key.id)
             h.control.acquire(h.key)
             assertTrue(h.calls.isEmpty())
-            if (close) h.control.close(h.key) else h.control.updateEnvironment(false, false)
+            if (close) h.control.close(h.key) else h.control.updateEnvironment(false)
             h.advance(10_000)
             assertTrue(h.calls.isEmpty())
             assertTrue(h.timers.isEmpty())
@@ -508,6 +507,125 @@ class NativeInventoryControlTest {
         assertEquals(0L, h.cooldown.remainingMillis(h.key.id))
     }
 
+    @Test fun `unused inventory continues bounded retries and consumption refill`() {
+        val h = Host()
+        h.control.acquire(h.key).close()
+        h.complete(false)
+        h.advance(2_000)
+        assertEquals(2, h.calls.size)
+        h.complete(true)
+        h.control.consumed(h.key)
+        assertEquals(3, h.calls.size)
+        repeat(4) { index ->
+            h.complete(false)
+            if (index < 3) h.advance(2_000L shl index)
+        }
+        h.advance(360_000)
+        assertEquals(6, h.calls.size)
+        assertTrue(h.timers.isEmpty())
+        assertTrue(h.closes.isEmpty())
+        h.control.retry(h.key)
+        assertEquals(7, h.calls.size)
+    }
+
+    @Test fun `unused AdMob inventory expires and restarts while old callbacks stay invalid`() {
+        val h = Host(AdPlatform.ADMOB)
+        h.control.acquire(h.key).close()
+        val first = h.calls.single()
+        first.complete(true)
+        h.advance(3_599_999)
+        assertTrue(h.control.isReady(h.key))
+        assertTrue(h.closes.isEmpty())
+        h.advance(1)
+        assertEquals(listOf(h.key), h.closes)
+        assertEquals(2, h.calls.size)
+        first.complete(true)
+        assertFalse(h.control.isReady(h.key))
+        h.complete(true)
+        assertTrue(h.control.isReady(h.key))
+    }
+
+    @Test fun `new template size replaces only unused incompatible inventory`() {
+        val h = Host()
+        val oldKey = h.key.copy(widthPx = 320, templateRatio = 2f)
+        val newKey = oldKey.copy(widthPx = 640)
+        val demand = h.control.acquire(oldKey)
+        val stale = h.calls.single().complete
+        assertTrue(h.control.hasIncompatibleKey(newKey))
+        demand.close()
+        assertFalse(h.control.hasIncompatibleKey(newKey))
+        h.control.acquire(newKey)
+        assertEquals(listOf(oldKey), h.closes)
+        stale(true)
+        assertFalse(h.control.isReady(oldKey))
+        assertFalse(h.control.isReady(newKey))
+        h.complete(true)
+        assertTrue(h.control.isReady(newKey))
+        demand.close()
+        assertTrue(h.control.hasDemand(newKey))
+    }
+
+    @Test fun `AdMob failed starts clear expiry and exhaust a bounded round then allow explicit retry`() {
+        for (throws in listOf(false, true)) {
+            val h = Host(AdPlatform.ADMOB)
+            h.startSucceeds = false
+            if (throws) h.onPrepare = { error("SDK start failed") }
+            h.control.acquire(h.key).close()
+            val stale = h.calls.first().complete
+            assertNull(h.control.deadline(h.key))
+            for (delay in listOf(2_000L, 4_000L, 8_000L)) {
+                val count = h.calls.size
+                h.control.acquire(h.key).close()
+                stale(true)
+                assertFalse(h.control.isReady(h.key))
+                h.advance(delay - 1)
+                assertEquals(count, h.calls.size)
+                h.advance(1)
+                assertEquals(count + 1, h.calls.size)
+            }
+            assertEquals(4, h.closes.size)
+            assertTrue(h.timers.isEmpty())
+            h.advance(3_600_000)
+            h.control.acquire(h.key).close()
+            assertEquals(4, h.calls.size)
+            h.startSucceeds = true
+            h.onPrepare = {}
+            h.control.retry(h.key)
+            assertEquals(5, h.calls.size)
+            h.complete(true)
+            assertTrue(h.control.isReady(h.key))
+            assertEquals(h.now + 3_600_000, h.control.deadline(h.key))
+        }
+    }
+
+    @Test fun `AdMob started session load failure stays SDK owned without host restart`() {
+        val h = Host(AdPlatform.ADMOB)
+        h.control.acquire(h.key).close()
+        repeat(5) {
+            h.complete(false)
+            h.advance(10_000)
+            h.control.acquire(h.key).close()
+            h.control.retry(h.key)
+        }
+        assertEquals(1, h.calls.size)
+        assertTrue(h.closes.isEmpty())
+        h.complete(true)
+        assertTrue(h.control.isReady(h.key))
+    }
+
+    @Test fun `AdMob start cleanup reentry cannot schedule retries after close or permission revocation`() {
+        for (close in listOf(false, true)) {
+            val h = Host(AdPlatform.ADMOB)
+            h.startSucceeds = false
+            h.onClose = { if (close) h.control.close(h.key) else h.control.updateEnvironment(false) }
+            h.control.acquire(h.key).close()
+            h.advance(3_600_000)
+            assertEquals(1, h.calls.size)
+            assertEquals(1, h.closes.size)
+            assertTrue(h.timers.isEmpty())
+        }
+    }
+
     private class Host(platform: AdPlatform = AdPlatform.TOPON, cooldownEnabled: Boolean = false) {
         data class Call(val key: NativeInventoryKey, val deadline: Long?, val complete: (Boolean) -> Unit)
         val key = NativeInventoryKey(platform, "placement")
@@ -518,6 +636,7 @@ class NativeInventoryControlTest {
         val errors = mutableListOf<Throwable>()
         val timers = mutableMapOf<Runnable, Long>()
         var cancels = 0
+        var startSucceeds = true
         var onPrepare: ((Boolean) -> Unit) -> Unit = {}
         var onClose: () -> Unit = {}
         val control = NativeInventoryControl(
@@ -531,7 +650,7 @@ class NativeInventoryControlTest {
                 }
                 calls += Call(key, deadline, result)
                 onPrepare(result)
-                NativeLoad { cancels++ }
+                if (startSucceeds) NativeLoad { cancels++ } else null
             },
             closeSession = { closes += it; onClose() },
             reportError = { _, _, error -> errors += error },

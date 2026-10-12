@@ -591,8 +591,8 @@ object Ads {
 
     /**
      * 预热初始化配置中的 Native 自渲染库存，不创建页面或曝光。
-     * 可在 initialize 后立即调用；逐平台等待许可、前台和就绪，不占用初始化观察者。
-     * 重复调用合并已有库存；无页面需求时沿用五分钟闲置及后台清理规则。
+     * 可在 initialize 后立即调用；逐平台等待许可和就绪，不占用初始化观察者。
+     * 重复调用合并已有库存；无页面需求及后台仍持续备货，保留过期和许可限制。
      */
     fun preloadNative() = onMain {
         if (!::config.isInitialized) return@onMain
@@ -606,9 +606,8 @@ object Ads {
     }
 
     private fun startPendingNativePreloads() {
-        if (!AdLifecycleMonitor.isAppInForeground) return
         pendingNativePreloads.toMap().forEach { (key, request) ->
-            if (nativeAvailability(key.first).ready) {
+            if (nativeAvailability(key.first).ready && canLoadAds(key.first)) {
                 pendingNativePreloads.remove(key)
                 runCatching { NativeAdCache.preload(application, request) }.onFailure { error ->
                     nativeLog("预加载", warning = true, error = error) { "原生库存预热失败，页面仍可重试" }

@@ -90,10 +90,11 @@ internal class AdMobNativeInventory(
     private var token = 0L
     private var active = false
     private var deadline: Long? = null
+    /** null 表示会话未启动，区别于已启动会话暂时没有库存。 */
     @JvmOverloads
     fun prepare(expiresAt: Long,
         onLoadResult: (ResponseInfo?, SdkFailure?) -> Unit = { _, _ -> },
-        complete: (Boolean) -> Unit): NativeLoad {
+        complete: (Boolean) -> Unit): NativeLoad? {
         check(!active) { "native_preload_already_started" }
         active = true
         deadline = expiresAt
@@ -126,7 +127,12 @@ internal class AdMobNativeInventory(
             close()
             throw failure
         }
-        if (!started) { close(); onLoadResult(null, SdkFailure(null, null)); complete(false) }
+        if (!started) {
+            close()
+            onLoadResult(null, SdkFailure(null, null))
+            complete(false)
+            return null
+        }
         return NativeLoad {
             // 停止本层状态交付；实际 SDK 会话由 close 显式销毁。
             if (token == generation) token++

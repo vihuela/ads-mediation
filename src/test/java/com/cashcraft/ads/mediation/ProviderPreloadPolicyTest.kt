@@ -12,8 +12,11 @@ import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdPolicyChecker
 import com.cashcraft.ads.mediation.internal.AdPolicyRequest
 import com.cashcraft.ads.mediation.internal.AdUsageStore
+import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
+import com.cashcraft.ads.mediation.internal.UmpConsentManager
 import com.cashcraft.ads.mediation.internal.admob.AdMobConfig
 import com.cashcraft.ads.mediation.internal.topon.TopOnAds
+import com.cashcraft.ads.mediation.internal.topon.TopOnFullScreenLoadControl
 import com.cashcraft.ads.mediation.internal.topon.TopOnState
 import com.google.android.libraries.ads.mobile.sdk.appopen.AppOpenAd
 import com.google.android.libraries.ads.mobile.sdk.banner.AdSize
@@ -108,6 +111,43 @@ class ProviderPreloadPolicyTest {
         ShadowBannerPreloader.nextAd = null
         ShadowBannerLoader.loads.clear()
         ShadowBannerLoader.duringLoad = null
+    }
+
+    @Test fun `TopOn background notification preserves retries and allows new loads while display stays blocked`() {
+        val foreground = AdLifecycleMonitor.isAppInForeground
+        val consent = ReflectionHelpers.getStaticField<Any?>(Ads::class.java, "umpConsentManager")
+        val control = ReflectionHelpers.getStaticField<TopOnFullScreenLoadControl>(TopOnAds::class.java, "fullScreenLoadControl")
+        val listener = ReflectionHelpers.getStaticField<AdLifecycleMonitor.Listener>(TopOnAds::class.java, "lifecycleListener")
+        val id = "background-regression"
+        var requests = 0
+        fun request() = control.request(id, isReady = { false }, isLoading = { false }, load = { requests++; true })
+        try {
+            ReflectionHelpers.setStaticField(Ads::class.java, "umpConsentManager",
+                UmpConsentManager(RuntimeEnvironment.getApplication(), UmpConsentConfig(enabled = false), false, "test"))
+            ReflectionHelpers.setStaticField(TopOnAds::class.java, "state", TopOnState.READY)
+            ReflectionHelpers.setStaticField(AdLifecycleMonitor::class.java, "isAppInForeground", true)
+            request()
+            assertEquals(1, requests)
+            assertTrue(control.failed(id))
+
+            ReflectionHelpers.setStaticField(AdLifecycleMonitor::class.java, "isAppInForeground", false)
+            listener.onAppEnteredBackground()
+            shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(2_100))
+            assertEquals(2, requests)
+            assertTrue(control.loaded(id))
+            request()
+            assertEquals(3, requests)
+            assertEquals("app_not_in_foreground", AdLifecycleMonitor.activityShowFailureReason(android.app.Activity()))
+
+            assertTrue(control.loaded(id))
+            checker.policy = AdPolicy(enabled = false)
+            request()
+            assertEquals(3, requests)
+        } finally {
+            control.loaded(id)
+            ReflectionHelpers.setStaticField(Ads::class.java, "umpConsentManager", consent)
+            ReflectionHelpers.setStaticField(AdLifecycleMonitor::class.java, "isAppInForeground", foreground)
+        }
     }
 
     @Test fun `no installed policy retains standalone provider preloading`() {

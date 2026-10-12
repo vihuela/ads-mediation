@@ -115,23 +115,18 @@ class TopOnFullScreenLoadControlTest {
         assertEquals(5, h.requests.size)
     }
 
-    @Test fun `后台暂停保留失败预算和绝对截止`() {
+    @Test fun `连续重试保留失败预算和绝对截止`() {
         val h = Harness()
         h.request()
         h.fail()
         h.advanceTo(1_000)
-        h.control.pause()
-        assertTrue(h.tasks.isEmpty())
         h.advanceTo(1_500)
-        h.control.resume()
         assertEquals(2_100L, h.tasks.single().at)
         h.advanceTo(2_100)
         h.fail()
         h.advanceTo(3_000)
-        h.control.pause()
         h.advanceTo(7_000)
-        h.control.resume()
-        assertEquals(listOf(0L, 2_100L, 7_000L), h.requestTimes())
+        assertEquals(listOf(0L, 2_100L, 6_100L), h.requestTimes())
         h.fail()
         assertEquals(15_000L, h.tasks.single().at)
         h.advanceTo(15_000)
@@ -181,26 +176,17 @@ class TopOnFullScreenLoadControlTest {
         assertEquals(2_100L, h.tasks.single().at)
     }
 
-    @Test fun `注册前已在后台或遗漏后台通知仍不能实际请求`() {
+    @Test fun `首次加载和失败重试按截止时间执行`() {
         val h = Harness()
-        h.foreground = false
         h.request()
         h.control.onPolicyChanged(true)
-        h.advanceTo(10_000)
-        assertTrue(h.requests.isEmpty())
+        assertEquals(listOf(0L), h.requestTimes())
         assertTrue(h.tasks.isEmpty())
-        h.foreground = true
-        h.control.resume()
-        assertEquals(listOf(10_000L), h.requestTimes())
         h.fail()
-        h.foreground = false
-        h.advanceTo(12_100)
-        assertEquals(1, h.requests.size)
-        h.foreground = true
-        h.control.resume()
-        assertEquals(listOf(10_000L, 12_100L), h.requestTimes())
+        h.advanceTo(2_100)
+        assertEquals(listOf(0L, 2_100L), h.requestTimes())
         h.fail()
-        assertEquals(16_100L, h.tasks.single().at)
+        assertEquals(6_100L, h.tasks.single().at)
     }
 
     @Test fun `执行时已有库存或正在加载均不发伪请求`() {
@@ -431,7 +417,6 @@ class TopOnFullScreenLoadControlTest {
     private class Harness {
         var now = 0L
         var allowed = true
-        var foreground = true
         var acceptInvocation = true
         var postCount = 0
         var onReadyCheck: (() -> Unit)? = null
@@ -448,7 +433,7 @@ class TopOnFullScreenLoadControlTest {
                 tasks += Task(task, now + delay)
             },
             cancel = { task -> tasks.removeAll { it.task === task } },
-            canLoad = { allowed && foreground },
+            canLoad = { allowed },
         )
 
         fun slot(id: String = "open") = slots.getOrPut(id) { Slot() }

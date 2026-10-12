@@ -240,7 +240,7 @@ class AdsBannerView(
             updateState(AdShowResult.Failed("provider_${readiness.name.lowercase()}"))
             return
         }
-        if (readiness != BannerReadiness.READY || !eligible()) {
+        if (!canLoad()) {
             adView?.visibility = INVISIBLE
             if (adView == null) updateState(BannerState.Waiting)
             return
@@ -279,14 +279,19 @@ class AdsBannerView(
         }
     }
 
-    private fun eligible(): Boolean {
+    private fun canLoad(): Boolean {
         val activity = context as Activity
-        return !destroyed && businessActive && attached && isShown && windowVisibility == VISIBLE &&
-            hasWindowFocus() && !activity.isFinishing && !activity.isDestroyed &&
+        return !destroyed && businessActive && attached && !activity.isFinishing && !activity.isDestroyed &&
+            owner?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.CREATED) == true &&
+            Ads.bannerReadiness(request.platform) == BannerReadiness.READY && width > paddingLeft + paddingRight
+    }
+
+    private fun canShow(): Boolean {
+        val activity = context as Activity
+        return canLoad() && isShown && windowVisibility == VISIBLE && hasWindowFocus() &&
             (if (activity is LifecycleOwner) activity.lifecycle.currentState == Lifecycle.State.RESUMED
                 else AdLifecycleMonitor.currentActivity === activity) &&
-            owner?.lifecycle?.currentState == Lifecycle.State.RESUMED &&
-            Ads.bannerReadiness(request.platform) == BannerReadiness.READY && width > paddingLeft + paddingRight
+            owner?.lifecycle?.currentState == Lifecycle.State.RESUMED
     }
 
     private fun load(size: AdSize) {
@@ -312,13 +317,13 @@ class AdsBannerView(
             events = relay
             updateState(BannerState.Loading)
             if (!isCurrent(currentGeneration)) return
-            if (!eligible()) { releaseAd("scene_inactive"); return }
+            if (!canLoad()) { releaseAd("scene_inactive"); return }
             // Prepare the current empty View invisibly; callbacks are installed before exposure.
             addView(view, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER))
             view.doOnLayout {
                 view.post {
                     if (!isCurrent(currentGeneration)) return@post
-                    if (!eligible()) { releaseAd("scene_inactive"); return@post }
+                    if (!canLoad()) { releaseAd("scene_inactive"); return@post }
                     if (!checkPolicy(reserve = true) || !isCurrent(currentGeneration)) return@post
                     val preloadedAd = AdMobAds.pollBanner(request, size)
                     val loader = if (preloadedAd == null) AdView(context as Activity).also { loadView = it } else null
@@ -400,7 +405,7 @@ class AdsBannerView(
 
     private fun showIfEligible() {
         val view = adView ?: return
-        if (!eligible()) { view.visibility = INVISIBLE; return }
+        if (!canShow()) { view.visibility = INVISIBLE; return }
         if (bannerAd == null && !failed) return
         if (!checkPolicy(reserve = true)) return
         if (view.parent == null) addView(view, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER))

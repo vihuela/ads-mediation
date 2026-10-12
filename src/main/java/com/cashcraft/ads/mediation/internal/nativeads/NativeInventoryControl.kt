@@ -15,14 +15,13 @@ internal class NativeInventoryControl(
     private val clock: () -> Long,
     private val schedule: (Runnable, Long) -> Unit,
     private val unschedule: (Runnable) -> Unit,
-    private val prepare: (NativeInventoryKey, Long?, (Boolean) -> Unit) -> NativeLoad,
+    private val prepare: (NativeInventoryKey, Long?, (Boolean) -> Unit) -> NativeLoad?,
     private val closeSession: (NativeInventoryKey) -> Unit,
     private val reportError: (NativeInventoryKey, String, Throwable) -> Unit,
     private val loadDelayMillis: (NativeInventoryKey) -> Long = { 0L },
 ) {
     private class Entry(val key: NativeInventoryKey) {
         var demand = 0
-        var idleSince: Long? = null
         var ready = false
         var started = false
         var pending = false
@@ -33,31 +32,30 @@ internal class NativeInventoryControl(
         var operation: NativeLoad? = null
         var retry: Runnable? = null
         var expiry: Runnable? = null
-        var idle: Runnable? = null
     }
 
     private val entries = linkedMapOf<NativeInventoryKey, Entry>()
-    private var foreground = true
     private var permitted = AdPlatform.entries.toSet()
 
     fun acquire(key: NativeInventoryKey): AutoCloseable {
+        // TopOn 同广告位的模板尺寸不能并存；仅替换已无页面需求的旧规格。
+        if (key.platform == AdPlatform.TOPON) entries.values
+            .filter { it.demand == 0 && it.key.platform == key.platform && it.key.id == key.id && it.key != key }
+            .forEach { close(it.key) }
         val entry = entries.getOrPut(key) { Entry(key) }
         entry.demand++
-        entry.idleSince = null
-        entry.idle?.let(unschedule)
-        entry.idle = null
         ensure(entry)
         var released = false
         return AutoCloseable {
             if (!released) {
                 released = true
-                if (entries[key] === entry && --entry.demand == 0) idle(entry)
+                if (entries[key] === entry) entry.demand--
             }
         }
     }
 
     fun isReady(key: NativeInventoryKey): Boolean = entries[key]?.let {
-        foreground && it.key.platform in permitted && it.ready && (it.deadline?.let { end -> clock() < end } != false)
+        it.key.platform in permitted && it.ready && (it.deadline?.let { end -> clock() < end } != false)
     } == true
 
     fun hasDemand(key: NativeInventoryKey): Boolean = (entries[key]?.demand ?: 0) > 0
@@ -65,7 +63,7 @@ internal class NativeInventoryControl(
     fun deadline(key: NativeInventoryKey): Long? = entries[key]?.deadline
 
     fun hasIncompatibleKey(key: NativeInventoryKey): Boolean =
-        entries.keys.any { it.platform == key.platform && it.id == key.id && it != key }
+        entries.values.any { it.demand > 0 && it.key.platform == key.platform && it.key.id == key.id && it.key != key }
 
     fun consumed(key: NativeInventoryKey) {
         val entry = entries[key] ?: return
@@ -88,27 +86,26 @@ internal class NativeInventoryControl(
 
     fun retry(key: NativeInventoryKey) {
         val entry = entries[key] ?: return
-        if (!entry.exhausted || entry.demand == 0) return
+        if (!entry.exhausted || entry.key.platform !in permitted) return
         entry.exhausted = false
         entry.retries = 0
         ensure(entry)
     }
 
     fun networkRecovered() {
-        entries.values.toList().filter { it.key.platform == AdPlatform.TOPON && it.exhausted }
+        entries.values.filter { it.key.platform == AdPlatform.TOPON && it.exhausted }
             .forEach { retry(it.key) }
     }
 
-    fun updateEnvironment(foreground: Boolean, permitted: Boolean) =
-        updateEnvironment(foreground, if (permitted) AdPlatform.entries.toSet() else emptySet())
+    fun updateEnvironment(permitted: Boolean) =
+        updateEnvironment(if (permitted) AdPlatform.entries.toSet() else emptySet())
 
-    fun updateEnvironment(foreground: Boolean, permitted: Set<AdPlatform>) {
-        if (this.foreground == foreground && this.permitted == permitted) return
-        this.foreground = foreground
+    fun updateEnvironment(permitted: Set<AdPlatform>) {
+        if (this.permitted == permitted) return
         this.permitted = permitted.toSet()
         entries.values.toList().forEach { entry ->
-            if (!foreground || entry.key.platform !in this.permitted) {
-                if (entry.demand == 0) close(entry.key) else stop(entry)
+            if (entry.key.platform !in this.permitted) {
+                stop(entry)
             } else {
                 ensure(entry)
             }
@@ -121,18 +118,17 @@ internal class NativeInventoryControl(
 
     fun close(key: NativeInventoryKey) {
         val entry = entries.remove(key) ?: return
-        entry.idle?.let(unschedule)
-        entry.idle = null
         stop(entry)
     }
 
     private fun current(entry: Entry, token: Long) =
-        entries[entry.key] === entry && entry.token == token && foreground && entry.key.platform in permitted
+        entries[entry.key] === entry && entry.token == token && entry.key.platform in permitted
 
     private fun ensure(entry: Entry) {
-        if (entries[entry.key] !== entry || !foreground || entry.key.platform !in permitted || entry.ready ||
+        if (entries[entry.key] !== entry || entry.key.platform !in permitted || entry.ready ||
             entry.pending || entry.retry != null || entry.exhausted) return
-        if (entry.key.platform == AdPlatform.ADMOB && entry.started) return
+        val isAdMob = entry.key.platform == AdPlatform.ADMOB
+        if (isAdMob && entry.started) return
         val delay = loadDelayMillis(entry.key)
         if (delay > 0L) {
             val token = entry.token
@@ -149,7 +145,7 @@ internal class NativeInventoryControl(
         entry.started = true
         entry.pending = true
         val token = ++entry.token
-        if (entry.key.platform == AdPlatform.ADMOB) {
+        if (isAdMob) {
             // SDK 无逐对象加载时刻时按会话起点保守限时；自动补货不能续期。
             entry.deadline = clock() + SESSION_MILLIS
             val expiry = Runnable {
@@ -168,7 +164,15 @@ internal class NativeInventoryControl(
             completed(entry, token, false)
             null
         }
-        if (current(entry, token) && (entry.pending || entry.key.platform == AdPlatform.ADMOB)) {
+        if (operation == null && isAdMob && current(entry, token)) {
+            // 未启动会话不能等待 SDK 自行重试；清理会话时保留本轮启动失败预算。
+            val retries = entry.retries
+            stop(entry)
+            if (current(entry, token + 1)) {
+                entry.retries = retries
+                scheduleRetry(entry)
+            }
+        } else if (current(entry, token) && (entry.pending || isAdMob)) {
             entry.operation = operation
         } else {
             cancel(entry, operation)
@@ -206,21 +210,6 @@ internal class NativeInventoryControl(
         }
     }
 
-    private fun idle(entry: Entry) {
-        if (!foreground || entry.key.platform !in permitted) { close(entry.key); return }
-        entry.idleSince = clock()
-        // 同一毫秒解除需求时仍按实际闲置先后淘汰，而不是按最初创建顺序。
-        entries.remove(entry.key)
-        entries[entry.key] = entry
-        val action = Runnable {
-            if (entries[entry.key] === entry && entry.demand == 0) close(entry.key)
-        }
-        entry.idle = action
-        schedule(action, IDLE_MILLIS)
-        val idle = entries.values.filter { it.demand == 0 }.sortedBy { it.idleSince }
-        idle.take((idle.size - 4).coerceAtLeast(0)).forEach { close(it.key) }
-    }
-
     private fun stop(entry: Entry) {
         val started = entry.started
         val operation = entry.operation
@@ -254,7 +243,6 @@ internal class NativeInventoryControl(
     }
 
     private companion object {
-        const val IDLE_MILLIS = 300_000L
         const val SESSION_MILLIS = 3_600_000L
     }
 }

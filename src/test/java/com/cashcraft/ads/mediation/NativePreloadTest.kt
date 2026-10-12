@@ -10,6 +10,9 @@ import android.view.View
 import com.cashcraft.ads.mediation.admob.AdMobAds
 import com.cashcraft.ads.mediation.admob.AdMobState
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
+import com.cashcraft.ads.mediation.internal.AdPolicyChecker
+import com.cashcraft.ads.mediation.internal.AdUsageStore
+import com.cashcraft.ads.mediation.internal.ShadowMMKV
 import com.cashcraft.ads.mediation.internal.UmpConsentManager
 import com.cashcraft.ads.mediation.internal.topon.TopOnAds
 import com.cashcraft.ads.mediation.internal.topon.TopOnState
@@ -33,10 +36,10 @@ import org.robolectric.annotation.Implements
 import org.robolectric.util.ReflectionHelpers
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [33], manifest = Config.NONE, shadows = [ShadowNativePreloader::class],
+@Config(sdk = [33], manifest = Config.NONE, shadows = [ShadowNativePreloader::class, ShadowMMKV::class],
     instrumentedPackages = ["com.google.android.libraries.ads.mobile.sdk.nativead.NativeAdPreloader\$Companion"])
 class NativePreloadTest {
-    private val fields = listOf("application", "config", "umpConsentManager", "initializationStage", "initializationCallback")
+    private val fields = listOf("application", "config", "umpConsentManager", "initializationStage", "initializationCallback", "policyChecker")
         .associateWith { ReflectionHelpers.getStaticField<Any?>(Ads::class.java, it) }
     private val originalState = AdMobAds.state
     private val originalTopOnState = TopOnAds.state
@@ -51,6 +54,8 @@ class NativePreloadTest {
         ShadowNativePreloader.calls.clear()
         ShadowNativePreloader.callbacks.clear()
         ShadowNativePreloader.available = 0
+        ShadowNativePreloader.startResult = true
+        ShadowNativePreloader.startError = null
         val app = RuntimeEnvironment.getApplication()
         ReflectionHelpers.setStaticField(Ads::class.java, "application", app)
         ReflectionHelpers.setStaticField(Ads::class.java, "config", AdsConfig(
@@ -72,7 +77,7 @@ class NativePreloadTest {
         ReflectionHelpers.setStaticField(AdLifecycleMonitor::class.java, "isAppInForeground", foreground)
     }
 
-    @Test fun `warmup waits for consent foreground and provider without replacing initialization observer`() {
+    @Test fun `background warmup waits for consent and provider without replacing initialization observer`() {
         val config = ReflectionHelpers.getStaticField<AdsConfig>(Ads::class.java, "config")
         ReflectionHelpers.setStaticField(Ads::class.java, "config", config.copy(provider = BiddingProviderConfig(
             config.provider as AdMobProviderConfig,
@@ -80,15 +85,12 @@ class NativePreloadTest {
         ReflectionHelpers.setStaticField(TopOnAds::class.java, "state", TopOnState.INITIALIZING)
         val observer: (Boolean) -> Unit = { error("warmup must not complete initialization") }
         ReflectionHelpers.setStaticField(Ads::class.java, "initializationCallback", observer)
+        ReflectionHelpers.setStaticField(AdLifecycleMonitor::class.java, "isAppInForeground", false)
         stage("WAITING_FOR_UMP")
         Ads.preloadNative()
         Ads.notifyNativeReadiness()
         assertTrue(ShadowNativePreloader.calls.isEmpty())
         stage("PROVIDER_INITIALIZING")
-        ReflectionHelpers.setStaticField(AdLifecycleMonitor::class.java, "isAppInForeground", false)
-        Ads.notifyNativeReadiness()
-        assertTrue(ShadowNativePreloader.calls.isEmpty())
-        ReflectionHelpers.setStaticField(AdLifecycleMonitor::class.java, "isAppInForeground", true)
         ReflectionHelpers.setStaticField(AdMobAds::class.java, "state", AdMobState.INITIALIZING)
         Ads.notifyNativeReadiness()
         assertTrue(ShadowNativePreloader.calls.isEmpty())
@@ -98,11 +100,43 @@ class NativePreloadTest {
         assertEquals(listOf("start:1"), ShadowNativePreloader.calls)
         assertEquals(setOf(AdPlatform.TOPON), pending.values.map { it.platform }.toSet()) // AdMob need not wait for the second SDK.
         assertSame(observer, ReflectionHelpers.getStaticField(Ads::class.java, "initializationCallback"))
-        advance(300_000)
-        assertEquals(listOf("start:1", "destroy"), ShadowNativePreloader.calls)
+        advance(360_000)
+        assertEquals(listOf("start:1"), ShadowNativePreloader.calls)
     }
 
-    @Test fun `cached loser restarts expired warmup and keeps demand until page releases`() {
+    @Test fun `background preserves pending load and accepts SDK results without allowing display`() {
+        val demand = NativeAdCache.acquirePreload(request)
+        val (id, callback) = ShadowNativePreloader.callbacks.entries.single().let { it.key to it.value }
+        val requestId = events.single().requestId
+        ReflectionHelpers.callInstanceMethod<Unit>(AdLifecycleMonitor, "enterBackground")
+        Ads.notifyNativeReadiness()
+        advance(0)
+        assertEquals(listOf("start:1"), ShadowNativePreloader.calls)
+        assertEquals(listOf(AdEventName.LOAD), events.map { it.name })
+
+        ShadowNativePreloader.available = 1
+        callback.onAdPreloaded(id, ResponseInfo(null, "background-response", Bundle(), null, emptyList()))
+        advance(0)
+        assertEquals(listOf(AdEventName.LOAD, AdEventName.LOADED), events.map { it.name })
+        assertEquals(requestId, events.last().requestId)
+        val control = ReflectionHelpers.callInstanceMethod<NativeInventoryControl>(NativeAdCache, "getControl")
+        assertTrue(control.isReady(NativeInventoryKey(AdPlatform.ADMOB, request.adUnitId)))
+        assertEquals("app_not_in_foreground", AdLifecycleMonitor.activityShowFailureReason(Activity()))
+
+        // 后台无页面需求也保留库存；回到前台不重新加载。
+        demand.close()
+        advance(360_000)
+        assertEquals(listOf("start:1"), ShadowNativePreloader.calls)
+        assertTrue(control.isReady(NativeInventoryKey(AdPlatform.ADMOB, request.adUnitId)))
+        ReflectionHelpers.setStaticField(AdLifecycleMonitor::class.java, "isAppInForeground", true)
+        Ads.notifyNativeReadiness()
+        NativeAdCache.acquirePreload(request).close()
+        advance(0)
+        assertEquals(listOf("start:1"), ShadowNativePreloader.calls)
+        assertFalse(events.any { it.name == AdEventName.LOAD_FAIL })
+    }
+
+    @Test fun `cached loser delivers immediately after six minutes and page release preserves warmup`() {
         Ads.preloadNative()
         var destroyed = false
         val cached = object : NativeAdHandle {
@@ -116,8 +150,8 @@ class NativePreloadTest {
             override fun destroy() { destroyed = true }
         }
         NativeAdCache.retain(request, 320, cached, NativeAdCache.generation)
-        advance(300_000)
-        assertEquals(listOf("start:1", "destroy"), ShadowNativePreloader.calls)
+        advance(360_000)
+        assertEquals(listOf("start:1"), ShadowNativePreloader.calls)
         var delivered: NativeAdHandle? = null
         val demand = NativeAdCache.load(Activity(), request, 320, false, object : NativeCallbacks {
             override fun loaded(ad: NativeAdHandle) { delivered = ad }
@@ -131,12 +165,61 @@ class NativePreloadTest {
         })
         assertSame(cached, delivered) // Cache hits preserve immediate delivery as well as ownership.
         advance(300_000)
-        assertEquals(listOf("start:1", "destroy", "start:1"), ShadowNativePreloader.calls)
+        assertEquals(listOf("start:1"), ShadowNativePreloader.calls)
         demand.cancel()
         advance(300_000)
-        assertEquals(listOf("start:1", "destroy", "start:1", "destroy"), ShadowNativePreloader.calls)
+        assertEquals(listOf("start:1"), ShadowNativePreloader.calls)
         assertFalse(destroyed) // Only the page owns the delivered object.
         cached.destroy()
+    }
+
+    @Test fun `policy blocked prewarm stays pending and starts when policy allows without a page`() {
+        ShadowMMKV.reset()
+        val checker = AdPolicyChecker(AdUsageStore(RuntimeEnvironment.getApplication(), 0L))
+        checker.policy = AdPolicy(enabled = false)
+        ReflectionHelpers.setStaticField(Ads::class.java, "policyChecker", checker)
+        Ads.preloadNative()
+        assertTrue(ShadowNativePreloader.calls.isEmpty())
+        assertEquals(1, pending.size)
+        checker.policy = AdPolicy()
+        Ads.notifyNativeReadiness()
+        assertEquals(listOf("start:1"), ShadowNativePreloader.calls)
+        assertTrue(pending.isEmpty())
+    }
+
+    @Test fun `unused prewarm rotates at expiry and rejects previous SDK callbacks`() {
+        Ads.preloadNative()
+        val (id, callback) = ShadowNativePreloader.callbacks.entries.single().let { it.key to it.value }
+        ShadowNativePreloader.available = 1
+        callback.onAdPreloaded(id, ResponseInfo(null, "before-expiry", Bundle(), null, emptyList()))
+        advance(3_599_999)
+        assertEquals(listOf("start:1"), ShadowNativePreloader.calls)
+        advance(1)
+        assertEquals(listOf("start:1", "destroy", "start:1"), ShadowNativePreloader.calls)
+        val count = events.size
+        callback.onAdPreloaded(id, ResponseInfo(null, "expired", Bundle(), null, emptyList()))
+        advance(0)
+        assertEquals(count, events.size)
+        assertFalse(events.any { it.responseId == "expired" })
+    }
+
+    @Test fun `consent restoration resumes unused prewarm with a new SDK session`() {
+        Ads.preloadNative()
+        val (id, callback) = ShadowNativePreloader.callbacks.entries.single().let { it.key to it.value }
+        stage("WAITING_FOR_UMP")
+        NativeAdCache.consentRevoked()
+        Ads.notifyNativeReadiness()
+        advance(360_000)
+        assertEquals(listOf("start:1", "destroy"), ShadowNativePreloader.calls)
+        val count = events.size
+        callback.onAdPreloaded(id, ResponseInfo(null, "revoked", Bundle(), null, emptyList()))
+        advance(0)
+        assertEquals(count, events.size)
+        stage("PROVIDER_INITIALIZING")
+        Ads.notifyNativeReadiness()
+        advance(0)
+        assertEquals(listOf("start:1", "destroy", "start:1"), ShadowNativePreloader.calls)
+        assertFalse(events.any { it.responseId == "revoked" })
     }
 
     @Test fun `SDK refill and retry failures each report once even with cached inventory`() {
@@ -173,6 +256,10 @@ class NativePreloadTest {
         callback.onAdsExhausted(id)
         advance(0)
         assertEquals(6, events.size)
+        advance(360_000)
+        Ads.preloadNative()
+        assertEquals(listOf("start:1"), ShadowNativePreloader.calls)
+        assertEquals(6, events.size)
 
         NativeAdCache.closePreload(request)
         NativeAdCache.acquirePreload(request)
@@ -192,6 +279,11 @@ class NativePreloadTest {
         assertEquals(AdEventName.LOAD_FAIL, first.name)
         assertFalse(first.analyticsParameters().containsKey("load_trigger"))
         assertTrue(first.analyticsParameters().containsKey("latency_ms"))
+        callback.onAdsExhausted(id)
+        advance(360_000)
+        Ads.preloadNative()
+        assertEquals(listOf("start:1"), ShadowNativePreloader.calls)
+        assertEquals(2, events.size)
         callback.onAdPreloaded(id, ResponseInfo(null, "recovered-response", Bundle(), null, emptyList()))
         advance(0)
         assertEquals(listOf(AdEventName.LOAD, AdEventName.LOAD_FAIL, AdEventName.LOAD, AdEventName.LOADED),
@@ -200,6 +292,185 @@ class NativePreloadTest {
         assertNotEquals(first.requestId, events.last().requestId)
         assertEquals(events[2].requestId, events[3].requestId)
     }
+
+    @Test fun `SDK start false reports once and starts a fresh session after two seconds`() {
+        ShadowNativePreloader.startResult = false
+        assertStartRecovery()
+    }
+
+    @Test fun `SDK start exception reports once and starts a fresh session after two seconds`() {
+        ShadowNativePreloader.startError = IllegalStateException("start failed")
+        assertStartRecovery()
+    }
+
+    @Test fun `SDK start false exhausts four attempts until explicit control retry`() {
+        ShadowNativePreloader.startResult = false
+        assertStartExhausted()
+        ShadowNativePreloader.startResult = true
+        control().retry(inventoryKey())
+        assertEquals(5, ShadowNativePreloader.callbacks.size)
+        assertEquals(AdEventName.LOAD, events.last().name)
+        assertEquals(9, events.size)
+    }
+
+    @Test fun `SDK start exceptions exhaust four attempts until explicit page acquisition`() {
+        ShadowNativePreloader.startError = IllegalStateException("start failed")
+        assertStartExhausted()
+        ShadowNativePreloader.startError = null
+        val page = NativeAdCache.load(Activity(), request, 320, false, object : NativeCallbacks {
+            override fun loaded(ad: NativeAdHandle) { error("no SDK inventory was supplied") }
+            override fun failed(reason: String, errorCode: String?, errorDetail: String?) { error(reason) }
+            override fun impression(adSource: String?, responseId: String?, revenue: NativeRevenue?) = Unit
+            override fun clicked(adSource: String?, responseId: String?) = Unit
+            override fun closed() = Unit
+            override fun overlayOpened() = Unit
+            override fun overlayClosed() = Unit
+            override fun paid(revenue: NativeRevenue) = Unit
+        })
+        assertEquals(5, ShadowNativePreloader.callbacks.size)
+        assertEquals(AdEventName.LOAD, events.last().name)
+        assertEquals(9, events.size)
+        page.cancel()
+    }
+
+    @Test fun `consent restoration reopens exhausted SDK startup budget`() {
+        ShadowNativePreloader.startResult = false
+        assertStartExhausted()
+        stage("WAITING_FOR_UMP")
+        NativeAdCache.consentRevoked()
+        Ads.notifyNativeReadiness()
+        advance(360_000)
+        assertEquals(4, ShadowNativePreloader.callbacks.size)
+        ShadowNativePreloader.startResult = true
+        stage("PROVIDER_INITIALIZING")
+        Ads.notifyNativeReadiness()
+        advance(0)
+        assertEquals(5, ShadowNativePreloader.callbacks.size)
+        assertEquals(AdEventName.LOAD, events.last().name)
+        assertEquals(9, events.size)
+    }
+
+    @Test fun `close cancels SDK startup retry and isolates failed session callbacks after reopening`() {
+        ShadowNativePreloader.startResult = false
+        Ads.preloadNative()
+        val old = ShadowNativePreloader.callbacks.entries.single().toPair()
+        assertStartFailures(1)
+        advance(1_999)
+        NativeAdCache.closePreload(request)
+        ShadowNativePreloader.startResult = true
+        advance(360_000)
+        assertEquals(listOf("start:1", "destroy"), ShadowNativePreloader.calls)
+        assertNull(control().deadline(inventoryKey()))
+        assertStartFailures(1)
+        Ads.preloadNative()
+        assertEquals(listOf("start:1", "destroy", "start:1"), ShadowNativePreloader.calls)
+        assertStaleCallbacksIgnored(old)
+    }
+
+    @Test fun `consent withdrawal cancels thrown SDK startup retry and isolates old callbacks after restoration`() {
+        ShadowNativePreloader.startError = IllegalStateException("start failed")
+        Ads.preloadNative()
+        val old = ShadowNativePreloader.callbacks.entries.single().toPair()
+        assertStartFailures(1)
+        advance(1_999)
+        stage("WAITING_FOR_UMP")
+        NativeAdCache.consentRevoked()
+        Ads.notifyNativeReadiness()
+        ShadowNativePreloader.startError = null
+        advance(360_000)
+        assertEquals(listOf("start:1", "destroy"), ShadowNativePreloader.calls)
+        assertNull(control().deadline(inventoryKey()))
+        assertStartFailures(1)
+        stage("PROVIDER_INITIALIZING")
+        Ads.notifyNativeReadiness()
+        advance(0)
+        assertEquals(listOf("start:1", "destroy", "start:1"), ShadowNativePreloader.calls)
+        assertStaleCallbacksIgnored(old)
+    }
+
+    private fun assertStartRecovery() {
+        Ads.preloadNative()
+        val old = ShadowNativePreloader.callbacks.entries.single().toPair()
+        assertEquals(listOf("start:1", "destroy"), ShadowNativePreloader.calls)
+        assertStartFailures(1)
+        assertNull(control().deadline(inventoryKey()))
+        assertFalse(control().isReady(inventoryKey()))
+        ShadowNativePreloader.startResult = true
+        ShadowNativePreloader.startError = null
+        advance(1_999)
+        assertEquals(listOf("start:1", "destroy"), ShadowNativePreloader.calls)
+        advance(1)
+        assertEquals(listOf("start:1", "destroy", "start:1"), ShadowNativePreloader.calls)
+        assertEquals(listOf(AdEventName.LOAD, AdEventName.LOAD_FAIL, AdEventName.LOAD), events.map { it.name })
+        assertNotEquals(events[0].requestId, events[2].requestId)
+        assertStaleCallbacksIgnored(old)
+        val (id, callback) = ShadowNativePreloader.callbacks.entries.last().toPair()
+        ShadowNativePreloader.available = 1
+        callback.onAdPreloaded(id, ResponseInfo(null, "startup-recovered", Bundle(), null, emptyList()))
+        advance(0)
+        assertEquals(listOf(AdEventName.LOAD, AdEventName.LOAD_FAIL, AdEventName.LOAD, AdEventName.LOADED),
+            events.map { it.name })
+        assertEquals(events[2].requestId, events[3].requestId)
+        assertTrue(control().isReady(inventoryKey()))
+        advance(360_000)
+        assertEquals(listOf("start:1", "destroy", "start:1"), ShadowNativePreloader.calls)
+        assertEquals(4, events.size)
+    }
+
+    private fun assertStartExhausted() {
+        Ads.preloadNative()
+        assertStartFailures(1)
+        listOf(2_000L, 4_000L, 8_000L).forEachIndexed { index, delay ->
+            advance(delay - 1)
+            assertStartFailures(index + 1)
+            advance(1)
+            assertStartFailures(index + 2)
+        }
+        assertEquals(List(4) { listOf("start:1", "destroy") }.flatten(), ShadowNativePreloader.calls)
+        assertNull(control().deadline(inventoryKey()))
+        assertFalse(control().isReady(inventoryKey()))
+        ShadowNativePreloader.callbacks.entries.toList().forEach { assertStaleCallbacksIgnored(it.toPair()) }
+        advance(360_000)
+        repeat(3) {
+            Ads.preloadNative()
+            NativeAdCache.acquirePreload(request).close()
+            Ads.notifyNativeReadiness()
+        }
+        advance(14_000)
+        assertEquals(List(4) { listOf("start:1", "destroy") }.flatten(), ShadowNativePreloader.calls)
+        assertStartFailures(4)
+    }
+
+    private fun assertStartFailures(count: Int) {
+        assertEquals(count, ShadowNativePreloader.callbacks.size)
+        assertEquals(List(count) { listOf(AdEventName.LOAD, AdEventName.LOAD_FAIL) }.flatten(), events.map { it.name })
+        events.chunked(2).forEach { assertEquals(it[0].requestId, it[1].requestId) }
+        assertEquals(count, events.filter { it.name == AdEventName.LOAD }.map { it.requestId }.toSet().size)
+        events.filter { it.name == AdEventName.LOAD_FAIL }.forEach {
+            assertFalse(it.analyticsParameters().containsKey("load_trigger"))
+        }
+    }
+
+    private fun assertStaleCallbacksIgnored(old: Pair<String, PreloadCallback>) {
+        val (id, callback) = old
+        val count = events.size
+        val calls = ShadowNativePreloader.calls.toList()
+        val deadline = control().deadline(inventoryKey())
+        ShadowNativePreloader.available = 1
+        callback.onAdFailedToPreload(id, LoadAdError(LoadAdError.ErrorCode.NO_FILL, "late startup failure", null))
+        callback.onAdPreloaded(id, ResponseInfo(null, "late-startup-response", Bundle(), null, emptyList()))
+        callback.onAdsExhausted(id)
+        advance(0)
+        assertEquals(count, events.size)
+        assertEquals(calls, ShadowNativePreloader.calls)
+        assertEquals(deadline, control().deadline(inventoryKey()))
+        assertFalse(control().isReady(inventoryKey()))
+        assertFalse(events.any { it.responseId == "late-startup-response" })
+        ShadowNativePreloader.available = 0
+    }
+
+    private fun control() = ReflectionHelpers.callInstanceMethod<NativeInventoryControl>(NativeAdCache, "getControl")
+    private fun inventoryKey() = NativeInventoryKey(AdPlatform.ADMOB, request.adUnitId)
 
     private fun stage(name: String) = ReflectionHelpers.setStaticField(Ads::class.java, "initializationStage",
         checkNotNull(fields.getValue("initializationStage")!!.javaClass.enumConstants).single { (it as Enum<*>).name == name })
@@ -212,7 +483,8 @@ class ShadowNativePreloader {
     @Implementation fun start(id: String, configuration: PreloadConfiguration, callback: PreloadCallback): Boolean {
         calls += "start:${configuration.bufferSize}"
         callbacks[id] = callback
-        return true
+        startError?.let { throw it }
+        return startResult
     }
     @Implementation fun getNumAdsAvailable(id: String): Int = available
     @Implementation fun destroy(id: String): Boolean { calls += "destroy"; return true }
@@ -220,5 +492,7 @@ class ShadowNativePreloader {
         val calls = mutableListOf<String>()
         val callbacks = mutableMapOf<String, PreloadCallback>()
         var available = 0
+        var startResult = true
+        var startError: Exception? = null
     }
 }

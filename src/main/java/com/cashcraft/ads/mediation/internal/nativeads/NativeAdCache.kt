@@ -58,7 +58,6 @@ internal object NativeAdCache {
 
     private fun updateEnvironment() {
         control.updateEnvironment(
-            com.cashcraft.ads.mediation.internal.AdLifecycleMonitor.isAppInForeground,
             AdPlatform.entries.filter { Ads.nativeAvailability(it).ready && Ads.canLoadAds(it) }.toSet(),
         )
         inventoryChanged()
@@ -69,11 +68,6 @@ internal object NativeAdCache {
         environmentInstalled = true
         Ads.observeNativeReadiness(::updateEnvironment)
         Ads.addPolicyListener { handler.post { updateEnvironment() } }
-        com.cashcraft.ads.mediation.internal.AdLifecycleMonitor.addListener(
-            object : com.cashcraft.ads.mediation.internal.AdLifecycleMonitor.Listener {
-                override fun onAppEnteredForeground(activity: Activity) = updateEnvironment()
-                override fun onAppEnteredBackground() = updateEnvironment()
-            })
     }
     private val control by lazy {
         NativeInventoryControl(SystemClock::elapsedRealtime,
@@ -216,7 +210,7 @@ internal object NativeAdCache {
         require(request.topOnTemplateAspectRatio == null) { "native_preload_requires_self_rendered" }
         val demand = if (request.platform == AdPlatform.ADMOB) acquirePreload(request)
             else acquireTopOnInventory(context, request, 0)
-        // 预热不持有页面需求；让现有闲置计时器限制其寿命。
+        // 页面需求结束不关闭已启用库存；持续备货直到过期轮换、许可限制或显式关闭。
         demand.close()
     }
 
@@ -326,8 +320,7 @@ internal object NativeAdCache {
     }
     fun consentRevoked() {
         inventory.clear()
-        if (environmentInstalled) control.updateEnvironment(
-            com.cashcraft.ads.mediation.internal.AdLifecycleMonitor.isAppInForeground, false)
+        if (environmentInstalled) control.updateEnvironment(false)
     }
 
     fun clear() {

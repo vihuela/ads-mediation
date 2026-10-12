@@ -119,14 +119,6 @@ internal object TopOnAds {
     private lateinit var autoAppOpenController: AutoAppOpenController<AdShowSession>
 
     private val lifecycleListener = object : AdLifecycleMonitor.Listener {
-        override fun onAppEnteredBackground() = onMain {
-            fullScreenLoadControl.pause()
-        }
-
-        override fun onAppEnteredForeground(activity: Activity) = onMain {
-            fullScreenLoadControl.resume()
-        }
-
         override fun onActivityDestroyed(activity: Activity) {
             if (splashContainer?.context === activity) {
                 if (activeAppOpen != null) {
@@ -493,7 +485,7 @@ internal object TopOnAds {
         Ads.canLoadAds(AdPlatform.TOPON) && Ads.consentSnapshot.canRequestAds
 
     private fun canLoadFullScreenAds(): Boolean =
-        state == TopOnState.READY && AdLifecycleMonitor.isAppInForeground && fullScreenLoadAllowed()
+        state == TopOnState.READY && fullScreenLoadAllowed()
 
     private fun loadAppOpen(afterShow: Boolean = false, newOpportunity: Boolean = false) {
         if (!::config.isInitialized || !config.isFormatEnabled(AdFormat.APP_OPEN) ||
