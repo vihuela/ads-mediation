@@ -31,9 +31,9 @@ Ads.initialize(application, AdsConfig(provider = provider))
 Ads.preloadNative()
 ```
 
-`Ads.preloadNative()` 预热初始化配置中的自渲染库存，可在 `initialize` 后立即调用。它独立等待 UMP 允许、应用前台和每个平台 READY，不占用 `observeInitialization` 的单一观察者，也不等待另一平台初始化成功。重复调用合并已有库存，不创建 View、不产生曝光。没有页面需求时沿用五分钟前台闲置及后台关闭；TopOn 模板仍由携带实际尺寸和比例的页面请求准备。
+`Ads.preloadNative()` 预热初始化配置中的自渲染库存，可在 `initialize` 后立即调用。它独立等待 UMP 允许和每个平台 READY，不占用 `observeInitialization` 的单一观察者，也不等待另一平台初始化成功。重复调用合并已有库存，不创建 View、不产生曝光。`Ads.preloadNative()` 或页面首次获取启动对应库存 key，启动后持续备货，后台及没有页面需求时仍补货，不再按五分钟闲置或四个无需求 key 上限淘汰有效库存。TopOn 模板仍由携带实际尺寸和比例的页面请求准备。`Ads.initialize()` 不自动请求 Native，`Ads.preloadNative()` 仍为可选入口。同 placement 不同模板尺寸只允许替换没有页面需求的旧 key，有页面需求的旧 key 不被替换。
 
-页面命中未渲染保留区时也会建立库存需求：已闲置关闭的 SDK 会话重新启动，仍存活的会话保活；当前缓存对象继续立即交付，页面释放时结束需求。
+页面命中未渲染保留区时也会建立库存需求；当前缓存对象继续立即交付，页面释放只结束该页面需求，不关闭已启用 key 的备货。过期沿用 AdMob 一小时会话及 TopOn SDK 有效性判断；许可或策略限制暂时关闭会话并保留已启用 key，恢复允许后自动重建会话并备货，不要求页面需求，并隔离旧许可代次；显式关闭停止对应库存。页面广告仍按 retentionPolicy 处理，未渲染落选对象保留区的四条容量上限不变。
 
 smoke 来源通过构建参数 `-PnativeSmoke=true -PnativePlatform=admob|topon|bidding` 在 Application 初始化时选择；TopOn ID 来自既有 `nativeTestConfig`。Activity 不再读取 `platform/placement/bidding` 来覆盖广告请求。
 
@@ -309,20 +309,22 @@ Fragment检查默认仍用官方AdMob测试ID。显式TopOn运行可另传 `-e p
 
 官方 Google 测试广告仅产生零报价，零价可验证真实库存流程，不阻塞生产接线。真实非零填充仍待后续配置验证，可控非零测试只证明价格算法；Release 构建不替代模板及来源音视频恢复验收。
 
-上述 Release 类覆盖应用内 Activity 切换与真实后台的区分、后台显式关闭、领取触发补货后立即关闭，以及同 key 重建的新队首身份核对；这些历史结果只验证锁定 SDK 的可控机制；当前生产入口已接通共享库存后台清理，新路径设备结果单独记录。后续 HealthTracker 探针通过真实 UMP 调试地域观察请求资格 true→false→true，并驱动已有 Native 就绪通知：旧 TopOn SDK 缓存不能在恢复后交付，新对象带新代次。此为 SDK 资格隔离机制，不是用户点击撤回表单验收，也不证明取消 SDK 网络请求；真实非零报价不再阻塞新预加载生产入口，来源恢复验收仍独立保留。
+上述 Release 类覆盖应用内 Activity 切换与真实后台的区分、后台显式关闭、领取触发补货后立即关闭，以及同 key 重建的新队首身份核对；这些历史结果只验证锁定 SDK 的可控机制；当前生产入口不再因进入后台清理共享库存，后台只拦截展示；本次行为调整的设备结果需另行验证。后续 HealthTracker 探针通过真实 UMP 调试地域观察请求资格 true→false→true，并驱动已有 Native 就绪通知：旧 TopOn SDK 缓存不能在恢复后交付，新对象带新代次。此为 SDK 资格隔离机制，不是用户点击撤回表单验收，也不证明取消 SDK 网络请求；真实非零报价不再阻塞新预加载生产入口，来源恢复验收仍独立保留。
 
 双平台 smoke 可在上述启动命令加入 `--ez bidding true`；使用已配置的 TopOn 测试广告位及 AdMob 官方测试 ID，日志包含 `winner`、两端可用性和 USD 报价。
 
 常见 reason 还包括 `invalid_native_bid_timeout`、`native_bid_timeout`、`native_no_bid_candidate`、`native_conflicting_platform_selection`；原有 reason 包括 `invalid_ad_unit_id`、`invalid_position`、`invalid_template_ratio`、`sdk_not_initialized`、`native_platform_not_configured`、`native_platform_initialization_failed`、`consent_not_obtained`、`no_fill`、`native_load_failed`、`native_layout_invalid`、`unsupported_native_render_mode` 和 `native_template_size_unknown`。平台错误码在可用时单独保留。
 
-页面失败不自动无限重试；仅当前周期 Failed 且满足资格时 retry 生效。共享库存消费后准备下一条，TopOn 单轮最多额外三次重试；后台取消补货，网络恢复或显式 retry 可重开失败轮次。无填充时可收起区域，不阻塞正文；不定时刷新已经展示的广告。单平台冷库存等待最多30秒，双平台仍遵守请求的比价期限（默认七秒）。
+页面失败不自动无限重试；仅当前周期 Failed 且满足资格时 retry 生效。共享库存消费后准备下一条，TopOn 单轮最多按 2/4/8 秒额外重试三次，并遵守同 placement 至少 2.1 秒失败冷却；后台及无人使用时继续加载、补货及退避。耗尽后停止本层重试，网络恢复、新页面显式获取或合资格页面 retry 或许可恢复可重开，网络/许可恢复不要求页面需求；普通通知、重复 preload/ensure、无人使用及单纯回前台不能重开，不无限轮询。无填充时可收起区域，不阻塞正文；不定时刷新已经展示的广告。单平台冷库存等待最多30秒，双平台仍遵守请求的比价期限（默认七秒）。
+
+AdMob 会话启动失败（`NativeAdPreloader.start()` 返回 false 或抛异常）会清理失败会话，并按 2/4/8 秒最多额外启动三次；不会因错误的“已启动”状态等待一小时。耗尽后由新页面获取、合资格页面 retry 或许可/策略恢复重开；重复预加载不会重置预算。已成功启动会话中的无填充、加载失败及库存取空继续由 SDK 处理，不叠加本层启动重试。显式关闭或许可限制会取消待执行的启动重试。
 
 实际完成与未覆盖范围以[当前验证记录](../openspec/changes/refactor-native-ad-loading-and-retention/verification.md)为准；[旧验证记录](../openspec/changes/add-page-native-ads/verification.md)保留历史证据。JUnit、构建/R8、真实 SDK、视觉和来源验收分开记录。测试使用官方 demo ID/明确测试模式，不点击生产广告。
 
 
 ## 本轮实现与能力边界
 
-生产加载入口已接通 AdMob SDK 预加载及 TopOn 共享库存，复用需求合并、消费补货、TopOn 2/4/8 秒退避、五分钟前台闲置与四个闲置 key 上限。两平台先领取实际对象再比价，落选对象进入有界未渲染保留区；不宣称非消费报价后只领取赢家。新 `NativePreloadTransferTest` 只使用官方测试广告，通过公开 API 检查队列变化、取空、自动补货、跨 Activity 展示与图片同对象重新附着；结果及未完成门槛见 [本轮验证记录](../openspec/changes/refactor-native-ad-loading-and-retention/verification.md)。
+生产加载入口已接通 AdMob SDK 预加载及 TopOn 共享库存。已启用 key 持续备货，取消五分钟闲置回收和四个无需求 key 淘汰；保留过期、许可/策略限制、显式关闭及 TopOn 有界退避/冷却。持续备货规则的验证范围以验证记录为准，以下历史结果不代表该规则已通过新的验收。两平台先领取实际对象再比价，落选对象进入有界未渲染保留区；不宣称非消费报价后只领取赢家。新 `NativePreloadTransferTest` 只使用官方测试广告，通过公开 API 检查队列变化、取空、自动补货、跨 Activity 展示与图片同对象重新附着；结果及未完成门槛见 [本轮验证记录](../openspec/changes/refactor-native-ad-loading-and-retention/verification.md)。
 
 最新默认业务页已有真实素材/披露、曝光及退出释放证据，但测试直达不是饮水正常导航。独立新对象的后台61分钟观测已通过：本层一小时缓存上限到期阻止旧对象复用，原始Pangle SDK在61分钟后仍有效，两者不是同一TTL结论。Pangle实际多帧和UID播放器补齐局部卸载/重新附着证据，但未静音基线、附着时pause和生产保留链仍未验证；Google视频进度样本未通过。真实默认工厂的局部Material深色/320dp/font1.3，以及Google双卡/旋转/加载取消已补证，完整来源/分屏矩阵仍缺。详见当前验证记录；共享预加载已接通生产入口，来源保留仍降级释放，完整矩阵未通过。
 

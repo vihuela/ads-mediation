@@ -6,7 +6,7 @@
 
 - 保留 `NativeRequest`、`AdsNativeView`、`AdsNative` 和旧 `NativeLayout.Custom` 接入；内部复用现有 provider、controller、选择器、缓存和日志出口，避免第二套加载管理链。
 - 在锁定版本能力验证通过后，AdMob 使用 `NativeAdPreloader`；TopOn 使用其已有库存能力。优先非消费报价、只领取赢家，消费后补货，落选广告继续留在 SDK；无法可靠关联报价与实际对象的平台采用实际对象比价及有界保留。
-- 分开处理共享库存与已领取对象，限制容量、闲置预热、退避、到期和最多一次重选；跨 Activity 只复用有效且从未渲染的广告。
+- 分开处理共享库存与已领取对象；`Ads.preloadNative()` 或页面首次获取启动库存，初始化不自动请求，已启用 key 在后台及无人使用时持续备货；保留已领取对象容量、有限退避、到期和最多一次重选；跨 Activity 只复用有效且从未渲染的广告。
 - 为 View/Compose 提供 `DESTROY_ON_HIDE` 与 `RETAIN_WHILE_PAGE_ALIVE`，本稿采用前者为兼容默认。保留模式在同一 Activity、同一业务位置和有效页级生命周期内恢复原广告及平台容器；逐来源验证，不把 Activity 存活视为恢复通过。
 - 以现有 `NativeRequest.position` 唯一标识业务广告位置，同位置只允许一个展示容器占用；生命周期提供状态及最终销毁信号，库不生成页面实例编号、不读取导航栈。
 - 增加只读 `NativeAssets` 和 `NativeLayout.Custom.withAssets`，由业务决定布局与样式，库负责素材填充、平台注册、曝光点击和真实收益归因；保留模板与自渲染的边界。

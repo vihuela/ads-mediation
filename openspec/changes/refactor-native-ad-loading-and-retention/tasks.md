@@ -249,3 +249,24 @@ Google默认布局大字真实素材/长文案/CTA披露完整；系统night=yes
 - [x] 将 `AdsBanner`、`AdsNative` 移入 `ads-mediation` 主库，保留公开包名；移除单独 Compose 子工程、smoke app 双重依赖及 HealthTracker 旧坐标映射。
 - [x] 验证主库 204 项 JVM 测试、Release AAR、smoke app Release/R8 和 HealthTracker `:app:compileDebugKotlin`；AAR 类列表含两个 Compose 入口，发布 POM 声明 Compose 传递依赖。
 - 构建会令 Compose 成为主库传递依赖；未发布 SDK、未提升版本号、未做设备验收。
+
+
+## 2026-10-12 已启用 Native 库存持续备货验收
+
+本节取代 2.3–2.5 及 6.6 中关于后台停止、五分钟闲置和四个无需求 key 淘汰的现行要求；原任务文字、勾选和历史验证记录保留，不作为本次调整已验证的证据。本节勾选仅代表源码检查、JVM 回归及 lint，真实 SDK 设备行为未在本次验收。
+
+- [x] 确认 `Ads.preloadNative()` 或页面首次获取启动对应库存 key；预加载仍可选，不新增 initialize 自动请求。取消五分钟闲置回收和四个无需求 key 淘汰，验证后台、无人使用超过五分钟及多 key 有效库存持续备货。
+- [x] 验证 TopOn 同 placement 不同模板尺寸仅替换无页面需求的旧 key，不替换仍有页面需求的 key；已领取未渲染保留区的四条上限不变。
+- [x] 验证 TopOn 每轮首次失败后最多按 2/4/8 秒额外重试三次及 placement 冷却；耗尽后等网络恢复/新页面显式获取/显式 retry/许可恢复，网络恢复不要求页面需求，重复 preload/ensure、普通通知或单纯回前台不重开，不加周期无限重试。
+- [x] 验证许可/策略限制暂时关闭会话但保留已启用 key；恢复后自动重建无页面需求 key 的会话并备货，隔离旧许可代次和迟到回调；显式关闭仍停止对应库存。
+- [x] 确认过期机制沿用 AdMob 一小时会话及 TopOn SDK 有效性判断，已领取未渲染对象期限不因迁移/补货重置；记录对应代码、测试及设备验证的实际范围，历史结果不写作新验证。
+
+- 本次验证：`./gradlew :testDebugUnitTest :lintDebug` 成功，559 项 JVM 测试全部通过，lint 无错误、8 条警告；详见 verification.md 的“2026-10-12 已启用 Native 库存持续备货”。未做真实 SDK 设备及 Release/R8 验证。
+
+
+## 2026-10-12 AdMob 会话启动失败恢复
+
+- [x] 区分 SDK 会话启动失败（返回 false 或抛异常）与已启动会话的普通加载失败；启动失败清理状态和一小时到期任务，按 2/4/8 秒最多额外重试三次。
+- [x] 验证预算耗尽后停止，新页面获取、显式 retry 或许可恢复可重开；关闭和许可撤回取消重试，旧回调及清理期间重入不恢复已停库存。
+- [x] 补充控制器和 SDK 边界回归，更新接入文档与规格；完整 569 项 JVM 测试及 lint 通过，设备测试 Kotlin 和 smoke Java 调用方编译通过。
+- 本次仅修复审查问题 2，未增加 TopOn 后台库存过期主动轮询或补货。未执行真实 SDK 设备测试或 Release/R8。

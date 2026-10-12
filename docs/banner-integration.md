@@ -169,7 +169,7 @@ override fun onDestroyView() {
 使用 `bindBanner()` 的完整、参与编译的 Fragment 示例见 [TraditionalBannerActivity.kt](../r8-smoke-app/src/main/java/com/cashcraft/ads/mediation/smoke/TraditionalBannerActivity.kt)。
 
 - `setActive(false)` 结束业务周期并释放；再次启用创建新 slot。最终 `destroy()` 后不能重新启用。
-- 临时隐藏使用 `visibility = View.INVISIBLE`，保留合法占位。隐藏父容器、失焦、后台及临时脱离会隐藏真实广告；全部资格恢复后复用原实例。
+- 临时隐藏使用 `visibility = View.INVISIBLE`，保留合法占位。后台、失焦和临时隐藏不拦截加载；宿主存活、业务启用、SDK 就绪且容器已附着并有有效宽度时可加载。后台收到加载成功仍隐藏真实广告，恢复展示资格后复用原实例；临时脱离也会隐藏广告，重新附着后再检查资格。
 - 完整页面离开应结束其业务归属。Fragment 的 View owner 销毁会自动释放；不能把所有 `ON_PAUSE` 都视为离页，因为 Dialog、落地页和后台属于临时暂停。
 
 ## 可选预加载与补货

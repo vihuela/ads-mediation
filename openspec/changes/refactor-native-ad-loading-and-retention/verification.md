@@ -741,3 +741,46 @@ Release构建38秒成功。混跑Debug NativeLiveLifecycleTest于Release进程�
 ## 2026-10-01 Native 广告位统一封装
 
 NativeRequest 仅提供 position/topOnTemplateAspectRatio/bidTimeoutMillis，ID 收到初始化配置。JVM 160项、0失败、0错误；核心 Debug androidTest APK、Compose 编译、smoke Debug和R8 Release APK及Debug测试编译通过。完整日志：build/reports/native/unified-config/build.log。未执行新接口真实设备加载；不将旧接口设备证据视为本次通过。smoke 来源通过 -PnativePlatform=admob|topon|bidding 初始化选定，Activity 不再覆盖平台或ID。
+
+
+## 2026-10-12 已启用 Native 库存持续备货
+
+本节记录本次规则变更，取代历史结果中的五分钟闲置回收、四个无需求 key 淘汰及后台停止补货要求；不重写或提升历史 SDK 验证结论。
+
+### 实现范围
+
+- `Ads.preloadNative()` 或首次页面获取启动库存后，最后一个页面需求结束不关闭会话；后台及无人使用仍接受结果、消费补货和有界退避。初始化本身不新增自动 Native 请求。
+- 取消共享库存五分钟回收计时及四个无需求 key 淘汰；已领取未渲染候选的四条保留上限不变。
+- 许可/策略限制停止会话但保留已启用 key，恢复后无人订阅也重新备货；策略阻止首次 preload 时保留待加载登记。显式 close/clear 移除登记，不自动重建。
+- AdMob 保留会话起点一小时上限，到期关闭并重新准备，旧对象期限及旧回调隔离不变；TopOn 沿用 SDK 有效性和领取失败后的有限补货，不新增定时轮询。
+- TopOn 每轮最多三次额外重试，仍遵守 2/4/8 秒退避及广告位失败冷却；耗尽后停止，网络恢复、新页面显式获取、页面 retry 或许可恢复可开启新轮。网络恢复不再要求页面需求。
+- TopOn 同广告位不同模板规格仅替换无页面需求的旧 key，仍有页面需求时继续拒绝冲突规格，避免持久库存阻塞后续尺寸切换。
+
+### 本次验证
+
+- `./gradlew :testDebugUnitTest :lintDebug`：成功，54 个测试类共 **559 项测试，0 失败、0 错误、0 跳过**；lint 无错误、8 条警告。
+- `NativeInventoryControlTest` 32 项：含六分钟返回仍就绪、超过四个无人使用库存不淘汰、无人使用补货及有界失败预算、网络恢复重开、许可恢复、显式关闭、AdMob 到期轮换和模板尺寸替换。
+- `NativePreloadTest` 8 项：使用 SDK 边界 shadow，覆盖后台加载与结果交付、六分钟后保留候选同步交付、无人使用到期轮换、旧回调失效、许可恢复及策略阻止首次预加载后自动开始。
+- 完整测试同时覆盖候选过期/所有权、页面生命周期、Banner、TopOn 全屏冷却/重试等原有回归；`git diff --check` 通过。
+- 日志：`/tmp/ads-mediation-stock-validation.log`。测试 XML 位于 `build/test-results/testDebugUnitTest`，lint 报告位于 `build/reports/lint-results-debug.html`。
+
+### 未覆盖与代价
+
+未运行真实 SDK 设备测试、长时间后台测试或 Release/R8；JVM shadow 不证明真实 SDK 填充、后台调度或立即展示。持续备货会延长已启用库存的资源占用与后台请求；断网、无填充、有限重试耗尽或进程被系统终止时仍可能没有缓存。
+
+
+## 2026-10-12 AdMob 会话启动失败恢复
+
+### 修复范围
+
+SDK preloader 启动返回 false 或抛异常时，不再将库存保留为已启动直至一小时到期。清理失败会话、到期任务及旧回调代次，保留本轮失败预算，按 2/4/8 秒最多额外启动三次；预算耗尽后停止，允许新页面获取、显式 retry 或许可/策略恢复开启新轮。已成功启动会话的普通加载失败和库存耗尽仍由 SDK 处理，不额外启动主库重试。关闭或许可撤回取消待重试任务；清理期间发生关闭或撤回也不得重新排队。
+
+本次仅处理审查问题 2；不新增 TopOn 后台过期主动检测或补货。
+
+### 验证结果
+
+- 命令：`./gradlew :testDebugUnitTest :lintDebug :compileDebugAndroidTestKotlin :r8-smoke-app:compileDebugJavaWithJavac`，成功。
+- 完整 JVM：**569 项，0 失败、0 错误、0 跳过**；`NativeInventoryControlTest` 35 项、`NativePreloadTest` 15 项。本次新增 10 项，覆盖启动返回 false、抛异常、精确退避与预算耗尽、重新请求和许可恢复、关闭/撤回取消重试、迟到回调隔离及清理重入；强化正常 SDK 加载失败不重启的断言。
+- lint：0 错误、8 条警告。设备测试 Kotlin 与 smoke Java 编译通过，验证内部 nullable 返回值的调用兼容性。
+- 日志：`/tmp/ads-mediation-start-fix-validation.log`；测试 XML：`build/test-results/testDebugUnitTest`；lint：`build/reports/lint-results-debug.html`。
+- SDK 边界采用 shadow；未执行真实设备、真实网络填充、长时间后台或 Release/R8 验证。
