@@ -7,6 +7,7 @@ import com.cashcraft.ads.mediation.AdProviderConfig
 import com.cashcraft.ads.mediation.AdMobProviderConfig
 import com.cashcraft.ads.mediation.BiddingProviderConfig
 import com.cashcraft.ads.mediation.TopOnProviderConfig
+import com.cashcraft.ads.mediation.hasAdUnit
 import com.cashcraft.ads.mediation.admob.AdMobAds
 import com.cashcraft.ads.mediation.internal.topon.TopOnAds
 
@@ -42,7 +43,7 @@ internal object AdBiddingCoordinator {
             is BiddingProviderConfig -> listOf(provider.admob, provider.topon)
         }
         val candidates = providers.flatMap { source ->
-            formats.map { format ->
+            formats.filter(source::hasAdUnit).map { format ->
                 val available: Boolean
                 val price: Double?
                 when (source.platform) {
@@ -61,4 +62,25 @@ internal object AdBiddingCoordinator {
         }
         return BidDecision(formats, candidates, BidCandidateSelector.select(candidates, formats))
     }
+}
+
+internal fun BidDecision.toEventData(): AdBidEventData {
+    // Preserve the old fields as snapshots of the requested (primary) format.
+    val primary = formats.first()
+    val admob = candidates.firstOrNull { it.platform == AdPlatform.ADMOB && it.format == primary }
+    val topon = candidates.firstOrNull { it.platform == AdPlatform.TOPON && it.format == primary }
+    return AdBidEventData(
+        winnerPlatform = selection?.platform,
+        admobAvailable = admob?.available == true,
+        topOnAvailable = topon?.available == true,
+        admobValue = admob?.priceUsd,
+        topOnValue = topon?.priceUsd,
+        winningValue = selection?.priceUsd,
+        admobAdUnitId = admob?.adUnitId.orEmpty(),
+        topOnAdUnitId = topon?.adUnitId.orEmpty(),
+        requestedFormat = primary,
+        eligibleFormats = formats,
+        winnerFormat = selection?.format,
+        candidates = candidates,
+    )
 }

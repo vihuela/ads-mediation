@@ -1,18 +1,30 @@
 # Ads Mediation Android SDK
 
-这是一个 Android 全屏广告聚合 SDK，通过统一 API 支持开屏广告、插屏广告和激励广告。
+这是一个 Android 广告聚合 SDK，通过统一 API 支持开屏、插屏、激励和宿主渲染的原生广告。
 宿主可以选择直连 AdMob GMA Next-Gen、TopOn 海外版，或者同时初始化两者并按缓存广告的
 单次展示收益进行端内缓存竞价。
 
-当前稳定版本：`1.0.5`
+当前稳定版本：`1.0.11`
 
 [![打开 AI 接入提示词](https://img.shields.io/badge/AI-%E6%89%93%E5%BC%80%E5%B9%B6%E5%A4%8D%E5%88%B6%E6%8E%A5%E5%85%A5%E6%8F%90%E7%A4%BA%E8%AF%8D-2ea44f)](#10-复制给-ai完整接入提示词)
 
 依赖坐标：
 
 ```kotlin
-implementation("com.cashcraft:ads-mediation:1.0.5")
+implementation("com.cashcraft:ads-mediation:1.0.11")
 ```
+
+### 1.0.11 更新
+
+- 新增统一原生广告 `AdFormat.NATIVE`、`Ads.showNative` 和外部渲染器；列表卡片、Dialog 和
+  全屏 Activity 共用加载、竞价及收益链路，布局和关闭交互由宿主实现。
+- AdMob 原生通过版本化反射配置读取价格并参与竞价，反射失败保留 `null`；内置对应 R8 保留规则。
+  简化反射配置，移除 `regular` 包装层。
+- AdMob 配置要求 Application ID 和至少一个广告位 ID；TopOn 还要求 App Key。
+  其余广告位可留空，未配置的类型不预加载、不参与竞价。这里只校验非空，实际有效性由平台校验。
+- Demo 增加原生卡片、全屏 Dialog、各广告类型及竞价入口，并提供埋点审计脚本，核对
+  `ad_position = ad_impression + ad_show_fail`。
+- 依赖按 AdMob、TopOn 及各网络适配器分组注释。原生接入详见下文“原生广告：外部渲染器”。
 
 ### 1.0.5 更新
 
@@ -101,7 +113,7 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.cashcraft:ads-mediation:1.0.5")
+    implementation("com.cashcraft:ads-mediation:1.0.11")
 }
 ```
 
@@ -227,6 +239,18 @@ SDK 崩溃；展示回调会返回 `Failed("sdk_initialization_failed")`。如�
 ### 2.2 Provider 参数
 
 AdMob 直连：
+
+配置校验在构造 `AdMobIds` / `TopOnIds` 时执行，不满足则抛 `IllegalArgumentException`：
+
+- AdMob：`applicationId` 非空，且开屏、插屏、激励、原生四种 ID 至少一个非空。
+- TopOn：`applicationId`、`applicationKey` 非空，且四种广告位 ID 至少一个非空。
+- 广告 ID 可省略；空字符串、纯空白以及原生的 `null` 均表示未配置。未配置的类型不创建广告、
+  不预加载、不参与竞价。两平台竞价时各自满足上述规则即可，不要求配置相同类型。
+- 未配置开屏时不触发默认自动开屏；混合自动开屏只在开屏或插屏至少配置一项时启用。
+  手动请求未配置的全屏类型返回 `ad_not_configured`，原生沿用 `native_not_configured`。
+
+例如仅接入原生可写 `AdMobIds(applicationId = "...", nativeId = "...")`，或
+`TopOnIds(applicationId = "...", applicationKey = "...", nativePlacementId = "...")`。
 
 ```kotlin
 val provider = AdMobProviderConfig(
@@ -677,11 +701,15 @@ GMA Next-Gen 同时打包。
 
 ## 9. 验证、混淆和发布
 
+1.0.11 发布检查：84 项 JVM 单元测试通过；SDK Lint 无问题，demo Lint 为 0 errors、43 warnings；
+Release R8 构建及本地 Maven 发布通过。Demo Lint 和 R8 仍有告警，见下方真机验证记录。
+本次配置校验调整经过单测和构建检查，未重新进行真机回归；下方真机记录对应各轮测试时的构建。
+
 本地完整验证：
 
 ```shell
 ./gradlew clean testDebugUnitTest lintDebug :r8-smoke-app:assembleRelease publishToMavenLocal \
-  -PVERSION_NAME=1.0.5
+  -PVERSION_NAME=1.0.11
 ```
 
 R8 smoke app 会让 AdMob、TopOn 和竞价路径都保持可达，然后构建开启压缩和资源收缩的 Release
@@ -691,7 +719,7 @@ GitHub Actions 中的 `CI` 和 `Publish GitHub Package` 都只支持在 Actions 
 push、PR 或 tag 自动运行。
 
 本地或手动发布 CI 都会先读取 GitHub Packages 的 `maven-metadata.xml`，找到最高的稳定
-`major.minor.patch` 版本并自动递增 patch。当前为 `1.0.5` 时，下一次会发布 `1.0.6`。
+`major.minor.patch` 版本并自动递增 patch。当前为 `1.0.11` 时，下一次会发布 `1.0.12`。
 
 查看下一版本但不发布：
 
@@ -722,7 +750,7 @@ GitHub Package 版本不可覆盖；脚本默认自动递增可避免重复版�
 请在当前 Android 工程中完整接入 Ads Mediation SDK，并直接修改、编译和验证项目。
 
 固定信息：
-- Maven 坐标：com.cashcraft:ads-mediation:1.0.5
+- Maven 坐标：com.cashcraft:ads-mediation:1.0.11
 - GitHub Packages 仓库：https://maven.pkg.github.com/vihuela/ads-mediation
 - 公共包名：com.cashcraft.ads.mediation
 - 支持 APP_OPEN、INTERSTITIAL、REWARDED
@@ -734,7 +762,7 @@ GitHub Package 版本不可覆盖；脚本默认自动递增可避免重复版�
 1. 检查 settings.gradle.kts，在 dependencyResolutionManagement 中加入 GitHub Packages、
    Pangle、Mintegral 和 TopOn 仓库。GitHub 用户名/token 优先从 Gradle property 或环境变量读取，
    本地再从已被 Git 忽略的 local.properties 读取；绝对不能把 token 写进可提交文件。
-2. 在 App 模块加入 implementation("com.cashcraft:ads-mediation:1.0.5")。
+2. 在 App 模块加入 implementation("com.cashcraft:ads-mediation:1.0.11")。
 3. 为每个 product flavor 设置 manifestPlaceholders["admobApplicationId"]。不要使用生产 ID
    进行测试；开发环境可使用 AdMobIds.TEST 对应的官方测试 App ID。
 4. 检查现有配置来源，选择 AdMob、TopOn 或 Bidding。不要把 App ID、App Key、ad unit ID、
@@ -786,4 +814,254 @@ Ads.showRewarded(activity, "game_tool_refresh") { result ->
     if (result.rewardEarned) grantReward(result.sessionId)
 }
 Ads.showAppOpen(activity, "manual") { result -> /* 收口 */ }
+```
+
+## 原生广告：外部渲染器
+
+### 配置与加载
+
+在现有配置中追加 `AdMobIds.nativeId`、`TopOnIds.nativePlacementId` 即可开启对应平台。
+两项默认为 `null`，已有生产接入不会自动新增原生请求。`AdMobIds.TEST` 已包含官方原生测试 ID。
+`BiddingProviderConfig` 下两边各缓存一条原生广告；未配置原生 ID 的平台不参与原生请求。
+
+```kotlin
+val admob = AdMobProviderConfig(
+    ids = existingAdMobIds.copy(nativeId = "YOUR_NATIVE_AD_UNIT_ID"),
+)
+val topon = TopOnProviderConfig(
+    ids = existingTopOnIds.copy(nativePlacementId = "YOUR_NATIVE_PLACEMENT_ID"),
+)
+// AdsConfig(provider = admob / topon / BiddingProviderConfig(admob, topon))
+```
+
+UMP 同意并完成初始化后自动预加载；消费后补充一条缓存，缓存有效期最长一小时。
+加载失败不无限重试：下一次 `showNative` 或 `preloadNative` 会重试，60 秒未回调会解除加载锁；
+迟到的结果会被销毁。`preloadNative` 是异步请求，通过现有 `LOAD_RESULT` 事件观察结果。
+`isReady(AdFormat.NATIVE)` 只表示存在缓存，最终还需检查本次渲染器是否支持该平台。
+
+`showNative` 只消费当前缓存，不等待网络；空缓存返回 `no_preloaded_ad` 并触发加载。
+Bidding 复用现有选择规则：有有效价格优先，其次价格高者优先，均未知时 AdMob 优先。
+反射配置按 SDK 版本直接定义 `preloading`（队列路径）、`nativeAdPaths`（原生路径）和
+共用的 `priceFields`（价格字段），不再使用 `regular` 分类。
+AdMob 原生沿用 remax 的 GMA Next-Gen 1.2.1 反射路径 `a → b → m`，在加载完成时读取
+该广告对象的 `valueMicros` 和币种，将 USD 金额除以 1,000,000 后参与竞价。字段查找包含父类，
+AAR 的 consumer R8 规则保护实际读取的字段。未知 SDK 版本、字段缺失、非 USD 或负值均保留
+`null`，有效的 0 保留为 0；取价不会消费缓存或触发曝光。TopOn 读取缓存广告自身的 USD 价格。
+展示后的 ILRD 仍单独来自 SDK 收益回调，不使用反射价格代替真实收益。
+
+### 渲染接口
+
+`NativeAdRenderers` 按每次展示传入，因此宿主可以用不同实例或闭包控制布局、大小和样式。
+SDK 的素材类型通过 `api` 依赖公开，宿主无需另行添加不同版本的 Google/TopOn SDK。
+
+- `AdMobNativeAdRenderer.createView` 返回未附着的 `NativeAdView`；`bind` 填充素材、设置
+  `headlineView`、`callToActionView` 等，返回可选的 `MediaView`。库随后调用 `registerNativeAd`。
+- `TopOnNativeAdRenderer.createView` 返回未附着的内容 `ViewGroup`；`bind` 填充 `TUNativeMaterial`，
+  返回包含标题、CTA 和可点击视图等绑定信息的 `TUNativePrepareInfo`。库创建 `TUNativeAdView`，
+  完成 `renderAdContainer` 和 `prepare`。模板广告走 SDK 原生模板，不调用自渲染器。
+- 缺少渲染器的自渲染广告不参与本次选择、不消耗缓存；TopOn 模板广告仍可参与。
+- 渲染器需展示广告标识及网络要求的素材，保留 SDK 的 AdChoices/隐私交互。不要替换广告回调、
+  自行注册/销毁广告、模拟点击，或把同一个 View/广告绑定到多个容器。
+
+AdMob 注册规则参考 [Google Next-Gen 原生广告文档](https://developers.google.com/admob/android/next-gen/native/advanced)。
+可编译的两平台渲染器见 [SmokeNativeRenderers.kt](r8-smoke-app/src/main/java/com/cashcraft/ads/mediation/smoke/SmokeNativeRenderers.kt)。
+
+### 展示与释放
+
+```kotlin
+private var nativeHandle: NativeAdHandle? = null
+
+fun renderNative(activity: Activity, container: ViewGroup) {
+    nativeHandle?.destroy()
+    nativeHandle = null
+    Ads.showNative(
+        activity = activity,
+        container = container,
+        position = "detail_bottom",
+        renderers = NativeAdRenderers(admob = myAdMobRenderer, topon = myTopOnRenderer),
+    ) { result ->
+        when (result) {
+            is NativeAdShowResult.Rendered -> nativeHandle = result.handle
+            is NativeAdShowResult.Failed -> { /* 隐藏占位；通过 LOAD_RESULT 决定下次尝试 */ }
+        }
+    }
+}
+
+// Fragment.onDestroyView、RecyclerView 回收或 Compose DisposableEffect.onDispose
+fun releaseNative() {
+    nativeHandle?.destroy()
+    nativeHandle = null
+}
+```
+
+`Rendered` 表示完成绑定和挂载，真实曝光仅由 SDK 回调报告；点击和收益继续走全局 listener。
+每条展示有自己的 session 和幂等 `destroy()`，销毁只移除本条广告的 View，不清空宿主容器。
+Activity 销毁时会兜底释放；同一 Activity 下多条原生可并存。同一容器重复展示返回
+`native_container_in_use`，先销毁旧句柄再复用。容器临时 detach 不自动销毁，避免 RecyclerView
+短暂离屏或 Compose 重组误销毁，宿主需在真正移除时释放。
+
+`showNative`、`preloadNative`、`destroy` 可以从任意线程调用；渲染、注册、事件和展示结果在主线程执行。
+曝光前销毁会报告 `destroyed_before_impression`；曝光后释放报告 `DISMISS`。
+其他失败包括 `native_not_configured`、`native_renderer_missing`、`native_render_failed`，以及通用
+初始化/同意状态错误。渲染器异常会释放已消费的广告并返回失败，不会影响其他容器。
+
+### 宿主自行构建全屏原生
+
+在宿主的 Activity 或 Dialog 中准备一个容器，照常调用 `showNative`，使用适合大屏布局的渲染器。
+关闭按钮、返回键、倒计时、窗口尺寸和页面跳转均归宿主；关闭时销毁句柄。原生不会锁住全屏广告
+通道、不参与开屏/插屏/激励混合选择，也不会产生激励奖励。宿主如自行编排全屏原生及开屏广告，
+可配置 `autoShowAppOpen = false` 并自行调度开屏，避免恢复页面时自动开屏覆盖原生页面。
+不需要 `FULL_SCREEN_NATIVE` 类型、独立全屏原生 ID 或 SDK 内置 Activity。
+
+[R8 示例应用](r8-smoke-app/src/main/java/com/cashcraft/ads/mediation/smoke/SmokeActivity.kt) 提供
+卡片和宿主全屏 Dialog 两种入口，复用同一个渲染器工厂。AdMob 使用 `AdMobIds.TEST`，TopOn 使用
+`short-drama/config/app.properties` 的 `dev` 应用及 `dev.toponNativeId=n1h7t76th560qm`，
+未使用 `dev.toponFullNativeId`。这些开发 ID 仅用于测试，生产接入请替换。
+
+本地运行示例（连接测试设备后）：
+
+```bash
+./gradlew :r8-smoke-app:installDebug
+adb shell am start -n com.cashcraft.ads.mediation.smoke/.SmokeActivity --es provider admob
+# 切换平台前停止进程，避免同一进程重复初始化不同平台。
+adb shell am force-stop com.cashcraft.ads.mediation.smoke
+adb shell am start -n com.cashcraft.ads.mediation.smoke/.SmokeActivity --es provider topon
+# provider=bidding 或不传时使用双平台竞价。
+```
+
+示例关闭了 UMP 和自动开屏，只用于开发测试；生产应用保留默认 UMP 流程。
+
+原生功能初次验证：78 项 JVM 单元测试通过；原生展示的 Debug APK 和 Release R8 构建通过。
+真机验证了 AdMob 卡片/全屏 Dialog 的曝光、收益和关闭，Google 原生校验器报告 0 个实现问题；
+TopOn（Mintegral 填充）的卡片曝光和收益通过。该开发广告位后续请求返回 4001 空填充，
+因此 TopOn 全屏 Dialog 的实际填充展示尚未验证。Release 构建仍有 Pangle/TikTok 可选依赖缺类告警。
+
+
+原生反射取价的混淆真机验证（GMA Next-Gen 1.2.1）：
+
+- 使用无宿主额外 keep 规则的 Release APK，通过开发签名安装；`ad_bid_result` 中出现
+  `admob_price_available=true`、`admob_native_value=0`，随后有同 session 的曝光和收益回调。
+  官方测试广告本次返回有效的 0 价格。
+- 故障验证仅修改混淆 APK 的 JSON 反射路径为不存在的字段，其余文件（包括 DEX）保持一致。
+  运行结果为 `admob_price_available=false`、`admob_native_value=unknown`；广告仍能展示和回调收益，
+  没有将反射失败替换成 0。验证后设备已恢复正常 Release APK。
+- 这两轮 TopOn 返回 4001 空填充；两平台均有价格时的胜者比较、未知价格回退由单元测试覆盖。
+- 本地验证日志保存在 `build/verification/native-price-r8/normal.log` 和 `fault.log`（不纳入版本控制）。
+
+### 真机 demo 与埋点核对
+
+2026-10-13 TopOn 与短剧同机对照（三星 SM-S931U1 / Android 16）：
+
+- 短剧 `devDebug` 使用发布的 remax `1.0.52_preloading.6`，首次运行成功加载并曝光两条原生，
+  分别来自 Mintegral 和 Topon Adx；恢复短剧原包后再请求也出现 `4001`，底层为
+  Mintegral `3002211:mtg bid response empty`、Adx `50105:rpm filter`。
+  成功后的补缓存还出现过 `4005` 广告源过滤及 `2008` 加载过于频繁。
+- 短剧存在 `adRuntimeIdConfigJson` 动态覆盖：宿主配置 → 缓存非空字段 → 远程非空字段 →
+  SDK 初始化。两次启动的实际远程 JSON 均确认 TopOn App ID、App Key、Native ID 与 demo 一致，
+  原生请求实际使用 `n1h7t76th560qm`。这里只记录 Key 相等性，不复制 Key 到验证报告。
+- 初始化及普通原生请求一致：Application Context、空网络初始化列表、等待初始化回调、
+  `TUNative(...).makeAdRequest()`，普通原生均未设置 `localExtra`。
+  短剧独立全屏原生入口才传宽高，并使用另一个广告位。
+- 版本差异：短剧 / demo 的 TopOn core 为 `6.6.40` / `6.6.22.3`，Mintegral SDK 为
+  `17.1.61` / `17.1.71`，Adx SDK 为 `6.5.79` / `6.5.77`，对应适配器也不同。
+  demo 原版 Release、原版 Debug、对齐现有网络依赖版本、使用短剧包名，以及版本和包名同时
+  对齐的对照包，本轮均返回 `4001`，没有证据表明改版本或包名即可解决。
+- 结论边界：短剧自身的填充结果也会变化；已确认动态 TopOn 凭据没有差异，但尚未定位唯一根因。
+  顺序发起的线上请求受实时填充/过滤状态影响，不能将这些结果当作确定性的服务端规则证明。
+  包名对照保留了短剧现有数据，未清数据；版本对齐未额外引入短剧所有其他网络适配器。
+- 对照脚本、APK、日志和 `comparison.json`、`runtime-id-comparison.json` 位于
+  `build/verification/topon-short-drama/`。未修改短剧源码或正式依赖；设备已恢复短剧原开发包
+  和 demo 原混淆包，并核对安装 APK 的 SHA-256 一致。
+
+2026-10-13 反射配置简化后的 R8 真机复测：移除 `regular`、改用 `nativeAdPaths`，
+并将 `priceFields` 提升为共用字段后，重新构建 Release，在三星 SM-S931U1 / Android 16 验证。
+
+- 正常包：原生卡片、全屏 Dialog 均读到有效价格 `0`，`admob_price_available=true`，
+  竞价选中 AdMob，曝光、收益、关闭齐全；Google 原生校验器报告无实现问题。
+- 故障包：仅将 APK 内 `nativeAdPaths` 改为不存在的字段，三个 DEX 与正常包完全一致。
+  卡片、全屏竞价候选均为 `price_usd=null`、`admob_price_available=false`，没有伪造零价格；
+  未知价格的可用广告仍可兜底展示，曝光、收益、关闭正常。
+- 混合竞价：AdMob 激励/插屏价格均为 `0`，TopOn 激励价格为 `0.0004113` USD，
+  正确选中 TopOn，完成曝光、收益、奖励和关闭。首次在原生 Dialog 未关闭时触发，
+  按预期返回 `activity_window_not_focused`；关闭 Dialog 后重试成功。
+- 恢复正常包后再次展示原生，价格恢复为有效 `0`。共 7 个 session：`ad_position=7`、
+  曝光 6、失败 1，竞价与埋点审计无错误，三个测试进程均无应用崩溃记录。
+- TopOn 原生本轮仍返回 4001 空填充，未覆盖两平台原生同时有价的真机比较。
+- 证据保存在 `build/verification/native-config-r8/`：`normal.log`、`fault.log`、`restored.log`、
+  `verification.json`、`audit.json` 和截图。正常包 `release.apk` SHA-256 为
+  `cac045284bf108d07a2f19bffa6c782150b3b04ceb9873789a701cbf23538209`，设备已恢复该包。
+
+`r8-smoke-app` 同时是可交互 demo 和 R8 消费端。首次打开可选择 AdMob、TopOn 或 Bidding；
+SDK 每个进程只初始化一次，切换模式需强制停止后重新打开。界面包含全部四种已支持广告类型
+（开屏、插屏、激励、原生）、两种混合竞价，以及插屏关闭发业务奖励的策略示例。
+卡片和宿主全屏原生参考 short-drama 的素材排版，XML 位于 `r8-smoke-app/src/main/res/layout/demo_native_*`，
+两平台共用素材布局，`SmokeNativeRenderers` 分别绑定 SDK 资产。全屏窗口和关闭按钮由 demo 管理。
+
+界面显示缓存状态、最近一次竞价的所有候选价格与赢家，以及当前进程的 session 统计。
+未知价格显示 `null`。`AdsDemoAudit` 日志记录公开 `AdEventListener` 实际收到的 JSON 事件，
+`AdsDemoResult` 记录业务回调。现有事件名是 **`ad_position`**（不是 `ad_postion`）。
+
+对已结束的展示 session，应满足 `ad_position = ad_impression + ad_show_fail`，且每个
+`session_id` 恰好 1 次 position、1 次曝光或失败。渲染完成不等于曝光；尚未曝光又未销毁的原生
+会显示 pending，销毁后补 `destroyed_before_impression`。曝光后的关闭只产生 close，不再补失败。
+加载失败 `ad_load_result` 不计入展示失败；混合竞价只为一次展示机会记一个 position，按实际展示类型统计。
+进程被系统直接杀死时无法补发回调，因此核对前应通过 Close / Destroy / Finish 正常结束展示。
+
+可通过 intent 重放操作，不需要依赖按钮坐标（需在广告关闭回到 demo 后再执行下一个 action）：
+
+```bash
+adb shell am force-stop com.cashcraft.ads.mediation.smoke
+adb shell am start -n com.cashcraft.ads.mediation.smoke/.SmokeActivity --es provider bidding
+adb shell am start -n com.cashcraft.ads.mediation.smoke/.SmokeActivity --es action native_card
+# 其他 action：app_open、interstitial、rewarded、mixed_open、mixed_reward、mixed_reward_policy、
+# native_fullscreen、preload_native、destroy_native、native_destroy_early、native_missing_renderer、native_render_error、finish
+# 首次启动附加 --es auto app_open 或 --es auto mixed 可验证前后台自动开屏；默认 off。
+adb logcat -d -s AdsDemoAudit:I AdsDemoResult:I > events.log
+python3 scripts/audit-demo-events.py events.log
+```
+
+核对脚本按 session 检查等式、重复、顺序、维度一致性，并根据公开候选信息重新计算竞价赢家。
+存在 pending、重复、缺失或错误赢家时退出码非 0。一次进程的日志只采集一次，避免重叠日志造成重复计数。
+
+#### 2026-10-13 真机回归结果
+
+设备：Samsung SM-S931U1 / Android 16。使用开启 R8 与资源压缩的 release 包，以本地 debug
+证书签名安装；运行包无 DEBUGGABLE 标志。单元测试 **79 项通过**，release 构建与 lintVital 通过。
+构建仍有前文提到的第三方 Pangle/TikTok 可选类警告；本轮应用进程未发现 FATAL EXCEPTION。
+
+| 真机轮次 | position | impression | show_fail | 结果 |
+| --- | ---: | ---: | ---: | --- |
+| AdMob 手动 | 12 | 8 | 4 | 四种格式、卡片/全屏原生、两种混合与奖励策略入口；包含原生三个异常路径 |
+| TopOn 手动 | 11 | 6 | 5 | 开屏、插屏、激励及混合展示成功；原生无填充；重复全屏请求被正确拒绝 |
+| Bidding 手动 | 11 | 8 | 3 | 四种格式和两种混合竞价；包含原生三个异常路径 |
+| AdMob 自动开屏 | 2 | 2 | 0 | 冷启动及 Home 后回前台 |
+| Bidding 自动混合开屏 | 2 | 2 | 0 | 冷启动插屏胜出，回前台开屏胜出 |
+| **合计** | **38** | **26** | **12** | **38 = 26 + 12，逐 session 无错误、无 pending** |
+
+另外收到 26 次 paid、26 次 close、19 次 bid_result、9 次 reward_earned。
+这些是 SDK 公开 listener 的日志核对结果，不代表下游数据平台已经完成上传和入库。
+
+- AdMob 卡片与宿主全屏布局均真实曝光，原生校验器两者都显示 `No implementation issues found`。
+- 双平台激励都可用且有价格时：AdMob 测试价 0、TopOn 0.0005737 USD，TopOn 胜出；曝光后
+  paid 同为 0.0005737 USD。混合激励的四候选场景中，TopOn 0.0005637 USD 胜出。
+- 最终混淆包中 AdMob 原生仍读到有效 0，TopOn 未就绪候选价格为 null。
+- `native_renderer_missing`、`destroyed_before_impression`、`native_render_failed` 在 AdMob 与
+  Bidding 模式各验证一次，均只有一次 position 和一次 show_fail。
+- **覆盖边界**：TopOn 原生测试位在本轮多次返回 4001 `Return Ad is empty.`，卡片与全屏入口
+  都已请求并核对失败事件，但新布局的 TopOn 实际曝光仍待有填充时验证。本轮奖励策略入口
+  胜出的都是激励，插屏胜出后的业务奖励分支由现有单元测试覆盖，不能当作已完成真机验证。
+
+本地证据目录（build 目录不提交）：`build/verification/demo-matrix/`。包含各轮 `.log`、汇总
+`audit.json`、布局截图 `native-card.png` / `native-fullscreen.png`、最终可安装 `release.apk`。
+最终 APK SHA-256：`fe57d52535bb1b50dd30a0e669740566f417f89a65b9e239d471659c5175e932`。
+单平台轮次使用首个混淆包；最终包随后修正了 demo 的模式选择初始化时机与系统栏滚动裁剪，
+并完成 Bidding 全量与自动开屏回归，广告库实现未在这些轮次间变更。
+
+```bash
+python3 scripts/audit-demo-events.py \
+  build/verification/demo-matrix/admob.log \
+  build/verification/demo-matrix/topon.log \
+  build/verification/demo-matrix/bidding.log \
+  build/verification/demo-matrix/auto-admob.log \
+  build/verification/demo-matrix/auto-bidding.log
 ```

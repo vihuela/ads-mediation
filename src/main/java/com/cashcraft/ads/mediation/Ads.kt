@@ -14,6 +14,8 @@ import com.cashcraft.ads.mediation.internal.AdEventDispatcher
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.cashcraft.ads.mediation.internal.AutoAppOpenController
+import com.cashcraft.ads.mediation.internal.NativeAds
+import com.cashcraft.ads.mediation.internal.toEventData
 import com.cashcraft.ads.mediation.internal.BidDecision
 import com.cashcraft.ads.mediation.internal.UmpConsentManager
 import com.cashcraft.ads.mediation.internal.topon.TopOnAds
@@ -28,7 +30,7 @@ enum class AdsState {
     FAILED,
 }
 
-/** SDK-neutral facade for app-open, interstitial, and rewarded ads. */
+/** SDK-neutral facade for full-screen and host-rendered native ads. */
 object Ads {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
@@ -118,7 +120,8 @@ object Ads {
             )
             autoSelectionAppOpenController = AutoAppOpenController(
                 isEnabled = {
-                    this.config.autoShowAppOpen && (
+                    this.config.autoShowAppOpen &&
+                        this.config.autoAppOpenMode.formats.any(this.config.provider::hasAdUnit) && (
                         this.config.provider is BiddingProviderConfig ||
                             this.config.autoAppOpenMode == AutoAppOpenMode.APP_OPEN_OR_INTERSTITIAL
                     )
@@ -248,6 +251,7 @@ object Ads {
 
     private fun finishInitialization(success: Boolean) {
         initializationStage = if (success) InitializationStage.COMPLETE else InitializationStage.FAILED
+        if (success) NativeAds.initialize(application, config)
         initializationListeners.forEach { listener -> runCatching { listener(success) } }
         initializationListeners.clear()
         if (success) {
@@ -261,6 +265,32 @@ object Ads {
             is TopOnProviderConfig -> TopOnAds.isReady(format)
             is BiddingProviderConfig -> AdMobAds.isReady(format) || TopOnAds.isReady(format)
         }
+
+    /** Starts/retries the one-ad cache for every configured native provider. */
+    fun preloadNative() = onMain {
+        if (commonShowFailure() == null) NativeAds.preload()
+    }
+
+    /**
+     * Renders a cached native ad. Use a dedicated container and destroy the returned handle before
+     * reusing it. All renderer/result callbacks run on the main thread. No impression is fabricated
+     * on attachment, and native ads do not participate in full-screen mixed/reward opportunities.
+     */
+    fun showNative(
+        activity: Activity,
+        container: ViewGroup,
+        position: String,
+        renderers: NativeAdRenderers,
+        onResult: (NativeAdShowResult) -> Unit,
+    ) = onMain {
+        val failure = commonShowFailure()
+        if (failure != null) {
+            emitFacadeShowFailure(AdFormat.NATIVE, position, failure)
+            onResult(NativeAdShowResult.Failed(failure))
+        } else {
+            NativeAds.show(activity, container, position, renderers, onResult)
+        }
+    }
 
     fun showAppOpen(
         activity: Activity,
@@ -441,9 +471,10 @@ object Ads {
         if (selection == null) {
             val session = facadeEvents.begin(formats.first(), position, config.provider.adUnitId(formats.first()))
             session.bidResult(decision.toEventData())
-            session.showFailure(NO_BID_CANDIDATE)
+            val reason = if (formats.any(config.provider::hasAdUnit)) NO_BID_CANDIDATE else "ad_not_configured"
+            session.showFailure(reason)
             biddingShowInProgress.set(false)
-            onResult(AdMixedShowResult(null, null, AdShowResult.Failed(NO_BID_CANDIDATE), session.sessionId))
+            onResult(AdMixedShowResult(null, null, AdShowResult.Failed(reason), session.sessionId))
             return
         }
         var sessionId: String? = null
@@ -473,11 +504,13 @@ object Ads {
         val rewardCallback: (AdRewardResult) -> Unit = { finish(it.showResult, it.rewardEarned) }
         when (selection.platform) {
             AdPlatform.ADMOB -> when (selection.format) {
+                AdFormat.NATIVE -> error("Native ads require showNative")
                 AdFormat.APP_OPEN -> AdMobAds.showBiddingAppOpen(activity, position, onSessionStarted, showCallback)
                 AdFormat.INTERSTITIAL -> AdMobAds.showBiddingInterstitial(activity, position, onSessionStarted, showCallback)
                 AdFormat.REWARDED -> AdMobAds.showBiddingRewarded(activity, position, onSessionStarted, rewardCallback)
             }
             AdPlatform.TOPON -> when (selection.format) {
+                AdFormat.NATIVE -> error("Native ads require showNative")
                 AdFormat.APP_OPEN -> TopOnAds.showBiddingAppOpen(
                     activity, position, onSessionStarted, showCallback, hostContainer,
                 )
@@ -495,27 +528,6 @@ object Ads {
     ) {
         val sessionId = emitFacadeShowFailure(format, position, reason)
         onResult(AdMixedShowResult(null, null, AdShowResult.Failed(reason), sessionId))
-    }
-
-    private fun BidDecision.toEventData(): AdBidEventData {
-        // Preserve the old fields as snapshots of the requested (primary) format.
-        val primary = formats.first()
-        val admob = candidates.firstOrNull { it.platform == AdPlatform.ADMOB && it.format == primary }
-        val topon = candidates.firstOrNull { it.platform == AdPlatform.TOPON && it.format == primary }
-        return AdBidEventData(
-            winnerPlatform = selection?.platform,
-            admobAvailable = admob?.available == true,
-            topOnAvailable = topon?.available == true,
-            admobValue = admob?.priceUsd,
-            topOnValue = topon?.priceUsd,
-            winningValue = selection?.priceUsd,
-            admobAdUnitId = admob?.adUnitId.orEmpty(),
-            topOnAdUnitId = topon?.adUnitId.orEmpty(),
-            requestedFormat = primary,
-            eligibleFormats = formats,
-            winnerFormat = selection?.format,
-            candidates = candidates,
-        )
     }
 
     private fun failShow(

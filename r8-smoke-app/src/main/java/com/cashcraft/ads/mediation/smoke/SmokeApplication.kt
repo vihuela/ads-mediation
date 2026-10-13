@@ -10,10 +10,14 @@ import com.cashcraft.ads.mediation.TopOnIds
 import com.cashcraft.ads.mediation.TopOnProviderConfig
 import com.cashcraft.ads.mediation.UmpConsentConfig
 
-/** Compile/R8-only consumer that keeps every provider path reachable in the minified APK. */
+/** Demo/R8 consumer. TopOn development IDs come from short-drama/config/app.properties. */
 class SmokeApplication : Application() {
-    override fun onCreate() {
-        super.onCreate()
+    var providerName: String? = null
+        private set
+
+    fun initializeAds(providerName: String, autoMode: String = "off") {
+        if (this.providerName != null) return
+        this.providerName = providerName
         Ads.initialize(
             application = this,
             config = AdsConfig(
@@ -21,17 +25,27 @@ class SmokeApplication : Application() {
                     admob = AdMobProviderConfig(AdMobIds.TEST),
                     topon = TopOnProviderConfig(
                         TopOnIds(
-                            applicationId = "smoke-app-id",
-                            applicationKey = "smoke-app-key",
-                            appOpenPlacementId = "smoke-app-open",
-                            interstitialPlacementId = "smoke-interstitial",
-                            rewardedPlacementId = "smoke-rewarded",
+                            applicationId = "h1h7t76tddrt25",
+                            applicationKey = "a5892462779e07420fcf84e9e6b341ece",
+                            appOpenPlacementId = "n1h7t76tij7hlj",
+                            interstitialPlacementId = "n1h7t76tg76hja",
+                            rewardedPlacementId = "n1h7t76tevmst6",
+                            nativePlacementId = "n1h7t76th560qm",
                         ),
                     ),
-                ),
+                ).let { bidding ->
+                    when (providerName) {
+                        "admob" -> bidding.admob
+                        "topon" -> bidding.topon
+                        else -> bidding
+                    }
+                },
                 umpConsent = UmpConsentConfig(enabled = false),
-                loggingEnabled = false,
-                autoShowAppOpen = false,
+                loggingEnabled = true,
+                autoShowAppOpen = autoMode != "off",
+                autoAppOpenMode = if (autoMode == "mixed") com.cashcraft.ads.mediation.AutoAppOpenMode.APP_OPEN_OR_INTERSTITIAL
+                    else com.cashcraft.ads.mediation.AutoAppOpenMode.APP_OPEN_ONLY,
+                eventListener = DemoAudit,
             ),
         )
     }

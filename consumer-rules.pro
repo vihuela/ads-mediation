@@ -1,4 +1,4 @@
-# GMA Next-Gen 1.2.1 preload price reflection. SDK rules keep the obfuscated class names; these
+# GMA Next-Gen 1.2.1 preload/native price reflection. SDK rules keep the obfuscated class names; these
 # rules keep the exact members traversed by google_next_gen_preload_reflection_paths.json.
 
 # WorkManager creates its generated Room database implementation through
@@ -40,6 +40,14 @@
 }
 -keepclassmembers class ads_mobile_sdk.a2 {
     ads_mobile_sdk.i9 m;
+}
+# Regular NativeAdLoader: hr1 inherits jm.a; InternalNativeAd inherits k91.b.
+# Keep both inherited fields for the a -> b -> m path before R8 removes/renames them.
+-keepclassmembers class ads_mobile_sdk.jm {
+    ads_mobile_sdk.h91 a;
+}
+-keepclassmembers class ads_mobile_sdk.k91 {
+    ads_mobile_sdk.a2 b;
 }
 -keepclassmembers class ads_mobile_sdk.i9 {
     long b;

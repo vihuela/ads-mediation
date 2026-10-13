@@ -2,9 +2,70 @@ package com.cashcraft.ads.mediation
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import com.cashcraft.ads.mediation.internal.AdBiddingCoordinator
 import org.junit.Test
 
 class AdsConfigTest {
+    @Test
+    fun `each individual AdMob format is sufficient including native only`() {
+        val ids = listOf(
+            AdMobIds("app", appOpenId = "open"),
+            AdMobIds("app", interstitialId = "interstitial"),
+            AdMobIds("app", rewardedId = "rewarded"),
+            AdMobIds("app", nativeId = "native"),
+        )
+        ids.forEach { config ->
+            assertEquals(1, AdFormat.entries.count(AdMobProviderConfig(config)::hasAdUnit))
+        }
+    }
+
+    @Test
+    fun `each individual TopOn format is sufficient including native only`() {
+        val ids = listOf(
+            TopOnIds("app", "key", appOpenPlacementId = "open"),
+            TopOnIds("app", "key", interstitialPlacementId = "interstitial"),
+            TopOnIds("app", "key", rewardedPlacementId = "rewarded"),
+            TopOnIds("app", "key", nativePlacementId = "native"),
+        )
+        ids.forEach { config ->
+            assertEquals(1, AdFormat.entries.count(TopOnProviderConfig(config)::hasAdUnit))
+        }
+    }
+
+    @Test
+    fun `missing or whitespace only ad IDs are rejected on both platforms`() {
+        assertThrows(IllegalArgumentException::class.java) { AdMobIds("app") }
+        assertThrows(IllegalArgumentException::class.java) { TopOnIds("app", "key") }
+        assertThrows(IllegalArgumentException::class.java) { AdMobIds("app", " ", "\t", "\n", " ") }
+        assertThrows(IllegalArgumentException::class.java) { TopOnIds("app", "key", " ", "\t", "\n", " ") }
+    }
+
+    @Test
+    fun `an ad ID does not waive application credentials`() {
+        for (blank in listOf("", " ", "\n")) {
+            assertThrows(IllegalArgumentException::class.java) { AdMobIds(blank, nativeId = "native") }
+            assertThrows(IllegalArgumentException::class.java) { TopOnIds(blank, "key", nativePlacementId = "native") }
+            assertThrows(IllegalArgumentException::class.java) { TopOnIds("app", blank, nativePlacementId = "native") }
+        }
+    }
+
+    @Test
+    fun `bidding accepts different configured formats and skips missing formats without calling SDKs`() {
+        val provider = BiddingProviderConfig(
+            AdMobProviderConfig(AdMobIds("app", rewardedId = "rewarded")),
+            TopOnProviderConfig(TopOnIds("app", "key", nativePlacementId = "native")),
+        )
+        assertTrue(provider.hasAdUnit(AdFormat.NATIVE))
+        assertTrue(provider.hasAdUnit(AdFormat.REWARDED))
+        assertFalse(provider.hasAdUnit(AdFormat.APP_OPEN))
+        val decision = AdBiddingCoordinator.select(provider, AutoAppOpenMode.APP_OPEN_OR_INTERSTITIAL.formats)
+        assertTrue(decision.candidates.isEmpty())
+        assertNull(decision.selection)
+    }
+
     @Test
     fun `every format preloads two ads by default`() {
         val preload = AdMobPreloadConfig()

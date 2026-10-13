@@ -3,15 +3,17 @@ package com.cashcraft.ads.mediation.admob
 import android.content.Context
 import com.google.android.libraries.ads.mobile.sdk.MobileAds
 import com.cashcraft.ads.mediation.AdFormat
+import com.google.android.libraries.ads.mobile.sdk.nativead.NativeAd
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.util.Queue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
-/** Reads, but never consumes, the head price from the GMA Next-Gen 1.2.1 preload queue. */
+/** Reads prices without consuming preload queues or registering loaded native ads for display. */
 internal object AdMobNextGenBidPrice {
     private const val CONFIG_ASSET = "google_next_gen_preload_reflection_paths.json"
 
@@ -58,13 +60,45 @@ internal object AdMobNextGenBidPrice {
         valueMicros.coerceAtLeast(0L) / MICROS_PER_UNIT
     }.getOrNull()
 
+    /** Loaded native ads use remax's versioned a -> b -> m path, not a preload queue. */
+    fun nativePrice(ad: NativeAd): Double? = runCatching {
+        val version = MobileAds.getVersion().let {
+            "${it.majorVersion}.${it.minorVersion}.${it.microVersion}"
+        }
+        readNativePrice(ad, version, repository.orEmpty())
+    }.getOrNull()
+
+    internal fun readNativePrice(
+        ad: Any,
+        sdkVersion: String,
+        configs: Map<String, ReflectionConfig>,
+    ): Double? {
+        // Never guess an obfuscated path on a different SDK version.
+        val config = configs[sdkVersion] ?: return null
+        val currencyField = config.priceCurrencyCodeField ?: return null
+        return config.nativeAdPaths.firstNotNullOfOrNull { path ->
+            runCatching {
+                if (path.isEmpty() || path.any(String::isBlank)) return@runCatching null
+                var leaf: Any = ad
+                for (field in path) leaf = readField(leaf, field) ?: return@runCatching null
+                val micros = readField(leaf, config.priceValueMicrosField) as? Long
+                    ?: return@runCatching null
+                val currency = readField(leaf, currencyField) as? String
+                    ?: return@runCatching null
+                if (micros < 0L || !currency.trim().equals("USD", ignoreCase = true)) null
+                else micros / MICROS_PER_UNIT
+            }.getOrNull()
+        }
+    }
+
     internal fun parse(json: String): Map<String, ReflectionConfig> {
         val versions = Json.parseToJsonElement(json).jsonObject.requiredObject("versions")
         return versions.mapValues { (_, versionElement) ->
-            val preloading = versionElement.jsonObject.requiredObject("preloading")
+            val version = versionElement.jsonObject
+            val preloading = version.requiredObject("preloading")
             val sdkRoot = preloading.requiredObject("sdkRoot")
             val queuePath = preloading.requiredObject("queuePath")
-            val priceFields = preloading.requiredObject("priceFields")
+            val priceFields = version.requiredObject("priceFields")
             ReflectionConfig(
                 sdkRootClass = sdkRoot.requiredString("className"),
                 sdkRootMethod = sdkRoot.requiredString("method"),
@@ -79,6 +113,9 @@ internal object AdMobNextGenBidPrice {
                     queuePath.requiredString("internalAdConfigurationMethod"),
                 configurationPriceField = queuePath.requiredString("configurationPriceField"),
                 priceValueMicrosField = priceFields.requiredString("valueMicros"),
+                priceCurrencyCodeField = priceFields["currencyCode"]?.jsonPrimitive?.content,
+                nativeAdPaths = version["nativeAdPaths"]?.jsonArray
+                    ?.map { it.jsonPrimitive.content.split("->") }.orEmpty(),
             )
         }
     }
@@ -131,4 +168,6 @@ internal data class ReflectionConfig(
     val internalAdConfigurationMethod: String,
     val configurationPriceField: String,
     val priceValueMicrosField: String,
+    val priceCurrencyCodeField: String? = null,
+    val nativeAdPaths: List<List<String>> = emptyList(),
 )

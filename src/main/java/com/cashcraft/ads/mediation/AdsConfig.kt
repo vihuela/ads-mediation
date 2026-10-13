@@ -1,6 +1,6 @@
 package com.cashcraft.ads.mediation
 
-/** The SDK that owns a full-screen ad opportunity; bidding mode can keep both platforms active. */
+/** The SDK that owns an ad opportunity; bidding mode can keep both platforms active. */
 enum class AdPlatform(val analyticsValue: String) {
     ADMOB("admob"),
     TOPON("topon"),
@@ -19,6 +19,12 @@ sealed interface AdProviderConfig {
     fun adUnitId(format: AdFormat): String
 }
 
+/** Unconfigured formats never start loads or become auction candidates. */
+internal fun AdProviderConfig.hasAdUnit(format: AdFormat): Boolean = when (this) {
+    is BiddingProviderConfig -> admob.hasAdUnit(format) || topon.hasAdUnit(format)
+    else -> adUnitId(format).isNotBlank()
+}
+
 internal val AdProviderConfig.mediationMode: AdMediationMode
     get() = when (this) {
         is AdMobProviderConfig -> AdMediationMode.ADMOB
@@ -29,15 +35,17 @@ internal val AdProviderConfig.mediationMode: AdMediationMode
 /** AdMob application and ad-unit IDs. Production builds should inject their own values. */
 data class AdMobIds(
     val applicationId: String,
-    val appOpenId: String,
-    val interstitialId: String,
-    val rewardedId: String,
+    val appOpenId: String = "",
+    val interstitialId: String = "",
+    val rewardedId: String = "",
+    /** Null or blank disables native loading. Other blank ad IDs disable their formats. */
+    val nativeId: String? = null,
 ) {
     init {
         require(applicationId.isNotBlank()) { "applicationId must not be blank" }
-        require(appOpenId.isNotBlank()) { "appOpenId must not be blank" }
-        require(interstitialId.isNotBlank()) { "interstitialId must not be blank" }
-        require(rewardedId.isNotBlank()) { "rewardedId must not be blank" }
+        require(listOf(appOpenId, interstitialId, rewardedId, nativeId).any { !it.isNullOrBlank() }) {
+            "At least one AdMob ad unit ID must not be blank"
+        }
     }
 
     companion object {
@@ -47,6 +55,7 @@ data class AdMobIds(
             appOpenId = "ca-app-pub-3940256099942544/9257395921",
             interstitialId = "ca-app-pub-3940256099942544/1033173712",
             rewardedId = "ca-app-pub-3940256099942544/5224354917",
+            nativeId = "ca-app-pub-3940256099942544/2247696110",
         )
     }
 }
@@ -89,6 +98,7 @@ data class AdMobProviderConfig(
     override fun adUnitId(format: AdFormat): String = when (format) {
         AdFormat.APP_OPEN -> ids.appOpenId
         AdFormat.INTERSTITIAL -> ids.interstitialId
+        AdFormat.NATIVE -> ids.nativeId.orEmpty()
         AdFormat.REWARDED -> ids.rewardedId
     }
 }
@@ -97,16 +107,19 @@ data class AdMobProviderConfig(
 data class TopOnIds(
     val applicationId: String,
     val applicationKey: String,
-    val appOpenPlacementId: String,
-    val interstitialPlacementId: String,
-    val rewardedPlacementId: String,
+    val appOpenPlacementId: String = "",
+    val interstitialPlacementId: String = "",
+    val rewardedPlacementId: String = "",
+    /** Null or blank disables native loading. Other blank placement IDs disable their formats. */
+    val nativePlacementId: String? = null,
 ) {
     init {
         require(applicationId.isNotBlank()) { "applicationId must not be blank" }
         require(applicationKey.isNotBlank()) { "applicationKey must not be blank" }
-        require(appOpenPlacementId.isNotBlank()) { "appOpenPlacementId must not be blank" }
-        require(interstitialPlacementId.isNotBlank()) { "interstitialPlacementId must not be blank" }
-        require(rewardedPlacementId.isNotBlank()) { "rewardedPlacementId must not be blank" }
+        require(listOf(appOpenPlacementId, interstitialPlacementId, rewardedPlacementId, nativePlacementId)
+            .any { !it.isNullOrBlank() }) {
+            "At least one TopOn placement ID must not be blank"
+        }
     }
 }
 
@@ -118,6 +131,7 @@ data class TopOnProviderConfig(
     override fun adUnitId(format: AdFormat): String = when (format) {
         AdFormat.APP_OPEN -> ids.appOpenPlacementId
         AdFormat.INTERSTITIAL -> ids.interstitialPlacementId
+        AdFormat.NATIVE -> ids.nativePlacementId.orEmpty()
         AdFormat.REWARDED -> ids.rewardedPlacementId
     }
 }

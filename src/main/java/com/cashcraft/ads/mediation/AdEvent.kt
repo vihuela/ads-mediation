@@ -4,6 +4,7 @@ enum class AdFormat(val analyticsValue: String) {
     APP_OPEN("app_open"),
     INTERSTITIAL("interstitial"),
     REWARDED("rewarded"),
+    NATIVE("native"),
 }
 
 enum class AdEventName(val analyticsName: String) {

@@ -1,0 +1,7 @@
+<!-- Fullscreen is solely a host layout, using the same NATIVE auction and show API. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:background="#000000">
+    <FrameLayout android:id="@+id/native_media" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
+    <include layout="@layout/demo_native_assets" />
+</LinearLayout>

@@ -29,9 +29,9 @@ class AdMobNextGenBidPriceTest {
                       "preloadResultAdField": "a",
                       "internalAdConfigurationMethod": "b",
                       "configurationPriceField": "m"
-                    },
-                    "priceFields": { "valueMicros": "b" }
-                  }
+                    }
+                  },
+                  "priceFields": { "valueMicros": "b" }
                 }
               }
             }

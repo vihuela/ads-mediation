@@ -408,6 +408,27 @@ class AdShowSessionTest {
         assertEquals("topon", topOnEvents.last().analyticsParameters()["ad_platform"])
     }
 
+    @Test
+    fun `all formats and modes settle once even when duplicate or late callbacks race`() {
+        for (format in AdFormat.entries) for (mode in AdMediationMode.entries) {
+            val events = java.util.Collections.synchronizedList(mutableListOf<AdEvent>())
+            val session = session(events, format = format, mediationMode = mode)
+            val start = java.util.concurrent.CountDownLatch(1)
+            val callbacks = (0 until 16).map { index ->
+                Thread {
+                    start.await()
+                    if (index % 2 == 0) session.impression("network", "response")
+                    else session.showFailure("late_or_early_failure")
+                }.apply { start() }
+            }
+            start.countDown()
+            callbacks.forEach { it.join() }
+            assertEquals(1, events.count { it.name == AdEventName.POSITION })
+            assertEquals(1, events.count { it.name == AdEventName.IMPRESSION || it.name == AdEventName.SHOW_FAIL })
+            assertEquals(1, events.map { it.sessionId }.distinct().size)
+        }
+    }
+
     private fun session(
         events: MutableList<AdEvent>,
         platform: AdPlatform = AdPlatform.ADMOB,

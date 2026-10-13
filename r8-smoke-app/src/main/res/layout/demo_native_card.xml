@@ -1,0 +1,6 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="wrap_content"
+    android:orientation="vertical" android:background="@drawable/demo_native_card">
+    <FrameLayout android:id="@+id/native_media" android:layout_width="match_parent" android:layout_height="180dp" />
+    <include layout="@layout/demo_native_assets" />
+</LinearLayout>

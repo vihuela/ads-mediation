@@ -1,5 +1,6 @@
 package com.cashcraft.ads.mediation.admob
 
+import com.cashcraft.ads.mediation.internal.NativeAds
 import android.app.Activity
 import android.app.Application
 import android.os.Handler
@@ -106,7 +107,7 @@ object AdMobAds {
                 logTag = config.logTag,
             )
             autoAppOpenController = AutoAppOpenController(
-                isEnabled = { this.config.autoShowAppOpen },
+                isEnabled = { this.config.autoShowAppOpen && this.config.ids.appOpenId.isNotBlank() },
                 isProviderReady = { state == AdMobState.READY },
                 providerFailureReason = {
                     state.takeUnless { it == AdMobState.READY }?.showFailureReason()
@@ -156,8 +157,9 @@ object AdMobAds {
     }
 
     fun isReady(format: AdMobFormat): Boolean {
-        if (state != AdMobState.READY) return false
+        if (state != AdMobState.READY || config.ids.adUnitId(format).isBlank()) return false
         return when (format) {
+            AdMobFormat.NATIVE -> NativeAds.isReady(AdPlatform.ADMOB)
             AdMobFormat.APP_OPEN -> AppOpenAdPreloader.isAdAvailable(PRELOAD_APP_OPEN)
             AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.isAdAvailable(PRELOAD_INTERSTITIAL)
             AdMobFormat.REWARDED -> RewardedAdPreloader.isAdAvailable(PRELOAD_REWARDED)
@@ -280,37 +282,23 @@ object AdMobAds {
             }
         }
         preloadDescriptors.clear()
-        preloadDescriptors[PRELOAD_APP_OPEN] = PreloadDescriptor(
-            format = AdMobFormat.APP_OPEN,
-            adUnitId = config.ids.appOpenId,
-            bufferSize = config.preload.appOpen,
-        )
-        preloadDescriptors[PRELOAD_INTERSTITIAL] = PreloadDescriptor(
-            format = AdMobFormat.INTERSTITIAL,
-            adUnitId = config.ids.interstitialId,
-            bufferSize = config.preload.interstitial,
-        )
-        preloadDescriptors[PRELOAD_REWARDED] = PreloadDescriptor(
-            format = AdMobFormat.REWARDED,
-            adUnitId = config.ids.rewardedId,
-            bufferSize = config.preload.rewarded,
-        )
-        preloadDescriptors.keys.forEach(::beginPreloadCycle)
-        AppOpenAdPreloader.start(
-            PRELOAD_APP_OPEN,
-            preloadConfiguration(config.ids.appOpenId, config.preload.appOpen),
-            preloadCallback,
-        )
-        InterstitialAdPreloader.start(
-            PRELOAD_INTERSTITIAL,
-            preloadConfiguration(config.ids.interstitialId, config.preload.interstitial),
-            preloadCallback,
-        )
-        RewardedAdPreloader.start(
-            PRELOAD_REWARDED,
-            preloadConfiguration(config.ids.rewardedId, config.preload.rewarded),
-            preloadCallback,
-        )
+        fun start(format: AdMobFormat, bufferSize: Int, begin: (String, PreloadConfiguration, PreloadCallback) -> Unit) {
+            val id = config.ids.adUnitId(format)
+            if (id.isBlank()) return
+            val preloadId = format.preloadId()
+            preloadDescriptors[preloadId] = PreloadDescriptor(format, id, bufferSize)
+            beginPreloadCycle(preloadId)
+            begin(preloadId, preloadConfiguration(id, bufferSize), preloadCallback)
+        }
+        start(AdMobFormat.APP_OPEN, config.preload.appOpen) { id, request, callback ->
+            AppOpenAdPreloader.start(id, request, callback)
+        }
+        start(AdMobFormat.INTERSTITIAL, config.preload.interstitial) { id, request, callback ->
+            InterstitialAdPreloader.start(id, request, callback)
+        }
+        start(AdMobFormat.REWARDED, config.preload.rewarded) { id, request, callback ->
+            RewardedAdPreloader.start(id, request, callback)
+        }
     }
 
     private fun beginPreloadCycle(preloadId: String) {
@@ -336,16 +324,19 @@ object AdMobAds {
 
     internal fun bidPrice(format: AdMobFormat): Double? {
         if (!isReady(format)) return null
+        if (format == AdMobFormat.NATIVE) return NativeAds.bidPrice(AdPlatform.ADMOB)
         return AdMobNextGenBidPrice.peek(format, format.preloadId())
     }
 
     private fun AdMobFormat.preloadId(): String = when (this) {
+        AdMobFormat.NATIVE -> error("Native ads use NativeAdLoader")
         AdMobFormat.APP_OPEN -> PRELOAD_APP_OPEN
         AdMobFormat.INTERSTITIAL -> PRELOAD_INTERSTITIAL
         AdMobFormat.REWARDED -> PRELOAD_REWARDED
     }
 
     private fun AdMobIds.adUnitId(format: AdMobFormat): String = when (format) {
+        AdMobFormat.NATIVE -> nativeId.orEmpty()
         AdMobFormat.APP_OPEN -> appOpenId
         AdMobFormat.INTERSTITIAL -> interstitialId
         AdMobFormat.REWARDED -> rewardedId
@@ -468,7 +459,8 @@ object AdMobAds {
     ): Boolean {
         val reason = fullScreenShowGate.tryAcquire(
             activity = activity,
-            providerFailureReason = state.takeUnless { it == AdMobState.READY }?.showFailureReason(),
+            providerFailureReason = state.takeUnless { it == AdMobState.READY }?.showFailureReason()
+                ?: "ad_not_configured".takeIf { session.adUnitId.isBlank() },
         )
         if (reason != null) {
             session.showFailure(reason)
@@ -525,6 +517,9 @@ object AdMobAds {
         fullScreenShowGate.release()
         runCatching { onResult(AdShowResult.Failed(reason)) }
     }
+
+    internal fun nativePaid(session: AdShowSession, value: AdValue, responseInfo: ResponseInfo) =
+        session.paid(value, responseInfo)
 
     private fun AdShowSession.paid(value: AdValue, responseInfo: ResponseInfo) {
         val adSourceInfo = responseInfo.loadedAdSourceResponseInfo

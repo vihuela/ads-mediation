@@ -1,6 +1,7 @@
 package com.cashcraft.ads.mediation.internal.topon
 
 import android.annotation.SuppressLint
+import com.cashcraft.ads.mediation.internal.NativeAds
 import android.app.Activity
 import android.app.Application
 import android.os.Handler
@@ -145,7 +146,7 @@ internal object TopOnAds {
                 logTag = commonConfig.logTag,
             )
             autoAppOpenController = AutoAppOpenController(
-                isEnabled = { this.commonConfig.autoShowAppOpen },
+                isEnabled = { this.commonConfig.autoShowAppOpen && this.config.ids.appOpenPlacementId.isNotBlank() },
                 isProviderReady = { state == TopOnState.READY },
                 providerFailureReason = {
                     state.takeUnless { it == TopOnState.READY }?.showFailureReason()
@@ -197,6 +198,7 @@ internal object TopOnAds {
     fun isReady(format: AdFormat): Boolean {
         if (state != TopOnState.READY) return false
         return when (format) {
+            AdFormat.NATIVE -> NativeAds.isReady(AdPlatform.TOPON)
             AdFormat.APP_OPEN -> ::appOpenAd.isInitialized && appOpenAd.isAdReady
             AdFormat.INTERSTITIAL -> ::interstitialAd.isInitialized && interstitialAd.isAdReady
             AdFormat.REWARDED -> ::rewardedAd.isInitialized && rewardedAd.isAdReady
@@ -205,6 +207,7 @@ internal object TopOnAds {
 
     fun ensureLoaded(format: AdFormat) = onMain {
         when (format) {
+            AdFormat.NATIVE -> NativeAds.preload()
             AdFormat.APP_OPEN -> loadAppOpen()
             AdFormat.INTERSTITIAL -> loadInterstitial()
             AdFormat.REWARDED -> loadRewarded()
@@ -213,10 +216,12 @@ internal object TopOnAds {
 
     fun bidPrice(format: AdFormat): Double? {
         if (!isReady(format)) return null
+        if (format == AdFormat.NATIVE) return NativeAds.bidPrice(AdPlatform.TOPON)
         // Price the same highest-priority cache entry that TopOn is expected to consume on show().
         // checkValidAdCaches().firstOrNull() is only the first item in the cache snapshot and is
         // not documented as the next ad selected by TopOn when multiple ads are cached.
         val info = when (format) {
+            AdFormat.NATIVE -> return NativeAds.bidPrice(AdPlatform.TOPON)
             AdFormat.APP_OPEN -> appOpenAd.checkAdStatus().getTUTopAdInfo()
             AdFormat.INTERSTITIAL -> interstitialAd.checkAdStatus().getTUTopAdInfo()
             AdFormat.REWARDED -> rewardedAd.checkAdStatus().getTUTopAdInfo()
@@ -320,21 +325,27 @@ internal object TopOnAds {
     }
 
     private fun createAds() {
-        interstitialAd = TUInterstitial(application, config.ids.interstitialPlacementId).apply {
-            setAdListener(interstitialListener)
-            setAdRevenueListener { info -> onMain { revenuePaid(activeInterstitial?.session, info) } }
+        if (config.ids.interstitialPlacementId.isNotBlank()) {
+            interstitialAd = TUInterstitial(application, config.ids.interstitialPlacementId).apply {
+                setAdListener(interstitialListener)
+                setAdRevenueListener { info -> onMain { revenuePaid(activeInterstitial?.session, info) } }
+            }
         }
-        rewardedAd = TURewardVideoAd(application, config.ids.rewardedPlacementId).apply {
-            setAdListener(rewardedListener)
-            setAdRevenueListener { info -> onMain { revenuePaid(activeRewarded?.session, info) } }
+        if (config.ids.rewardedPlacementId.isNotBlank()) {
+            rewardedAd = TURewardVideoAd(application, config.ids.rewardedPlacementId).apply {
+                setAdListener(rewardedListener)
+                setAdRevenueListener { info -> onMain { revenuePaid(activeRewarded?.session, info) } }
+            }
         }
-        appOpenAd = TUSplashAd(
-            application,
-            config.ids.appOpenPlacementId,
-            splashListener,
-            SPLASH_LOAD_TIMEOUT_MILLIS,
-        ).apply {
-            setAdRevenueListener { info -> onMain { revenuePaid(activeAppOpen?.session, info) } }
+        if (config.ids.appOpenPlacementId.isNotBlank()) {
+            appOpenAd = TUSplashAd(
+                application,
+                config.ids.appOpenPlacementId,
+                splashListener,
+                SPLASH_LOAD_TIMEOUT_MILLIS,
+            ).apply {
+                setAdRevenueListener { info -> onMain { revenuePaid(activeAppOpen?.session, info) } }
+            }
         }
     }
 
@@ -347,7 +358,7 @@ internal object TopOnAds {
     }
 
     private fun loadAppOpen() {
-        if (state != TopOnState.READY || appOpenLoading || appOpenAd.isAdReady) return
+        if (state != TopOnState.READY || !::appOpenAd.isInitialized || appOpenLoading || appOpenAd.isAdReady) return
         appOpenLoading = true
         appOpenLoadSession = events.beginLoad(
             AdFormat.APP_OPEN,
@@ -361,7 +372,7 @@ internal object TopOnAds {
     }
 
     private fun loadInterstitial() {
-        if (state != TopOnState.READY || interstitialLoading || interstitialAd.isAdReady) return
+        if (state != TopOnState.READY || !::interstitialAd.isInitialized || interstitialLoading || interstitialAd.isAdReady) return
         interstitialLoading = true
         interstitialLoadSession = events.beginLoad(
             AdFormat.INTERSTITIAL,
@@ -375,7 +386,7 @@ internal object TopOnAds {
     }
 
     private fun loadRewarded() {
-        if (state != TopOnState.READY || rewardedLoading || rewardedAd.isAdReady) return
+        if (state != TopOnState.READY || !::rewardedAd.isInitialized || rewardedLoading || rewardedAd.isAdReady) return
         rewardedLoading = true
         rewardedLoadSession = events.beginLoad(
             AdFormat.REWARDED,
@@ -638,7 +649,8 @@ internal object TopOnAds {
     ): Boolean {
         val reason = fullScreenShowGate.tryAcquire(
             activity = activity,
-            providerFailureReason = state.takeUnless { it == TopOnState.READY }?.showFailureReason(),
+            providerFailureReason = state.takeUnless { it == TopOnState.READY }?.showFailureReason()
+                ?: "ad_not_configured".takeIf { session.adUnitId.isBlank() },
         )
         if (reason != null) {
             session.showFailure(reason)
@@ -749,6 +761,8 @@ internal object TopOnAds {
         }
         splashContainer = null
     }
+
+    internal fun nativePaid(session: AdShowSession, info: TUAdInfo) = revenuePaid(session, info)
 
     private fun revenuePaid(session: AdShowSession?, info: TUAdInfo) {
         val impressionId = info.showId?.trim()?.takeIf(String::isNotEmpty)

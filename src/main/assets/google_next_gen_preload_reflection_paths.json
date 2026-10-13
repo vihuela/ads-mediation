@@ -20,10 +20,12 @@
           "preloadResultAdField": "a",
           "internalAdConfigurationMethod": "b",
           "configurationPriceField": "m"
-        },
-        "priceFields": {
-          "valueMicros": "b"
         }
+      },
+      "nativeAdPaths": ["a->b->m"],
+      "priceFields": {
+        "valueMicros": "b",
+        "currencyCode": "d"
       }
     }
   }
