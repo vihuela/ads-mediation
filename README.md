@@ -718,9 +718,14 @@ APK，用于验证 AAR 的 consumer rules 和 GMA 反射字段。
 GitHub Actions 中的 `CI` 和 `Publish GitHub Package` 都只支持在 Actions 页面手动触发，不会因
 push、PR 或 tag 自动运行。
 
-本地或手动发布 CI 都会先读取 GitHub Packages 的 `maven-metadata.xml`，找到最高的稳定
-`major.minor.patch` 版本并自动递增 patch；默认逻辑只识别纯数字版本，不自动拼接分支名。
-当前发布版本采用 `<分支>_<版本号>` 格式：`main_1.0.11`，需通过 `VERSION_NAME` 显式指定。
+本地或手动发布 CI 都会读取 GitHub Packages 的 `maven-metadata.xml`，从所有分支的
+`<分支>_<major.minor.patch>` 和历史纯数字版本中取最高数字版本，将 patch 加 1，
+再自动拼接当前 Git 分支名。例如最高版本为 `main_1.0.11`，在 `main` 发布会得到
+`main_1.0.12`；空仓库从 `<分支>_1.0.0` 开始，预发布版本不参与递增计算。
+
+分支名中的 `/` 等非 ASCII 字母、数字、`.`、`_`、`-` 字符转换为 `-`，例如
+`codex/native` → `codex-native_1.0.12`。Actions 的 detached checkout 使用分支类型的
+`GITHUB_REF_NAME`；其他无法识别分支的情况会报错，可通过 `VERSION_NAME` 显式指定完整版本名。
 此前的 `1.0.11` 保留在 Packages，新接入使用 `main_1.0.11`。
 
 查看下一版本但不发布：
@@ -741,7 +746,14 @@ push、PR 或 tag 自动运行。
 VERSION_NAME=main_1.0.12 ./scripts/publish-next-version.sh
 ```
 
-GitHub Package 版本不可覆盖；脚本默认自动递增可避免重复版本上传。
+`VERSION_NAME` 为完整版本名，显式指定时不再追加分支或递增。
+GitHub Package 版本不可覆盖；避免并发发布，同一份远端元数据可能计算出相同的下一版本。
+
+发布脚本的离线测试（不访问 Packages、不上传产物）：
+
+```shell
+python3 scripts/test-publish-next-version.py
+```
 
 ## 10. 复制给 AI：完整接入提示词
 

@@ -4,6 +4,17 @@ set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 local_properties_file="${project_dir}/local.properties"
 
+# Prefer the checked-out branch; Actions may use a detached checkout.
+branch_name="$(git -C "${project_dir}" symbolic-ref --quiet --short HEAD || true)"
+if [[ -z "${branch_name}" && "${GITHUB_REF_TYPE:-}" == "branch" ]]; then
+    branch_name="${GITHUB_REF_NAME:-}"
+fi
+branch_prefix="$(printf '%s' "${branch_name}" | LC_ALL=C sed 's/[^A-Za-z0-9._-]/-/g')"
+if [[ -z "${branch_prefix}" && -z "${VERSION_NAME:-}" ]]; then
+    echo "Cannot determine the current branch. Check out a branch or set VERSION_NAME explicitly." >&2
+    exit 1
+fi
+
 read_local_property() {
     local property_name="$1"
     if [[ ! -f "${local_properties_file}" ]]; then
@@ -52,14 +63,19 @@ latest_version=""
 if [[ "${http_status}" == "200" ]]; then
     latest_version="$(
         tr '<' '\n' < "${metadata_file}" |
-            sed -n 's#^version>\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$#\1#p' |
-            awk -F. '
+            sed -n 's#^version>\(.*\)$#\1#p' |
+            awk '
                 BEGIN { major = -1; minor = -1; patch = -1 }
-                $1 > major || ($1 == major && $2 > minor) ||
-                    ($1 == major && $2 == minor && $3 > patch) {
-                    major = $1
-                    minor = $2
-                    patch = $3
+                {
+                    # Accept legacy numeric versions and <branch>_<version>.
+                    sub(/^.*_/, "")
+                    if ($0 !~ /^[0-9]+\.[0-9]+\.[0-9]+$/) next
+                    split($0, parts, ".")
+                    m = parts[1] + 0; n = parts[2] + 0; p = parts[3] + 0
+                    if (m > major || (m == major && n > minor) ||
+                        (m == major && n == minor && p > patch)) {
+                        major = m; minor = n; patch = p
+                    }
                 }
                 END {
                     if (major >= 0) print major "." minor "." patch
@@ -74,13 +90,14 @@ fi
 if [[ -n "${VERSION_NAME:-}" ]]; then
     next_version="${VERSION_NAME}"
 elif [[ -z "${latest_version}" ]]; then
-    next_version="1.0.0"
+    next_version="${branch_prefix}_1.0.0"
 else
     IFS=. read -r version_major version_minor version_patch <<< "${latest_version}"
-    next_version="${version_major}.${version_minor}.$((version_patch + 1))"
+    next_version="${branch_prefix}_${version_major}.${version_minor}.$((version_patch + 1))"
 fi
 
-echo "Current package version: ${latest_version:-none}"
+echo "Current branch: ${branch_name:-detached}"
+echo "Highest published numeric version: ${latest_version:-none}"
 echo "Next package version: ${next_version}"
 
 if [[ "${1:-}" == "--print-next-version" ]]; then
