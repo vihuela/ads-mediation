@@ -19,6 +19,18 @@ class BidCandidateSelectorTest {
     ) = AdBidCandidate(platform, format, "${platform.name}_${format.name}", available, price)
 
     @Test
+    fun `winning source is preserved for native and fullscreen even when price is unknown`() {
+        for (format in AdFormat.entries) {
+            val winner = candidate(AdPlatform.TOPON, format, price = null)
+            val data = BidDecision(listOf(format), listOf(winner), winner, "Mintegral").toEventData()
+            assertEquals("Mintegral", data.adSource)
+            assertEquals(null, data.winningValue)
+            assertEquals(AdPlatform.TOPON, data.winnerPlatform)
+            assertEquals(null, BidDecision(listOf(format), emptyList(), null).toEventData().adSource)
+        }
+    }
+
+    @Test
     fun `highest price wins across all four platform and format combinations`() {
         val candidates = listOf(
             candidate(price = 0.001),

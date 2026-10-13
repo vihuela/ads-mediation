@@ -15,6 +15,7 @@ internal data class BidDecision(
     val formats: List<AdFormat>,
     val candidates: List<AdBidCandidate>,
     val selection: AdBidCandidate?,
+    val winnerAdSource: String? = null,
 )
 
 internal object BidCandidateSelector {
@@ -60,7 +61,14 @@ internal object AdBiddingCoordinator {
                 AdBidCandidate(source.platform, format, source.adUnitId(format), available, price.validPriceOrNull())
             }
         }
-        return BidDecision(formats, candidates, BidCandidateSelector.select(candidates, formats))
+        val winner = BidCandidateSelector.select(candidates, formats)
+        val adSource = winner?.let {
+            when (it.platform) {
+                AdPlatform.ADMOB -> AdMobAds.bidAdSource(it.format)
+                AdPlatform.TOPON -> TopOnAds.bidAdSource(it.format)
+            }
+        }
+        return BidDecision(formats, candidates, winner, adSource)
     }
 }
 
@@ -71,6 +79,7 @@ internal fun BidDecision.toEventData(): AdBidEventData {
     val topon = candidates.firstOrNull { it.platform == AdPlatform.TOPON && it.format == primary }
     return AdBidEventData(
         winnerPlatform = selection?.platform,
+        adSource = winnerAdSource,
         admobAvailable = admob?.available == true,
         topOnAvailable = topon?.available == true,
         admobValue = admob?.priceUsd,

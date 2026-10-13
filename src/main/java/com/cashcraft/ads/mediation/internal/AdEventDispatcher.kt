@@ -234,6 +234,7 @@ internal class AdShowSession(
                 result = if (data.winnerPlatform == null) "no_candidate" else "won",
                 currency = "USD",
                 winnerPlatform = data.winnerPlatform,
+                adSource = data.adSource,
                 requestedFormat = data.requestedFormat,
                 eligibleFormats = data.eligibleFormats,
                 winnerFormat = data.winnerFormat,
@@ -313,4 +314,5 @@ internal data class AdBidEventData(
     val eligibleFormats: List<AdFormat> = emptyList(),
     val winnerFormat: AdFormat? = null,
     val candidates: List<AdBidCandidate> = emptyList(),
+    val adSource: String? = null,
 )

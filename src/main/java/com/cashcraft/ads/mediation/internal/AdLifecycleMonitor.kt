@@ -6,6 +6,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import java.lang.ref.WeakReference
+import java.util.Collections
+import java.util.WeakHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
 /** Single source of truth for host activity and foreground state. */
@@ -22,7 +24,7 @@ internal object AdLifecycleMonitor {
     private val listeners = CopyOnWriteArrayList<Listener>()
     private var installedApplication: Application? = null
     private var resumedActivity = WeakReference<Activity>(null)
-    private var startedActivityCount = 0
+    private val startedActivities = Collections.newSetFromMap(WeakHashMap<Activity, Boolean>())
 
     @Volatile
     var isAppInForeground: Boolean = false
@@ -33,6 +35,7 @@ internal object AdLifecycleMonitor {
 
     private val callbacks = object : Application.ActivityLifecycleCallbacks {
         override fun onActivityResumed(activity: Activity) {
+            startedActivities.add(activity)
             resumedActivity = WeakReference(activity)
             if (!isAppInForeground) enterForeground(activity)
             listeners.forEach { it.onActivityResumed(activity) }
@@ -45,16 +48,17 @@ internal object AdLifecycleMonitor {
         }
 
         override fun onActivityStarted(activity: Activity) {
-            startedActivityCount++
-            if (startedActivityCount == 1) enterForeground(activity)
+            startedActivities.add(activity)
+            if (startedActivities.size == 1) enterForeground(activity)
         }
 
         override fun onActivityStopped(activity: Activity) {
-            startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
-            if (startedActivityCount == 0) enterBackground()
+            // Ignore stops for activities whose start/resume we never observed.
+            if (startedActivities.remove(activity) && startedActivities.isEmpty()) enterBackground()
         }
 
         override fun onActivityDestroyed(activity: Activity) {
+            startedActivities.remove(activity)
             if (resumedActivity.get() === activity) resumedActivity.clear()
             listeners.forEach { it.onActivityDestroyed(activity) }
         }
@@ -94,7 +98,7 @@ internal object AdLifecycleMonitor {
 
     private fun seed(activity: Activity) {
         resumedActivity = WeakReference(activity)
-        startedActivityCount = startedActivityCount.coerceAtLeast(1)
+        startedActivities.add(activity)
         isAppInForeground = true
     }
 
@@ -116,7 +120,7 @@ internal object AdLifecycleMonitor {
             currentActivity == null &&
             !FullScreenShowGate.isAnyAdShowing
         ) {
-            startedActivityCount = 0
+            // Paused activities remain started until their own onStop.
             enterBackground()
         }
     }

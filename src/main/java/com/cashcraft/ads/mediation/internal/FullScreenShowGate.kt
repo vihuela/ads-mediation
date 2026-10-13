@@ -1,37 +1,21 @@
 package com.cashcraft.ads.mediation.internal
 
 import android.app.Activity
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
-/** Shared full-screen show admission while keeping one independent gate per provider. */
-internal class FullScreenShowGate {
-    private val showing = AtomicBoolean(false)
+/** One process-wide owner across providers and formats; only that show may release it. */
+internal object FullScreenShowGate {
+    private val owner = AtomicReference<Any?>(null)
 
-    init {
-        gates += showing
-    }
+    val isAnyAdShowing: Boolean
+        get() = owner.get() != null
 
-    val isShowing: Boolean
-        get() = showing.get()
-
-    fun tryAcquire(activity: Activity, providerFailureReason: String?): String? =
+    fun tryAcquire(activity: Activity, providerFailureReason: String?, attempt: Any): String? =
         providerFailureReason
             ?: AdLifecycleMonitor.activityShowFailureReason(activity)
-            ?: if (!showing.compareAndSet(false, true)) {
-                "another_full_screen_ad_showing"
-            } else {
-                null
-            }
+            ?: if (owner.compareAndSet(null, attempt)) null else "another_full_screen_ad_showing"
 
-    fun release() {
-        showing.set(false)
-    }
-
-    internal companion object {
-        private val gates = CopyOnWriteArrayList<AtomicBoolean>()
-
-        val isAnyAdShowing: Boolean
-            get() = gates.any(AtomicBoolean::get)
+    fun release(attempt: Any) {
+        owner.compareAndSet(attempt, null)
     }
 }

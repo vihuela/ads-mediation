@@ -55,7 +55,7 @@ enum class AdMobState {
 object AdMobAds {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val fullScreenShowGate = FullScreenShowGate()
+    private val fullScreenShowGate = FullScreenShowGate
     private val mobileAdsInitializationStarted = AtomicBoolean(false)
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
 
@@ -69,6 +69,12 @@ object AdMobAds {
     private lateinit var autoAppOpenController: AutoAppOpenController<AdShowSession>
     private val preloadDescriptors = mutableMapOf<String, PreloadDescriptor>()
     private val preloadLoadSessions = mutableMapOf<String, AdLoadSession>()
+
+    private var initializationAttempt = 0L
+    internal var initializationError: Throwable? = null
+        private set
+    internal val canRetryInitialization: Boolean
+        get() = state == AdMobState.FAILED && initializationError is java.io.IOException
 
     /** Call once from `Application.onCreate`. Initialization itself runs off the main thread. */
     fun initialize(
@@ -88,7 +94,18 @@ object AdMobAds {
                     return
                 }
                 AdMobState.FAILED -> {
-                    mainHandler.post { onInitialized(false) }
+                    if (!canRetryInitialization) {
+                        mainHandler.post { onInitialized(false) }
+                        return
+                    }
+                    require(this.application === application && this.config == config) {
+                        "Retry must reuse the installed AdMob configuration"
+                    }
+                    state = AdMobState.INITIALIZING
+                    initializationError = null
+                    initializationListeners += onInitialized
+                    mobileAdsInitializationStarted.set(false)
+                    onMain { beginMobileAdsInitialization() }
                     return
                 }
                 AdMobState.NOT_INITIALIZED -> Unit
@@ -145,14 +162,22 @@ object AdMobAds {
     private fun beginMobileAdsInitialization() {
         if (!mobileAdsInitializationStarted.compareAndSet(false, true)) return
         state = AdMobState.INITIALIZING
+        val token = ++initializationAttempt
         backgroundScope.launch {
-            val initialized = runCatching {
+            val result = runCatching {
                 MobileAds.initialize(
                     application,
-                    InitializationConfig.Builder(config.ids.applicationId).build(),
+                    InitializationConfig.Builder(config.ids.applicationId)
+                        .setNativeValidatorDisabled()
+                        .build(),
                 )
-            }.isSuccess
-            mainHandler.post { finishInitialization(initialized) }
+            }
+            mainHandler.post {
+                if (token == initializationAttempt && state == AdMobState.INITIALIZING) {
+                    initializationError = result.exceptionOrNull()
+                    finishInitialization(result.isSuccess)
+                }
+            }
         }
     }
 
@@ -245,10 +270,12 @@ object AdMobAds {
         events.begin(format, position, config.ids.adUnitId(format))
 
     private fun finishInitialization(success: Boolean) {
+        if (state != AdMobState.INITIALIZING) return
         state = if (success) AdMobState.READY else AdMobState.FAILED
         if (success) startPreloading()
-        initializationListeners.forEach { listener -> runCatching { listener(success) } }
+        val listeners = initializationListeners.toList()
         initializationListeners.clear()
+        listeners.forEach { listener -> runCatching { listener(success) } }
         if (success) autoAppOpenController.onProviderInitialized()
     }
 
@@ -321,6 +348,18 @@ object AdMobAds {
         AdRequest.Builder(adUnitId).build(),
         bufferSize,
     )
+
+    internal fun bidAdSource(format: AdMobFormat): String? = runCatching {
+        if (!isReady(format)) return@runCatching null
+        if (format == AdMobFormat.NATIVE) return@runCatching NativeAds.bidAdSource(AdPlatform.ADMOB)
+        val info = when (format) {
+            AdMobFormat.APP_OPEN -> AppOpenAdPreloader.peekAdResponseInfo(PRELOAD_APP_OPEN)
+            AdMobFormat.INTERSTITIAL -> InterstitialAdPreloader.peekAdResponseInfo(PRELOAD_INTERSTITIAL)
+            AdMobFormat.REWARDED -> RewardedAdPreloader.peekAdResponseInfo(PRELOAD_REWARDED)
+            AdMobFormat.NATIVE -> null
+        }
+        info?.loadedAdSourceResponseInfo?.name
+    }.getOrNull()
 
     internal fun bidPrice(format: AdMobFormat): Double? {
         if (!isReady(format)) return null
@@ -458,6 +497,7 @@ object AdMobAds {
         onResult: (AdMobShowResult) -> Unit,
     ): Boolean {
         val reason = fullScreenShowGate.tryAcquire(
+            attempt = session,
             activity = activity,
             providerFailureReason = state.takeUnless { it == AdMobState.READY }?.showFailureReason()
                 ?: "ad_not_configured".takeIf { session.adUnitId.isBlank() },
@@ -475,7 +515,7 @@ object AdMobAds {
         reason: String,
         onResult: (AdMobShowResult) -> Unit,
     ) {
-        fullScreenShowGate.release()
+        fullScreenShowGate.release(session)
         session.showFailure(reason)
         runCatching { onResult(AdShowResult.Failed(reason)) }
     }
@@ -501,7 +541,7 @@ object AdMobAds {
         val result = session.dismissedResult()
         session.emit(AdMobEventName.DISMISS)
         ad.destroy()
-        fullScreenShowGate.release()
+        fullScreenShowGate.release(session)
         runCatching { onResult(result) }
     }
 
@@ -514,7 +554,7 @@ object AdMobAds {
         val reason = error.message.ifBlank { "show_failed" }
         session.showFailure(reason, error.code.toString())
         ad.destroy()
-        fullScreenShowGate.release()
+        fullScreenShowGate.release(session)
         runCatching { onResult(AdShowResult.Failed(reason)) }
     }
 

@@ -52,6 +52,8 @@ internal object NativeAds {
         slots[platform]?.cache?.hasFreshValue == true
     }
 
+    fun bidAdSource(platform: AdPlatform): String? = runCatching { slots[platform]?.cache?.peek()?.source }.getOrNull()
+
     fun bidPrice(platform: AdPlatform): Double? = slots[platform]?.cache?.peek()?.priceUsd
 
     fun show(
@@ -114,7 +116,7 @@ internal object NativeAds {
         }
         val session = slot.events.begin(AdFormat.NATIVE, position, slot.id)
         if (config.provider is BiddingProviderConfig) {
-            session.bidResult(BidDecision(listOf(AdFormat.NATIVE), candidates, selection).toEventData())
+            session.bidResult(BidDecision(listOf(AdFormat.NATIVE), candidates, selection, runCatching { ad.source }.getOrNull()).toEventData())
         }
         var ownedView: View? = null
         var impressed = false

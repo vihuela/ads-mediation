@@ -29,11 +29,16 @@ android {
 
     defaultConfig {
         minSdk = 26
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
     }
 
     buildFeatures {
         buildConfig = true
+    }
+
+    testOptions {
+        targetSdk = 36
     }
 
     publishing {
@@ -113,11 +118,15 @@ dependencies {
     // 聚合层公共依赖：UMP 同意流程、Android 扩展、协程和 JSON 反射配置解析。
     implementation(libs.user.messaging.platform)
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
 
     // 单元测试。
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
 }
 
 afterEvaluate {

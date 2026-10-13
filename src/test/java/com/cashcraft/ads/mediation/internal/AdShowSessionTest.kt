@@ -32,6 +32,7 @@ class AdShowSessionTest {
         session.bidResult(
             AdBidEventData(
                 winnerPlatform = AdPlatform.TOPON,
+                adSource = "Pangle",
                 admobAvailable = false,
                 topOnAvailable = false,
                 admobValue = null,
@@ -52,6 +53,7 @@ class AdShowSessionTest {
         session.emit(AdEventName.DISMISS)
         val bid = events.single { it.name == AdEventName.BID_RESULT }
         val parameters = bid.analyticsParameters()
+        assertEquals("Pangle", parameters["ad_source"])
         assertEquals("rewarded", parameters["requested_ad_type"])
         assertEquals("rewarded,interstitial", parameters["eligible_ad_types"])
         assertEquals("interstitial", parameters["winner_format"])
@@ -107,12 +109,14 @@ class AdShowSessionTest {
                     eligibleFormats = formats,
                     winnerFormat = formats.first(),
                     candidates = candidates,
+                    adSource = "Google",
                 ),
             )
             val bid = events.single { it.name == AdEventName.BID_RESULT }
             val parameters = bid.analyticsParameters()
             assertTrue("$formats emitted ${parameters.size} parameters", parameters.size <= 25)
-            assertEquals(22, parameters.size)
+            assertEquals(23, parameters.size)
+            assertEquals("Google", parameters["ad_source"])
             assertEquals("admob", parameters["winner_platform"])
             assertEquals(formats.first().analyticsValue, parameters["winner_format"])
             assertEquals(formats.first().analyticsValue, parameters["requested_ad_type"])

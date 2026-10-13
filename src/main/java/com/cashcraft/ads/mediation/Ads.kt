@@ -5,6 +5,8 @@ import android.app.Application
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
 import com.cashcraft.ads.mediation.admob.AdMobAds
 import com.cashcraft.ads.mediation.admob.AdMobConfig
 import com.cashcraft.ads.mediation.admob.AdMobState
@@ -34,6 +36,14 @@ enum class AdsState {
 object Ads {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
+    private val initializationStateListeners = CopyOnWriteArrayList<(AdsState) -> Unit>()
+    private val pendingInitializationStates = java.util.ArrayDeque<Pair<AdsState, List<(AdsState) -> Unit>>>()
+    private var notifyingInitializationState = false
+    private var lastNotifiedInitializationState = AdsState.NOT_INITIALIZED
+    private var initializationAttempt = 0L
+    private var retryingProviders = false
+    @Volatile
+    private var initializationFailure: InitializationFailure? = null
     private val providerInitializationStarted = AtomicBoolean(false)
     private val biddingShowInProgress = AtomicBoolean(false)
 
@@ -80,24 +90,103 @@ object Ads {
             }
         }
 
+    /** True only for a failed consent request or a supported transient SDK failure. */
+    val canRetryInitialization: Boolean
+        get() = state == AdsState.FAILED && initializationFailure?.retryable == true
+
+    /**
+     * Main thread only. Reuses installed configuration; null uses the current resumed host or waits
+     * for the next resume. Other states and terminal failures are no-ops. A supplied host must be
+     * live, verified RESUMED, and belong to the installed Application, as with [initialize].
+     * Scheduling/backoff and network observation belong to the app, never this library.
+     */
+    fun retryInitialization(activity: Activity? = null) {
+        check(Looper.myLooper() == Looper.getMainLooper()) { "Initialization retry requires the main thread" }
+        if (!canRetryInitialization) return
+        activity?.let {
+            require(it.application === application && !it.isFinishing && !it.isDestroyed) {
+                "Retry host must be live and belong to the installed Application"
+            }
+            require(if (it is LifecycleOwner) it.lifecycle.currentState == Lifecycle.State.RESUMED
+                else AdLifecycleMonitor.currentActivity === it) { "Retry host must be verified RESUMED" }
+        }
+        val failed = requireNotNull(initializationFailure)
+        if (failed.stage == InitializationStage.WAITING_FOR_UMP && !umpConsentManager.prepareRetry()) return
+        retryingProviders = failed.stage == InitializationStage.PROVIDER_INITIALIZING
+        initializationAttempt++
+        initializationFailure = null
+        providerInitializationStarted.set(false)
+        if (admobInitializationResult != true) admobInitializationResult = null
+        if (topOnInitializationResult != true) topOnInitializationResult = null
+        initializationStage = InitializationStage.WAITING_FOR_UMP
+        notifyInitializationState()
+        activity?.let { AdLifecycleMonitor.install(application, it) }
+        if (!config.umpConsent.enabled) startProviderInitialization()
+        else AdLifecycleMonitor.currentActivity?.let(::gatherConsentIfNeeded)
+    }
+
+    /** Main-thread registration, immediate snapshot and persistent transitions, independent of Splash. */
+    fun addInitializationStateListener(listener: (AdsState) -> Unit): () -> Unit {
+        check(Looper.myLooper() == Looper.getMainLooper()) { "Initialization observation requires the main thread" }
+        val registration: (AdsState) -> Unit = { listener(it) }
+        initializationStateListeners += registration
+        runCatching { registration(state) }
+        return { onMain { initializationStateListeners.remove(registration) } }
+    }
+
+    private fun notifyInitializationState() {
+        val current = state
+        if (current == lastNotifiedInitializationState) return
+        lastNotifiedInitializationState = current
+        pendingInitializationStates.addLast(current to initializationStateListeners.toList())
+        if (notifyingInitializationState) return
+        notifyingInitializationState = true
+        try {
+            while (pendingInitializationStates.isNotEmpty()) {
+                val (next, listeners) = pendingInitializationStates.removeFirst()
+                listeners.forEach { listener ->
+                    if (listener in initializationStateListeners) runCatching { listener(next) }
+                }
+            }
+        } finally { notifyingInitializationState = false }
+    }
+
     fun initialize(
         application: Application,
         config: AdsConfig,
         onInitialized: (Boolean) -> Unit = {},
+    ) = initializeInternal(application, config, onInitialized, null)
+
+    /** Binds a verified RESUMED host when initialization starts after its onResume. Main thread only. */
+    fun initialize(activity: Activity, config: AdsConfig, onInitialized: (Boolean) -> Unit = {}) {
+        check(Looper.myLooper() == Looper.getMainLooper()) { "Activity initialization requires the main thread" }
+        require(!activity.isFinishing && !activity.isDestroyed) { "Activity must be live and RESUMED" }
+        require(if (activity is LifecycleOwner) activity.lifecycle.currentState == Lifecycle.State.RESUMED
+            else AdLifecycleMonitor.currentActivity === activity) { "Activity must be verified RESUMED" }
+        initializeInternal(activity.application, config, onInitialized, activity)
+    }
+
+    private fun initializeInternal(
+        application: Application,
+        config: AdsConfig,
+        onInitialized: (Boolean) -> Unit,
+        initialActivity: Activity?,
     ) {
-        var isFirstInitialization = false
         synchronized(this) {
-            val existing = activePlatform
-            require(existing == null || existing == config.provider.platform) {
-                "Ads is already initialized with $existing"
-            }
             if (::config.isInitialized) {
+                require(this.application === application && this.config == config) {
+                    "Ads initialization must reuse the installed Application and AdsConfig"
+                }
                 when (state) {
                     AdsState.READY -> mainHandler.post { onInitialized(true) }
                     AdsState.FAILED -> mainHandler.post { onInitialized(false) }
                     AdsState.NOT_INITIALIZED,
                     AdsState.INITIALIZING,
                     -> initializationListeners += onInitialized
+                }
+                initialActivity?.let {
+                    AdLifecycleMonitor.install(application, it)
+                    gatherConsentIfNeeded(it)
                 }
                 return
             }
@@ -148,13 +237,12 @@ object Ads {
             )
             initializationListeners += onInitialized
             initializationStage = InitializationStage.WAITING_FOR_UMP
-            isFirstInitialization = true
         }
 
-        if (!isFirstInitialization) return
         onMain {
+            notifyInitializationState()
             AdLifecycleMonitor.addListener(lifecycleListener)
-            AdLifecycleMonitor.install(application)
+            AdLifecycleMonitor.install(application, initialActivity)
             if (config.umpConsent.enabled) {
                 AdLifecycleMonitor.currentActivity?.let(::gatherConsentIfNeeded)
             } else {
@@ -167,11 +255,26 @@ object Ads {
         if (!::umpConsentManager.isInitialized || initializationStage != InitializationStage.WAITING_FOR_UMP) {
             return
         }
-        if (activity.isFinishing || activity.isDestroyed) return
+        if (activity.isFinishing || activity.isDestroyed || activity.application !== application) return
+        if (retryingProviders) {
+            if (umpConsentManager.snapshot.canRequestAds) startProviderInitialization()
+            else {
+                initializationFailure = InitializationFailure(InitializationStage.WAITING_FOR_UMP, "consent_not_obtained", false)
+                finishInitialization(false)
+            }
+            return
+        }
+        val token = initializationAttempt
         umpConsentManager.gatherConsent(
             activity = activity,
-            onAdsAllowed = ::startProviderInitialization,
-            onAdsUnavailable = { finishInitialization(false) },
+            onAdsAllowed = { if (token == initializationAttempt) startProviderInitialization() },
+            onAdsUnavailable = { reason ->
+                if (token == initializationAttempt) {
+                    initializationFailure = InitializationFailure(InitializationStage.WAITING_FOR_UMP, reason,
+                        umpConsentManager.failure?.retryable == true)
+                    finishInitialization(false)
+                }
+            },
         )
     }
 
@@ -179,6 +282,9 @@ object Ads {
         if (!umpConsentManager.snapshot.canRequestAds) return
         if (!providerInitializationStarted.compareAndSet(false, true)) return
         initializationStage = InitializationStage.PROVIDER_INITIALIZING
+        retryingProviders = false
+        val token = initializationAttempt
+        notifyInitializationState()
         val initialActivity = AdLifecycleMonitor.currentActivity
             ?.takeUnless { it.isFinishing || it.isDestroyed }
         when (val provider = config.provider) {
@@ -196,7 +302,7 @@ object Ads {
                     appOpenPosition = config.appOpenPosition,
                     mediationMode = AdMediationMode.ADMOB,
                 ),
-                onInitialized = ::finishInitialization,
+                onInitialized = { success -> if (token == initializationAttempt) finishInitialization(success) },
                 initialActivity = initialActivity,
             )
 
@@ -207,7 +313,7 @@ object Ads {
                         config.autoAppOpenMode == AutoAppOpenMode.APP_OPEN_ONLY,
                 ),
                 mediationMode = AdMediationMode.TOPON,
-                onInitialized = ::finishInitialization,
+                onInitialized = { success -> if (token == initializationAttempt) finishInitialization(success) },
                 initialActivity = initialActivity,
             )
 
@@ -225,7 +331,7 @@ object Ads {
                         appOpenPosition = config.appOpenPosition,
                         mediationMode = AdMediationMode.BIDDING,
                     ),
-                    onInitialized = { success -> finishBiddingProviderInitialization(true, success) },
+                    onInitialized = { success -> if (token == initializationAttempt) finishBiddingProviderInitialization(true, success) },
                     initialActivity = initialActivity,
                 )
                 TopOnAds.initialize(
@@ -235,7 +341,7 @@ object Ads {
                         autoShowAppOpen = false,
                     ),
                     mediationMode = AdMediationMode.BIDDING,
-                    onInitialized = { success -> finishBiddingProviderInitialization(false, success) },
+                    onInitialized = { success -> if (token == initializationAttempt) finishBiddingProviderInitialization(false, success) },
                     initialActivity = initialActivity,
                 )
             }
@@ -250,10 +356,21 @@ object Ads {
     }
 
     private fun finishInitialization(success: Boolean) {
+        if (initializationStage != InitializationStage.WAITING_FOR_UMP &&
+            initializationStage != InitializationStage.PROVIDER_INITIALIZING) return
+        if (!success && initializationFailure == null) {
+            val usesAdMob = config.provider is AdMobProviderConfig || config.provider is BiddingProviderConfig
+            initializationFailure = InitializationFailure(initializationStage,
+                "provider_initialization_failed", usesAdMob && AdMobAds.canRetryInitialization)
+        }
+        if (success) initializationFailure = null
         initializationStage = if (success) InitializationStage.COMPLETE else InitializationStage.FAILED
         if (success) NativeAds.initialize(application, config)
-        initializationListeners.forEach { listener -> runCatching { listener(success) } }
+        // Detach this attempt's callbacks before observers can synchronously start a retry.
+        val listeners = initializationListeners.toList()
         initializationListeners.clear()
+        notifyInitializationState()
+        listeners.forEach { listener -> runCatching { listener(success) } }
         if (success) {
             autoSelectionAppOpenController.onProviderInitialized()
         }
@@ -610,6 +727,8 @@ object Ads {
     private const val CONSENT_NOT_OBTAINED = "consent_not_obtained"
     private const val NO_BID_CANDIDATE = "no_preloaded_ad"
 }
+
+private data class InitializationFailure(val stage: InitializationStage, val reason: String, val retryable: Boolean)
 
 private enum class InitializationStage {
     NOT_STARTED,

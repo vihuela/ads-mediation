@@ -52,7 +52,7 @@ internal enum class TopOnState {
 /** TopOn overseas provider. TopOn owns mediation; this layer owns lifecycle and analytics. */
 internal object TopOnAds {
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val fullScreenShowGate = FullScreenShowGate()
+    private val fullScreenShowGate = FullScreenShowGate
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
 
     @Volatile
@@ -213,18 +213,28 @@ internal object TopOnAds {
         }
     }
 
+    fun bidAdSource(format: AdFormat): String? = runCatching {
+        if (format == AdFormat.NATIVE) NativeAds.bidAdSource(AdPlatform.TOPON)
+        else bidInfo(format)?.networkName
+    }.getOrNull()
+
+    private fun bidInfo(format: AdFormat): TUAdInfo? {
+        if (!isReady(format)) return null
+        return when (format) {
+            AdFormat.APP_OPEN -> appOpenAd.checkAdStatus().getTUTopAdInfo()
+            AdFormat.INTERSTITIAL -> interstitialAd.checkAdStatus().getTUTopAdInfo()
+            AdFormat.REWARDED -> rewardedAd.checkAdStatus().getTUTopAdInfo()
+            AdFormat.NATIVE -> null
+        }
+    }
+
     fun bidPrice(format: AdFormat): Double? {
         if (!isReady(format)) return null
         if (format == AdFormat.NATIVE) return NativeAds.bidPrice(AdPlatform.TOPON)
         // Price the same highest-priority cache entry that TopOn is expected to consume on show().
         // checkValidAdCaches().firstOrNull() is only the first item in the cache snapshot and is
         // not documented as the next ad selected by TopOn when multiple ads are cached.
-        val info = when (format) {
-            AdFormat.NATIVE -> return NativeAds.bidPrice(AdPlatform.TOPON)
-            AdFormat.APP_OPEN -> appOpenAd.checkAdStatus().getTUTopAdInfo()
-            AdFormat.INTERSTITIAL -> interstitialAd.checkAdStatus().getTUTopAdInfo()
-            AdFormat.REWARDED -> rewardedAd.checkAdStatus().getTUTopAdInfo()
-        } ?: return null
+        val info = bidInfo(format) ?: return null
         return info.getPublisherRevenue(TUAdConst.CURRENCY.USD)
             ?.takeIf { it.isFinite() && it >= 0.0 }
             ?: info.getEcpm(TUAdConst.CURRENCY.USD)
@@ -647,6 +657,7 @@ internal object TopOnAds {
         onResult: (AdShowResult) -> Unit,
     ): Boolean {
         val reason = fullScreenShowGate.tryAcquire(
+            attempt = session,
             activity = activity,
             providerFailureReason = state.takeUnless { it == TopOnState.READY }?.showFailureReason()
                 ?: "ad_not_configured".takeIf { session.adUnitId.isBlank() },
@@ -666,7 +677,7 @@ internal object TopOnAds {
         errorCode: String? = null,
         cause: Throwable? = null,
     ) {
-        fullScreenShowGate.release()
+        fullScreenShowGate.release(session)
         session.showFailure(reason, errorCode, cause)
         runCatching { onResult(AdShowResult.Failed(reason)) }
     }
@@ -693,7 +704,7 @@ internal object TopOnAds {
         activeRewarded = null
         val result = active.session.dismissedResult()
         active.session.emit(AdEventName.DISMISS)
-        fullScreenShowGate.release()
+        fullScreenShowGate.release(active.session)
         runCatching {
             active.onResult(AdRewardResult(active.rewardEarned, result, active.session.sessionId))
         }
@@ -707,7 +718,7 @@ internal object TopOnAds {
         val active = activeRewarded ?: return
         activeRewarded = null
         active.session.showFailure(reason, errorCode)
-        fullScreenShowGate.release()
+        fullScreenShowGate.release(active.session)
         runCatching {
             active.onResult(
                 AdRewardResult(
@@ -739,7 +750,7 @@ internal object TopOnAds {
     private fun finishDismissed(active: ActiveShow) {
         val result = active.session.dismissedResult()
         active.session.emit(AdEventName.DISMISS)
-        fullScreenShowGate.release()
+        fullScreenShowGate.release(active.session)
         runCatching { active.onResult(result) }
     }
 
@@ -750,7 +761,7 @@ internal object TopOnAds {
         cause: Throwable? = null,
     ) {
         active.session.showFailure(reason, errorCode, cause)
-        fullScreenShowGate.release()
+        fullScreenShowGate.release(active.session)
         runCatching { active.onResult(AdShowResult.Failed(reason)) }
     }
 

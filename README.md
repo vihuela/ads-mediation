@@ -4,22 +4,34 @@
 宿主可以选择直连 AdMob GMA Next-Gen、TopOn 海外版，或者同时初始化两者并按缓存广告的
 单次展示收益进行端内缓存竞价。
 
-当前稳定版本：`main_1.0.12`
+当前稳定版本：`main_1.0.13`
 
 [![打开 AI 接入提示词](https://img.shields.io/badge/AI-%E6%89%93%E5%BC%80%E5%B9%B6%E5%A4%8D%E5%88%B6%E6%8E%A5%E5%85%A5%E6%8F%90%E7%A4%BA%E8%AF%8D-2ea44f)](#10-复制给-ai完整接入提示词)
 
 依赖坐标：
 
 ```kotlin
-implementation("com.cashcraft:ads-mediation:main_1.0.12")
+implementation("com.cashcraft:ads-mediation:main_1.0.13")
 ```
+
+### main_1.0.13 更新
+
+- 按 Activity 实例记录前后台状态，修复晚初始化时旧页面停止造成的误判。
+- AdMob/TopOn 全屏广告共用展示锁，仅持有锁的展示会话可以释放，防止跨平台重叠和迟到回调误释放。
+- 新增前台 Activity 初始化入口、可重试错误判断、显式重试和持续状态监听。
+- 全屏及原生 `ad_bid_result` 增加获胜素材的 `ad_source`；无胜者或平台未提供时省略。
+- 保留现有曝光/失败等式和外部原生渲染接口。TopOn 收益回调及 `ad_paid` 改用 SDK 的
+  `getPublisherRevenue(USD)`，统一输出 USD；不自行计算汇率，异常金额保留未知，不补零。
+  AdMob 收益继续保留官方回调的币种。
+- AdMob 初始化通过官方 `setNativeValidatorDisabled()` 关闭原生测试广告验证器浮层，
+  适用于 AdMob 直连和竞价中的 AdMob 路径；宿主不需要额外设置。
 
 ### main_1.0.12 更新
 
 - AdMob 开屏、插屏、激励与原生共用反射价格校验：仅接收非负 `Long` 微单位和明确的 USD 币种。
   非美元、负值、类型异常、字段缺失或未知 SDK 版本保留 `null`，真实零价保留 `0`。
 - 修复全屏竞价忽略币种、将负价改为零的问题；未知价格广告仍可按现有规则兜底展示。
-- 收益回调与竞价币种分离。AdMob 保留原币种；TopOn 改为读取原始 `getPublisherRevenue()`
+- 收益回调与竞价币种分离。AdMob 保留原币种；该版本 TopOn 读取原始 `getPublisherRevenue()`
   与 `getCurrency()`，`ad_paid` 和收益 payload 均不再强制换成美元。升级后请检查后端按币种汇总。
 - Demo 增加 `AdsRevenueAudit` 日志，可按 session 核对收益 payload 与 `ad_paid` 的金额和币种。
 
@@ -122,7 +134,7 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.cashcraft:ads-mediation:main_1.0.12")
+    implementation("com.cashcraft:ads-mediation:main_1.0.13")
 }
 ```
 
@@ -230,6 +242,28 @@ val fixedPlatform: AdPlatform? = Ads.platform
 SDK 崩溃；展示回调会返回 `Failed("sdk_initialization_failed")`。如果在 `Ads.initialize()` 之前
 调用展示，也不会崩溃，但由于事件分发器尚未建立，只能收到 `Failed("sdk_not_initialized")`
 回调，无法上报完整的 `ad_position/ad_show_fail` 事件对。
+
+初始化较晚、当前页面已经处于 `RESUMED` 时，可使用 `Ads.initialize(activity, config)`
+立即绑定宿主并开始同意流程。该入口必须在主线程调用；`LifecycleOwner` 必须处于 `RESUMED`，
+普通 Activity 必须已被 SDK 观察到恢复事件。重复初始化必须复用同一 Application 和相等的 AdsConfig。
+
+初始化临时失败后，由宿主在网络恢复或用户重试时显式恢复：
+
+```kotlin
+// 在主线程注册，立即收到当前状态，之后持续接收变化；页面销毁时调用 removeListener()。
+val removeListener = Ads.addInitializationStateListener { state ->
+    // 更新业务界面。原 onInitialized 回调每次注册只交付一次结果。
+}
+
+if (Ads.canRetryInitialization) {
+    Ads.retryInitialization(activity) // 使用原配置；也可不传宿主，等待下一次恢复到前台。
+}
+```
+
+仅 UMP 的网络/内部/超时错误，以及 AdMob 初始化的直接 I/O 异常可重试；配置错误、
+用户未同意、未知错误和 TopOn 初始化失败不自动判为可恢复。重试不清空用户同意状态，
+不重复初始化已经成功的平台；旧尝试的迟到回调不影响新尝试。SDK 不内置循环重试或网络监听。
+竞价模式任意平台已成功时整体为 READY，此入口不会重新初始化另一家失败平台。
 
 ### 2.1 `AdsConfig` 参数
 
@@ -563,10 +597,10 @@ ad_position = ad_impression + ad_show_fail
 | --- | --- |
 | `reason` | 失败或结果原因，最长 64 字符 |
 | `errorCode` / `error_code` | 平台错误码 |
-| `adSource` / `ad_source` | 实际填充广告源 |
+| `adSource` / `ad_source` | 实际填充广告源；竞价结果为获胜素材的网络名称，未知时省略 |
 | `responseId` / `response_id` | 平台响应 ID |
 | `value` | 单次展示收益，或竞价价格，单位由事件的 `currency` 确定 |
-| `valueMicros` / `value_micros` | 对应币种的微单位；AdMob 原值，TopOn 原始收益乘百万后四舍五入 |
+| `valueMicros` / `value_micros` | 对应币种的微单位；AdMob 原值，TopOn 的 USD API 收益乘百万后四舍五入 |
 | `currency` | ISO 货币代码；竞价事件统一为 USD |
 | `mediationAdapterClassName` | AdMob 实际 mediation adapter 类名 |
 | `precisionType` | 收益精度类型 |
@@ -627,7 +661,7 @@ revenueListener = AdRevenueListener { payload ->
 | `sessionId` / `position` | 展示会话及稳定业务场景 |
 | `placementId` | AdMob ad unit ID 或 TopOn placement ID |
 | `valueMicros` | `currencyCode` 对应货币的微单位，非负且非空 |
-| `currencyCode` | SDK 原始收益的货币代码，非空；AdMob 和 TopOn 都不保证是 USD |
+| `currencyCode` | 非空；AdMob 为官方回调原币种，TopOn 固定 USD（由 SDK 的 USD API 获取金额） |
 | `adNetwork` | 实际填充广告网络；Provider 未提供时为 null |
 | `impressionId` | AdMob response ID 或 TopOn show ID；Provider 未提供时为 null |
 | `precisionType` | Provider 收益精度；未提供时为 null |
@@ -639,13 +673,19 @@ Provider 特有属性：
 | `AdMobRevenuePayload.mediationAdapterClassName` | 实际填充 adapter 类名 |
 | `TopOnRevenuePayload.adInfo` | 原始 `TUAdInfo`；只供即时原生集成使用，不得持久化 |
 
-AdMob 收益保留官方回调的微单位和币种。TopOn 收益使用原始 `getPublisherRevenue()` 与
-`getCurrency()`，只有竞价路径才调用指定 USD 的接口。非美元收益仍正常上报；币种缺失、金额
-为负或非法时不发出收益事件/payload。币种仅去除首尾空白并转为大写，不进行汇率换算。
+AdMob 收益保留官方回调的微单位和币种。TopOn 全屏和原生的收益回调、`ad_paid`
+统一调用 `getPublisherRevenue(TUAdConst.CURRENCY.USD)`，金额来自 TopOn SDK，币种为 USD；
+本库不自行计算汇率，也不回退到原币种金额或用 eCPM 估算实际收益。
 
-TopOn `ad_paid.value` 保留原始小数，`valueMicros` 四舍五入到整数微单位，例如
-`0.0005737 CNY` 对应 `574` 微元；这不是美元。后端应按 `currencyCode` 分组或明确换汇，
-只接受美元的宿主接口必须检查 `currencyCode == "USD"` 后再上报。
+USD API 返回空值、负数、NaN/Infinity、抛异常，或金额无法表示为 Long 微单位时，
+内部收益结果为 `null`，不发出 `ad_paid` 或收益 payload，不伪造零值。现有公开收益 payload
+的金额字段仍为非空类型。真实零收益正常上报，不影响实际曝光事件及曝光/失败等式。
+
+TopOn `ad_paid.value` 保留 USD API 返回的小数，`valueMicros` 四舍五入到整数微美元，例如
+`0.0005737 USD` 对应 `574` 微美元；这里只转换金额单位，不进行汇率换算。
+`TopOnRevenuePayload.adInfo` 仍保留原始 SDK 对象；需要统一 USD 时读取公共金额/币种字段，
+不要把原对象的无参收益值与公共 `currencyCode` 混用。AdMob 收益仍可能是非美元，
+只接受美元的宿主接口仍需检查 `currencyCode == "USD"`。
 
 ## 7. 竞价逻辑和兼容范围
 
@@ -716,6 +756,26 @@ GMA Next-Gen 同时打包。
 
 ## 9. 验证、混淆和发布
 
+main_1.0.13 发布检查（2026-10-13～14，三星 SM-S931U1 / Android 16）：
+
+- 121 项 JVM 单元测试通过；SDK/Demo Lint 和 Release R8 构建通过，保留此前第三方依赖告警。
+- 新增 3 项 Android 真机 instrumentation 测试，全部通过。实际切换两个 Activity，覆盖晚安装监控、
+  旧 Activity 停止、回到桌面再恢复；共享锁探针覆盖两个展示会话互斥和旧会话迟到释放。
+- 真机注入 UMP 网络失败后，公开重试入口恢复到真实 AdMob SDK 初始化成功；重复重试、
+  迟到失败和持续状态监听符合预期。注入测试不等同于线上网络故障自然复现。
+- 真机使用真实 TUAdInfo 的 USD API，以合成金额覆盖四种格式的合法值、真实零值、null、负数、
+  NaN、Infinity、溢出及 API 异常；未知金额保持 null，不上报伪造的零收益。
+- 混淆包真实展示包含 AdMob 原生卡片/全屏 Dialog、插屏，以及 TopOn 开屏和激励。
+  竞价广告源分别为 `Reservation campaign` 和 `Mintegral`，与曝光来源一致；
+  TopOn 开屏 `0.0001562 USD`、激励 `0.0004113 USD` 的 ad_paid 和独立收益 payload 对齐。
+- 加入关闭验证器配置后重新生成混淆包：AdMob 原生全屏 Dialog 无验证器浮层，曝光/收益/关闭正常；
+  开屏、激励也通过。两轮共 `position=9`、`impression=8`、`show_fail=1`，8 对收益事件/payload 对齐。
+  已安装 APK 的 SHA-256 与最终混淆包一致，无 DEBUGGABLE 标志。
+- 本轮 TopOn 插屏及原生请求返回 `4001 / Return Ad is empty`，没有将空填充记为成功展示。
+  非 USD 和异常金额回调由注入测试覆盖，不声称收到过这些线上回调。
+- 本地日志、截图、埋点审计和 instrumentation 结果保存在 `build/verification/migration-device/`，
+  不纳入版本控制。可单独执行真机回归：`./gradlew :connectedDebugAndroidTest`。
+
 main_1.0.12 发布检查（2026-10-13）：94 项 JVM 单元测试通过，Lint 与 Release R8 构建通过。
 真机为三星 SM-S931U1 / Android 16，运行包无 DEBUGGABLE 标志：
 
@@ -744,7 +804,7 @@ Release R8 构建及本地 Maven 发布通过。Demo Lint 和 R8 仍有告警，
 
 ```shell
 ./gradlew clean testDebugUnitTest lintDebug :r8-smoke-app:assembleRelease publishToMavenLocal \
-  -PVERSION_NAME=main_1.0.12
+  -PVERSION_NAME=main_1.0.13
 ```
 
 R8 smoke app 会让 AdMob、TopOn 和竞价路径都保持可达，然后构建开启压缩和资源收缩的 Release
@@ -761,7 +821,7 @@ push、PR 或 tag 自动运行。
 分支名中的 `/` 等非 ASCII 字母、数字、`.`、`_`、`-` 字符转换为 `-`，例如
 `codex/native` → `codex-native_1.0.13`。Actions 的 detached checkout 使用分支类型的
 `GITHUB_REF_NAME`；其他无法识别分支的情况会报错，可通过 `VERSION_NAME` 显式指定完整版本名。
-此前的 `1.0.11` 保留在 Packages，新接入使用 `main_1.0.12`。
+此前的 `1.0.11` 保留在 Packages，新接入使用 `main_1.0.13`。
 
 查看下一版本但不发布：
 
@@ -799,7 +859,7 @@ python3 scripts/test-publish-next-version.py
 请在当前 Android 工程中完整接入 Ads Mediation SDK，并直接修改、编译和验证项目。
 
 固定信息：
-- Maven 坐标：com.cashcraft:ads-mediation:main_1.0.12
+- Maven 坐标：com.cashcraft:ads-mediation:main_1.0.13
 - GitHub Packages 仓库：https://maven.pkg.github.com/vihuela/ads-mediation
 - 公共包名：com.cashcraft.ads.mediation
 - 支持 APP_OPEN、INTERSTITIAL、REWARDED
@@ -811,7 +871,7 @@ python3 scripts/test-publish-next-version.py
 1. 检查 settings.gradle.kts，在 dependencyResolutionManagement 中加入 GitHub Packages、
    Pangle、Mintegral 和 TopOn 仓库。GitHub 用户名/token 优先从 Gradle property 或环境变量读取，
    本地再从已被 Git 忽略的 local.properties 读取；绝对不能把 token 写进可提交文件。
-2. 在 App 模块加入 implementation("com.cashcraft:ads-mediation:main_1.0.12")。
+2. 在 App 模块加入 implementation("com.cashcraft:ads-mediation:main_1.0.13")。
 3. 为每个 product flavor 设置 manifestPlaceholders["admobApplicationId"]。不要使用生产 ID
    进行测试；开发环境可使用 AdMobIds.TEST 对应的官方测试 App ID。
 4. 检查现有配置来源，选择 AdMob、TopOn 或 Bidding。不要把 App ID、App Key、ad unit ID、

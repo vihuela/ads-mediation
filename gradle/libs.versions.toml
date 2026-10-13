@@ -29,6 +29,8 @@ kotlinxCoroutines = "1.10.1"
 kotlinxSerialization = "1.9.0"
 okhttp = "4.12.0"
 junit = "4.13.2"
+robolectric = "4.14.1"
+androidxLifecycle = "2.9.4"
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
@@ -66,3 +68,6 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+androidx-lifecycle-runtime = { group = "androidx.lifecycle", name = "lifecycle-runtime", version.ref = "androidxLifecycle" }
