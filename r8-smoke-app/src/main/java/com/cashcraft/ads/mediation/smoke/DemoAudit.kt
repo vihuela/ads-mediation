@@ -9,6 +9,16 @@ import org.json.JSONObject
 internal object DemoAudit : AdEventListener {
     private val sessions = linkedMapOf<String, MutableList<AdEventName>>()
     private var lastBid = "No auction yet"
+    fun onRevenue(payload: AdRevenuePayload) {
+        Log.i("AdsRevenueAudit", JSONObject()
+            .put("event_id", payload.eventId)
+            .put("session_id", payload.sessionId)
+            .put("ad_platform", payload.platform.analyticsValue)
+            .put("ad_type", payload.format.analyticsValue)
+            .put("value_micros", payload.valueMicros)
+            .put("currency", payload.currencyCode)
+            .toString())
+    }
     @Synchronized override fun onEvent(event: AdEvent) {
         val json = JSONObject(event.analyticsParameters()).put("event", event.name.analyticsName)
         if (event.name == AdEventName.BID_RESULT) {

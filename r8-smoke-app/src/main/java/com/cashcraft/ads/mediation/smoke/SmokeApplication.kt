@@ -46,6 +46,7 @@ class SmokeApplication : Application() {
                 autoAppOpenMode = if (autoMode == "mixed") com.cashcraft.ads.mediation.AutoAppOpenMode.APP_OPEN_OR_INTERSTITIAL
                     else com.cashcraft.ads.mediation.AutoAppOpenMode.APP_OPEN_ONLY,
                 eventListener = DemoAudit,
+                revenueListener = com.cashcraft.ads.mediation.AdRevenueListener(DemoAudit::onRevenue),
             ),
         )
     }

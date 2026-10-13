@@ -37,7 +37,16 @@ internal object AdMobNextGenBidPrice {
         val version = MobileAds.getVersion().let {
             "${it.majorVersion}.${it.minorVersion}.${it.microVersion}"
         }
-        val config = repository?.get(version) ?: return null
+        readPreloadPrice(format, preloadId, version, repository.orEmpty())
+    }.getOrNull()
+
+    internal fun readPreloadPrice(
+        format: AdFormat,
+        preloadId: String,
+        sdkVersion: String,
+        configs: Map<String, ReflectionConfig>,
+    ): Double? = runCatching {
+        val config = configs[sdkVersion] ?: return null
         val rootClass = Class.forName(config.sdkRootClass)
         val service = findNoArgMethod(rootClass, config.sdkRootMethod).invoke(null) ?: return null
         val provider = readField(service, config.providerField) ?: return null
@@ -55,9 +64,7 @@ internal object AdMobNextGenBidPrice {
             config.internalAdConfigurationMethod,
         ).invoke(internalAd) ?: return null
         val price = readField(adConfiguration, config.configurationPriceField) ?: return null
-        val valueMicros = (readField(price, config.priceValueMicrosField) as? Number)?.toLong()
-            ?: return null
-        valueMicros.coerceAtLeast(0L) / MICROS_PER_UNIT
+        readPriceUsd(price, config)
     }.getOrNull()
 
     /** Loaded native ads use remax's versioned a -> b -> m path, not a preload queue. */
@@ -75,20 +82,24 @@ internal object AdMobNextGenBidPrice {
     ): Double? {
         // Never guess an obfuscated path on a different SDK version.
         val config = configs[sdkVersion] ?: return null
-        val currencyField = config.priceCurrencyCodeField ?: return null
         return config.nativeAdPaths.firstNotNullOfOrNull { path ->
             runCatching {
                 if (path.isEmpty() || path.any(String::isBlank)) return@runCatching null
                 var leaf: Any = ad
                 for (field in path) leaf = readField(leaf, field) ?: return@runCatching null
-                val micros = readField(leaf, config.priceValueMicrosField) as? Long
-                    ?: return@runCatching null
-                val currency = readField(leaf, currencyField) as? String
-                    ?: return@runCatching null
-                if (micros < 0L || !currency.trim().equals("USD", ignoreCase = true)) null
-                else micros / MICROS_PER_UNIT
+                readPriceUsd(leaf, config)
             }.getOrNull()
         }
+    }
+
+    /** A missing/invalid amount or currency is unknown, never a synthetic zero or assumed USD. */
+    private fun readPriceUsd(price: Any, config: ReflectionConfig): Double? {
+        val currencyField = config.priceCurrencyCodeField ?: return null
+        val micros = readField(price, config.priceValueMicrosField) as? Long ?: return null
+        val currency = readField(price, currencyField) as? String ?: return null
+        return if (micros >= 0L && currency.trim().equals("USD", ignoreCase = true)) {
+            micros / MICROS_PER_UNIT
+        } else null
     }
 
     internal fun parse(json: String): Map<String, ReflectionConfig> {

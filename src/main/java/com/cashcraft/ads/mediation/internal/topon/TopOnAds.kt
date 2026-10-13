@@ -1,6 +1,7 @@
 package com.cashcraft.ads.mediation.internal.topon
 
 import android.annotation.SuppressLint
+import com.cashcraft.ads.mediation.internal.topOnRevenueAmount
 import com.cashcraft.ads.mediation.internal.NativeAds
 import android.app.Activity
 import android.app.Application
@@ -38,8 +39,6 @@ import com.thinkup.rewardvideo.api.TURewardVideoListener
 import com.thinkup.splashad.api.TUSplashAd
 import com.thinkup.splashad.api.TUSplashAdEZListener
 import com.thinkup.splashad.api.TUSplashAdExtraInfo
-import java.math.BigDecimal
-import java.math.RoundingMode
 import java.util.LinkedHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -766,10 +765,9 @@ internal object TopOnAds {
 
     private fun revenuePaid(session: AdShowSession?, info: TUAdInfo) {
         val impressionId = info.showId?.trim()?.takeIf(String::isNotEmpty)
-        val revenue = info.getPublisherRevenue(TUAdConst.CURRENCY.USD)
-            ?.takeIf { it.isFinite() && it >= 0.0 }
-            ?: return
-        val valueMicros = revenue.toMicrosOrNull() ?: return
+        val amount = topOnRevenueAmount(info) ?: return
+        val revenue = amount.value
+        val valueMicros = amount.valueMicros
         val revenueSession = impressionId
             ?.let(revenueSessionsByImpressionId::remove)
             ?: session
@@ -780,7 +778,7 @@ internal object TopOnAds {
             info = info,
             revenue = revenue,
             valueMicros = valueMicros,
-            currencyCode = USD_CURRENCY_CODE,
+            currencyCode = amount.currencyCode,
         )
         // Preserve the complete TUAdInfo object because Tenjin's TopOn endpoint reflects over it.
         runCatching {
@@ -794,7 +792,7 @@ internal object TopOnAds {
                     position = revenueSession.position,
                     placementId = revenueSession.adUnitId,
                     valueMicros = valueMicros,
-                    currencyCode = USD_CURRENCY_CODE,
+                    currencyCode = amount.currencyCode,
                     adNetwork = adNetwork,
                     impressionId = impressionId,
                     precisionType = precisionType,
@@ -829,13 +827,6 @@ internal object TopOnAds {
             revenueSessionsByImpressionId.remove(oldestId)
         }
     }
-
-    private fun Double.toMicrosOrNull(): Long? = runCatching {
-        BigDecimal.valueOf(this)
-            .multiply(MICROS_PER_UNIT)
-            .setScale(0, RoundingMode.HALF_UP)
-            .longValueExact()
-    }.getOrNull()
 
     private fun AdLoadSession.loadedFrom(caches: List<TUAdInfo>?) {
         val info = caches?.firstOrNull()
@@ -875,8 +866,6 @@ internal object TopOnAds {
         var rewardEarned: Boolean = false,
     )
 
-    private val MICROS_PER_UNIT = BigDecimal("1000000")
-    private const val USD_CURRENCY_CODE = "USD"
     private const val MAX_PENDING_REVENUE_SESSIONS = 32
     private const val TOPON_BUFFER_SIZE = 1
     private const val NO_AD_AVAILABLE = "no_preloaded_ad"

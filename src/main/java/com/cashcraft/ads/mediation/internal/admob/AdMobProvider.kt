@@ -1,5 +1,6 @@
 package com.cashcraft.ads.mediation.admob
 
+import com.cashcraft.ads.mediation.internal.adMobRevenueAmount
 import com.cashcraft.ads.mediation.internal.NativeAds
 import android.app.Activity
 import android.app.Application
@@ -31,7 +32,6 @@ import com.cashcraft.ads.mediation.internal.AdShowSession
 import com.cashcraft.ads.mediation.internal.AutoAppOpenController
 import com.cashcraft.ads.mediation.internal.FullScreenShowGate
 import com.cashcraft.ads.mediation.internal.dismissedResult
-import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
@@ -524,12 +524,9 @@ object AdMobAds {
     private fun AdShowSession.paid(value: AdValue, responseInfo: ResponseInfo) {
         val adSourceInfo = responseInfo.loadedAdSourceResponseInfo
         val adapterClassName = adSourceInfo?.adapterClassName ?: responseInfo.adapterClassName
-        val valueMicros = value.valueMicros.takeIf { it >= 0L } ?: return
-        val currencyCode = value.currencyCode
-            ?.trim()
-            ?.takeIf(String::isNotEmpty)
-            ?.uppercase(Locale.ROOT)
-            ?: return
+        val amount = adMobRevenueAmount(value) ?: return
+        val valueMicros = amount.valueMicros
+        val currencyCode = amount.currencyCode
         val adNetwork = adSourceInfo?.name?.trim()?.takeIf(String::isNotEmpty)
         val impressionId = responseInfo.responseId?.trim()?.takeIf(String::isNotEmpty)
         val precisionType = value.precisionType.name.takeIf(String::isNotEmpty)
@@ -537,7 +534,7 @@ object AdMobAds {
             AdMobEventName.PAID,
             adSource = adNetwork,
             responseId = impressionId,
-            value = valueMicros / MICROS_PER_UNIT,
+            value = amount.value,
             valueMicros = valueMicros,
             currency = currencyCode,
             mediationAdapterClassName = adapterClassName,
@@ -578,7 +575,6 @@ object AdMobAds {
     private const val PRELOAD_INTERSTITIAL = "lcb_admob_interstitial"
     private const val PRELOAD_REWARDED = "lcb_admob_rewarded"
     private const val NO_AD_AVAILABLE = "no_preloaded_ad"
-    private const val MICROS_PER_UNIT = 1_000_000.0
 
     private data class PreloadDescriptor(
         val format: AdMobFormat,

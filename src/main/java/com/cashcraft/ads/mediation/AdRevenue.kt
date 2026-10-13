@@ -23,7 +23,7 @@ sealed interface AdRevenuePayload {
     /** AdMob ad unit ID or TopOn placement ID. */
     val placementId: String
 
-    /** Revenue in millionths of [currencyCode]. */
+    /** Revenue in millionths of the provider's original [currencyCode], not necessarily USD. */
     val valueMicros: Long
     val currencyCode: String
 
@@ -59,7 +59,7 @@ data class AdMobRevenuePayload(
 }
 
 /**
- * TopOn revenue retaining the original ad-info object for native integrations such as Tenjin.
+ * TopOn revenue in the original callback currency, retaining ad-info for integrations such as Tenjin.
  * Hosts must not persist [adInfo]; persist only the normalized common fields.
  */
 data class TopOnRevenuePayload(
