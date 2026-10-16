@@ -8,7 +8,7 @@ package com.cashcraft.ads.mediation
  * integrations.
  */
 sealed interface AdRevenuePayload {
-    /** Stable across retries; derived from the provider impression ID, or the show session ID. */
+    /** Stable for a received event; uses the provider impression ID or local showToken/show session ID. */
     val eventId: String
 
     /** Wall-clock time at which the SDK delivered the revenue callback. */
@@ -106,4 +106,44 @@ fun interface AdRevenueListener {
     companion object {
         val NONE = AdRevenueListener { }
     }
+}
+
+/**
+ * TopOn revenue whose originating show cannot be safely attributed to a business session.
+ * This is separate from [AdRevenuePayload] and deliberately has no sessionId or position.
+ * Hosts must not persist [adInfo]; persist only normalized fields.
+ */
+data class UnattributedTopOnRevenuePayload(
+    /**
+     * Uses a stable provider ID or local showToken when available, including when showId is absent.
+     * Without either, stability covers only this received callback, not repeated SDK callbacks.
+     */
+    val eventId: String,
+    /** Wall-clock time at which the SDK delivered the revenue callback. */
+    val occurredAtMillis: Long,
+    val mediationMode: AdMediationMode,
+    val format: AdFormat,
+    val placementId: String,
+    /** Revenue in millionths of [currencyCode]. */
+    val valueMicros: Long,
+    val currencyCode: String,
+    val adNetwork: String?,
+    val impressionId: String?,
+    val precisionType: String?,
+    val adInfo: Any,
+) {
+    val platform: AdPlatform = AdPlatform.TOPON
+
+    init {
+        require(eventId.isNotBlank()) { "eventId must not be blank" }
+        require(occurredAtMillis > 0L) { "occurredAtMillis must be positive" }
+        require(placementId.isNotBlank()) { "placementId must not be blank" }
+        require(valueMicros >= 0L) { "valueMicros must not be negative" }
+        require(currencyCode.isNotBlank()) { "currencyCode must not be blank" }
+    }
+}
+
+/** Opt in to unattributed TopOn revenue while continuing to receive attributed revenue. */
+interface AdRevenueListenerWithUnattributed : AdRevenueListener {
+    fun onUnattributedRevenuePaid(payload: UnattributedTopOnRevenuePayload)
 }

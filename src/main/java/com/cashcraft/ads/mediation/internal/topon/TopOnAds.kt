@@ -18,8 +18,10 @@ import com.cashcraft.ads.mediation.AdsConfig
 import com.cashcraft.ads.mediation.Ads
 import com.cashcraft.ads.mediation.TopOnProviderConfig
 import com.cashcraft.ads.mediation.TopOnRevenuePayload
+import com.cashcraft.ads.mediation.UnattributedTopOnRevenuePayload
+import com.cashcraft.ads.mediation.AdRevenueListenerWithUnattributed
+import com.cashcraft.ads.mediation.mediationMode
 import com.cashcraft.ads.mediation.isFormatEnabled
-import com.cashcraft.ads.mediation.revenueEventId
 import com.cashcraft.ads.mediation.internal.FullScreenLoadSignals
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
@@ -35,6 +37,7 @@ import com.cashcraft.ads.mediation.internal.dismissedResult
 import com.cashcraft.ads.mediation.internal.analyticsErrorDetail
 import com.thinkup.core.api.AdError
 import com.thinkup.core.api.TUAdConst
+import com.thinkup.core.api.TUShowConfig
 import com.thinkup.core.api.TUAdInfo
 import com.thinkup.core.api.TUNetworkConfig
 import com.thinkup.core.api.TUSDK
@@ -112,7 +115,7 @@ internal object TopOnAds {
     private var activeInterstitial: ActiveShow? = null
     @Volatile
     private var activeRewarded: ActiveRewardedShow? = null
-    private val revenueSessionsByImpressionId = LinkedHashMap<String, AdShowSession>()
+    private var revenueTracker = TopOnRevenueTracker()
     private val showSessionsByImpressionId = LinkedHashMap<String, String>()
     @SuppressLint("StaticFieldLeak")
     private var splashContainer: FrameLayout? = null
@@ -439,8 +442,7 @@ internal object TopOnAds {
             interstitialAd = TUInterstitial(application, config.ids.interstitialPlacementId).apply {
                 setAdListener(interstitialListener)
                 setAdRevenueListener { info ->
-                    val captured = activeInterstitial?.session
-                    onMain { revenuePaid(captured, info) }
+                    onMain { revenuePaid(info, AdFormat.INTERSTITIAL) }
                 }
             }
         }
@@ -448,8 +450,7 @@ internal object TopOnAds {
             rewardedAd = TURewardVideoAd(application, config.ids.rewardedPlacementId).apply {
                 setAdListener(rewardedListener)
                 setAdRevenueListener { info ->
-                    val captured = activeRewarded?.session
-                    onMain { revenuePaid(captured, info) }
+                    onMain { revenuePaid(info, AdFormat.REWARDED) }
                 }
             }
         }
@@ -461,8 +462,7 @@ internal object TopOnAds {
                 SPLASH_LOAD_TIMEOUT_MILLIS,
             ).apply {
                 setAdRevenueListener { info ->
-                    val captured = activeAppOpen?.session
-                    onMain { revenuePaid(captured, info) }
+                    onMain { revenuePaid(info, AdFormat.APP_OPEN) }
                 }
             }
         }
@@ -623,12 +623,13 @@ internal object TopOnAds {
                 if (!canAcceptShowCallback(
                         captured?.session,
                         activeInterstitial?.session,
-                        info.showId,
+                        info,
                     )
                 ) return@onMain
                 captured?.session?.let { session ->
+                    if (!revenueTracker.confirm(revenueIdentity(info, session.format), session)) return@onMain
                     rememberShowSession(info.showId, session)
-                    rememberRevenueSession(info.showId, session)
+                    rememberRevenueSession(info, session)
                     session.impression(info.networkName, info.showId)
                     if (!captured.refillStarted) {
                         captured.refillStarted = true
@@ -644,7 +645,7 @@ internal object TopOnAds {
                 if (!canAcceptShowCallback(
                         captured?.session,
                         activeInterstitial?.session,
-                        info.showId,
+                        info,
                     )
                 ) return@onMain
                 captured?.session?.emit(AdEventName.CLICK)
@@ -657,7 +658,7 @@ internal object TopOnAds {
                 if (!canAcceptShowCallback(
                         captured?.session,
                         activeInterstitial?.session,
-                        info.showId,
+                        info,
                     )
                 ) return@onMain
                 finishInterstitialDismissed()
@@ -702,12 +703,13 @@ internal object TopOnAds {
                 if (!canAcceptShowCallback(
                         captured?.session,
                         activeRewarded?.session,
-                        info.showId,
+                        info,
                     )
                 ) return@onMain
                 captured?.session?.let { session ->
+                    if (!revenueTracker.confirm(revenueIdentity(info, session.format), session)) return@onMain
                     rememberShowSession(info.showId, session)
-                    rememberRevenueSession(info.showId, session)
+                    rememberRevenueSession(info, session)
                     session.impression(info.networkName, info.showId)
                     if (!captured.refillStarted) {
                         captured.refillStarted = true
@@ -723,7 +725,7 @@ internal object TopOnAds {
                 if (!canAcceptShowCallback(
                         captured?.session,
                         activeRewarded?.session,
-                        info.showId,
+                        info,
                     )
                 ) return@onMain
                 captured?.session?.emit(AdEventName.CLICK)
@@ -734,11 +736,14 @@ internal object TopOnAds {
             val captured = activeRewarded
             onMain {
                 // A real reward may arrive after close or while another rewarded ad owns the provider.
-                val original = info.showId?.trim()?.let(revenueSessionsByImpressionId::get)
+                val identity = revenueIdentity(info, AdFormat.REWARDED)
+                val source = revenueTracker.peekSession(identity)?.confirmedAdSource(info)
+                val original = revenueTracker.session(identity)
                 val session = original ?: captured?.session?.takeIf {
-                    canAcceptShowCallback(it, activeRewarded?.session, info.showId)
+                    canAcceptShowCallback(it, activeRewarded?.session, info)
                 } ?: return@onMain
                 if (session.format != AdFormat.REWARDED) return@onMain
+                session.recordAdSource(source)
                 if (captured?.session === session) captured.rewardEarned = true
                 session.emit(AdEventName.REWARD,
                     reason = "${info.scenarioRewardName}:${info.scenarioRewardNumber}")
@@ -751,7 +756,7 @@ internal object TopOnAds {
                 if (!canAcceptShowCallback(
                         captured?.session,
                         activeRewarded?.session,
-                        info.showId,
+                        info,
                     )
                 ) return@onMain
                 finishRewardedDismissed()
@@ -761,7 +766,7 @@ internal object TopOnAds {
         override fun onRewardedVideoAdPlayFailed(error: AdError, info: TUAdInfo?) {
             val captured = activeRewarded
             onMain {
-                if (!canAcceptShowCallback(captured?.session, activeRewarded?.session, info?.showId)) {
+                if (!canAcceptShowCallback(captured?.session, activeRewarded?.session, info)) {
                     return@onMain
                 }
                 finishRewardedFailed(error)
@@ -797,12 +802,13 @@ internal object TopOnAds {
                 if (!canAcceptShowCallback(
                         captured?.session,
                         activeAppOpen?.session,
-                        info.showId,
+                        info,
                     )
                 ) return@onMain
                 captured?.session?.let { session ->
+                    if (!revenueTracker.confirm(revenueIdentity(info, session.format), session)) return@onMain
                     rememberShowSession(info.showId, session)
-                    rememberRevenueSession(info.showId, session)
+                    rememberRevenueSession(info, session)
                     session.impression(info.networkName, info.showId,
                         valueMicros = info.getPublisherRevenue(TUAdConst.CURRENCY.USD)
                             ?.takeIf { it.isFinite() && it >= 0 }?.toMicrosOrNull(),
@@ -821,7 +827,7 @@ internal object TopOnAds {
                 if (!canAcceptShowCallback(
                         captured?.session,
                         activeAppOpen?.session,
-                        info.showId,
+                        info,
                     )
                 ) return@onMain
                 captured?.session?.emit(AdEventName.CLICK)
@@ -831,7 +837,7 @@ internal object TopOnAds {
         override fun onAdDismiss(info: TUAdInfo, extra: TUSplashAdExtraInfo) {
             val captured = activeAppOpen
             onMain {
-                if (!canAcceptShowCallback(captured?.session, activeAppOpen?.session, info.showId)) {
+                if (!canAcceptShowCallback(captured?.session, activeAppOpen?.session, info)) {
                     return@onMain
                 }
                 finishAppOpenDismissed()
@@ -934,7 +940,7 @@ internal object TopOnAds {
             clearPreparedAppOpen(session, container)
             return
         }
-        runCatching { appOpenAd.show(activity, container) }.onFailure { error ->
+        runCatching { appOpenAd.show(activity, container, null, showConfig(session)) }.onFailure { error ->
             if (activeAppOpen?.session === session) {
                 finishAppOpenFailed("show_exception", error.javaClass.simpleName, error, eventReason = "exception")
             }
@@ -974,7 +980,7 @@ internal object TopOnAds {
             return
         }
         activeInterstitial = ActiveShow(session, onResult)
-        runCatching { interstitialAd.show(activity) }.onFailure { error ->
+        runCatching { interstitialAd.show(activity, showConfig(session)) }.onFailure { error ->
             if (activeInterstitial?.session === session) {
                 finishInterstitialFailed(error.message ?: "show_exception", "exception", eventReason = "exception")
             }
@@ -1009,7 +1015,7 @@ internal object TopOnAds {
             return
         }
         activeRewarded = ActiveRewardedShow(session, onResult)
-        runCatching { rewardedAd.show(activity) }.onFailure { error ->
+        runCatching { rewardedAd.show(activity, showConfig(session)) }.onFailure { error ->
             if (activeRewarded?.session === session) {
                 finishRewardedFailed(error.message ?: "show_exception", "exception", eventReason = "exception")
             }
@@ -1187,16 +1193,32 @@ internal object TopOnAds {
         removeSplashContainer(container)
     }
 
+    private fun showConfig(session: AdShowSession): TUShowConfig = TUShowConfig.Builder()
+        .showCustomExt(revenueTracker.register(session)).build()
+
     private fun canAcceptShowCallback(
         capturedSession: AdShowSession?,
         currentSession: AdShowSession?,
-        showId: String?,
-    ): Boolean = acceptsTopOnCallback(
-        capturedSessionId = capturedSession?.sessionId,
-        currentSessionId = currentSession?.sessionId,
-        recordedSessionId = showId?.trim()?.let(showSessionsByImpressionId::get),
-        committed = capturedSession?.attempt?.isCommitted == true,
-    )
+        info: TUAdInfo?,
+    ): Boolean {
+        if (capturedSession == null || capturedSession !== currentSession) return false
+        // Resolving ownership below may register a new showId; it cannot confirm its own source.
+        val source = capturedSession.confirmedAdSource(info)
+        if (info != null) {
+            val identity = revenueIdentity(info, capturedSession.format)
+            val owner = revenueTracker.session(identity)
+            if (owner != null && owner !== capturedSession) return false
+            if (identity.token != null && owner == null) return false
+        }
+        val accepted = acceptsTopOnCallback(
+            capturedSessionId = capturedSession.sessionId,
+            currentSessionId = currentSession.sessionId,
+            recordedSessionId = info?.showId?.trim()?.let(showSessionsByImpressionId::get),
+            committed = capturedSession.attempt.isCommitted,
+        )
+        if (accepted) capturedSession.recordAdSource(source)
+        return accepted
+    }
 
     private fun rememberShowSession(impressionId: String?, session: AdShowSession) {
         val normalizedId = impressionId?.trim()?.takeIf(String::isNotEmpty) ?: return
@@ -1209,53 +1231,117 @@ internal object TopOnAds {
         }
     }
 
-    private val pendingRevenueByImpressionId = linkedMapOf<String, TUAdInfo>()
+    private data class PendingRevenue(val info: TUAdInfo, val format: AdFormat, val occurredAtMillis: Long,
+        val timeout: Runnable)
+    private val pendingRevenueByImpressionId = linkedMapOf<TopOnRevenueTracker.Identity, PendingRevenue>()
 
-    private fun revenuePaid(session: AdShowSession?, info: TUAdInfo) {
-        val impressionId = info.showId?.trim()?.takeIf(String::isNotEmpty)
+    private fun revenueIdentity(info: TUAdInfo, format: AdFormat): TopOnRevenueTracker.Identity =
+        TopOnRevenueTracker.Identity(
+            info.showId?.trim()?.takeIf(String::isNotEmpty),
+            info.showCustomExt?.trim()?.takeIf(String::isNotEmpty),
+            format,
+            info.topOnPlacementId?.trim()?.takeIf(String::isNotEmpty) ?: placementId(format),
+        )
+
+    private fun placementId(format: AdFormat): String = when (format) {
+        AdFormat.APP_OPEN -> config.ids.appOpenPlacementId
+        AdFormat.INTERSTITIAL -> config.ids.interstitialPlacementId
+        AdFormat.REWARDED -> config.ids.rewardedPlacementId
+        else -> error("Not a full-screen format: $format")
+    }
+
+    private fun AdShowSession.confirmedAdSource(info: TUAdInfo?): String? {
+        val identity = info?.let { revenueIdentity(it, format) } ?: return null
+        return if (identity.showId != null &&
+            revenueTracker.peekSession(identity.copy(token = null)) === this &&
+            revenueTracker.peekSession(identity) === this) {
+            info.networkName
+        } else null
+    }
+
+    private fun revenuePaid(info: TUAdInfo, format: AdFormat) {
+        val identity = revenueIdentity(info, format)
+        val owner = revenueTracker.session(identity)
         val revenue = info.getPublisherRevenue(TUAdConst.CURRENCY.USD)
-            ?.takeIf { it.isFinite() && it >= 0.0 }
-            ?: return
-        val valueMicros = revenue.toMicrosOrNull() ?: return
-        val revenueSession = if (impressionId != null) {
-            revenueSessionsByImpressionId[impressionId] ?: run {
-                // A known old identity evicted from the retained window must not bind to a new ad.
-                if (showSessionsByImpressionId.containsKey(impressionId)) return
-                pendingRevenueByImpressionId.putIfAbsent(impressionId, info)
-                while (pendingRevenueByImpressionId.size > MAX_PENDING_REVENUE_SESSIONS) {
-                    pendingRevenueByImpressionId.remove(pendingRevenueByImpressionId.keys.first())
+        if (revenue?.takeIf { it.isFinite() && it >= 0.0 }?.toMicrosOrNull() == null) {
+            invalidRevenue(owner, format, revenue)
+            return
+        }
+        if (revenueTracker.hasPayment(identity)) return
+        val occurredAtMillis = System.currentTimeMillis()
+        if (owner == null && identity.showId != null && identity.token == null) {
+            if (pendingRevenueByImpressionId.containsKey(identity)) return
+            val timeout = Runnable {
+                pendingRevenueByImpressionId.remove(identity)?.let {
+                    deliverRevenue(it.info, it.format, it.occurredAtMillis)
                 }
-                return
             }
-        } else session ?: return
+            pendingRevenueByImpressionId[identity] = PendingRevenue(info, format, occurredAtMillis, timeout)
+            mainHandler.postDelayed(timeout, PENDING_REVENUE_TIMEOUT_MILLIS)
+            while (pendingRevenueByImpressionId.size > MAX_PENDING_REVENUE_SESSIONS) {
+                val oldest = pendingRevenueByImpressionId.remove(pendingRevenueByImpressionId.keys.first()) ?: break
+                mainHandler.removeCallbacks(oldest.timeout)
+                deliverRevenue(oldest.info, oldest.format, oldest.occurredAtMillis)
+            }
+            return
+        }
+        deliverRevenue(info, format, occurredAtMillis)
+    }
+
+    private fun deliverRevenue(info: TUAdInfo, format: AdFormat, occurredAtMillis: Long) {
+        val identity = revenueIdentity(info, format)
+        val revenue = info.getPublisherRevenue(TUAdConst.CURRENCY.USD)
+        val valueMicros = revenue?.takeIf { it.isFinite() && it >= 0.0 }?.toMicrosOrNull() ?: return
+        // An old host cannot consume orphans; leave their identities available for later proof.
+        if (revenueTracker.session(identity) == null &&
+            commonConfig.revenueListener !is AdRevenueListenerWithUnattributed) return
+        val payment = revenueTracker.claim(identity) ?: return
+        val session = payment.session
         val adNetwork = info.networkName?.trim()?.takeIf(String::isNotEmpty)
         val precisionType = info.ecpmPrecision?.trim()?.takeIf(String::isNotEmpty)
-        if (!revenueSession.paid(
-            info = info,
-            revenue = revenue,
-            valueMicros = valueMicros,
-            currencyCode = USD_CURRENCY_CODE,
-        )) return
-        // Preserve the complete TUAdInfo object because Tenjin's TopOn endpoint reflects over it.
-        runCatching {
-            commonConfig.revenueListener.onRevenuePaid(
-                TopOnRevenuePayload(
-                    eventId = revenueEventId(AdPlatform.TOPON, impressionId, revenueSession.sessionId),
-                    occurredAtMillis = System.currentTimeMillis(),
-                    mediationMode = revenueSession.mediationMode,
-                    format = revenueSession.format,
-                    sessionId = revenueSession.sessionId,
-                    position = revenueSession.position,
-                    placementId = revenueSession.adUnitId,
+        if (session == null) {
+            val listener = commonConfig.revenueListener as? AdRevenueListenerWithUnattributed ?: return
+            runCatching {
+                listener.onUnattributedRevenuePaid(UnattributedTopOnRevenuePayload(
+                    eventId = payment.eventId,
+                    occurredAtMillis = occurredAtMillis,
+                    mediationMode = commonConfig.provider.mediationMode,
+                    format = format,
+                    placementId = identity.placement,
                     valueMicros = valueMicros,
                     currencyCode = USD_CURRENCY_CODE,
                     adNetwork = adNetwork,
-                    impressionId = impressionId,
+                    impressionId = identity.showId,
                     precisionType = precisionType,
                     adInfo = info,
-                ),
-            )
+                ))
+            }
+            return
         }
+        if (!session.paid(info, revenue, valueMicros, USD_CURRENCY_CODE)) return
+        // Preserve the original SDK object for immediate native ILRD integrations.
+        runCatching {
+            commonConfig.revenueListener.onRevenuePaid(TopOnRevenuePayload(
+                eventId = payment.eventId,
+                occurredAtMillis = occurredAtMillis,
+                mediationMode = session.mediationMode,
+                format = session.format,
+                sessionId = session.sessionId,
+                position = session.position,
+                placementId = session.adUnitId,
+                valueMicros = valueMicros,
+                currencyCode = USD_CURRENCY_CODE,
+                adNetwork = adNetwork,
+                impressionId = identity.showId,
+                precisionType = precisionType,
+                adInfo = info,
+            ))
+        }
+    }
+
+    private fun invalidRevenue(session: AdShowSession?, format: AdFormat, revenue: Double?) {
+        events.logger.invalidRevenue(AdPlatform.TOPON, format,
+            session?.sessionId, revenue?.toString(), USD_CURRENCY_CODE)
     }
 
     private fun AdShowSession.paid(
@@ -1272,13 +1358,13 @@ internal object TopOnAds {
             precisionType = info.ecpmPrecision,
         )
 
-    private fun rememberRevenueSession(impressionId: String?, session: AdShowSession) {
-        val normalizedId = impressionId?.trim()?.takeIf(String::isNotEmpty) ?: return
-        revenueSessionsByImpressionId[normalizedId] = session
-        pendingRevenueByImpressionId.remove(normalizedId)?.let { revenuePaid(session, it) }
-        while (revenueSessionsByImpressionId.size > MAX_PENDING_REVENUE_SESSIONS) {
-            val oldestId = revenueSessionsByImpressionId.entries.firstOrNull()?.key ?: break
-            revenueSessionsByImpressionId.remove(oldestId)
+    private fun rememberRevenueSession(info: TUAdInfo, session: AdShowSession) {
+        val identity = revenueIdentity(info, session.format)
+        if (!revenueTracker.confirm(identity, session)) return
+        val waitingIdentity = identity.copy(token = null)
+        pendingRevenueByImpressionId.remove(waitingIdentity)?.let {
+            mainHandler.removeCallbacks(it.timeout)
+            deliverRevenue(it.info, it.format, it.occurredAtMillis)
         }
     }
 
@@ -1331,6 +1417,7 @@ internal object TopOnAds {
     private val MICROS_PER_UNIT = BigDecimal("1000000")
     private const val USD_CURRENCY_CODE = "USD"
     private const val MAX_PENDING_REVENUE_SESSIONS = 32
+    private const val PENDING_REVENUE_TIMEOUT_MILLIS = 5_000L
     private const val TOPON_BUFFER_SIZE = 1
     private const val NO_AD_AVAILABLE = "no_preloaded_ad"
     private const val APP_OPEN_CONTAINER_UNAVAILABLE = "app_open_container_unavailable"
