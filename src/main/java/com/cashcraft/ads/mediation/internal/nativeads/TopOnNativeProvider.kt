@@ -75,18 +75,7 @@ internal fun <T> takeTopOnNativeCache(
     return null
 }
 
-internal class TopOnNativeProvider : NativeProvider {
-    override fun load(
-        activity: Activity,
-        request: ResolvedNativeRequest,
-        widthPx: Int,
-        callbacks: NativeCallbacks,
-    ): NativeLoad {
-        require(widthPx > 0) { "native_width_invalid" }
-        // 直载也走共享库存，避免同一广告位绕过冷却和加载去重。
-        return NativeAdCache.load(activity, request, widthPx, allowTemplate = true, callbacks = callbacks)
-    }
-
+internal class TopOnNativeProvider {
     fun inventory(context: android.content.Context, key: NativeInventoryKey): Inventory =
         Inventory(context.applicationContext, key)
 
