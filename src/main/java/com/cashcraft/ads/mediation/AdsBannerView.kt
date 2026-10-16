@@ -324,7 +324,7 @@ class AdsBannerView(
                 view.post {
                     if (!isCurrent(currentGeneration)) return@post
                     if (!canLoad()) { releaseAd("scene_inactive"); return@post }
-                    if (!checkPolicy(reserve = true) || !isCurrent(currentGeneration)) return@post
+                    if (!checkPolicy() || !isCurrent(currentGeneration)) return@post
                     val preloadedAd = AdMobAds.pollBanner(request, size)
                     val loader = if (preloadedAd == null) AdView(context as Activity).also { loadView = it } else null
                     val callback = loadCallback(WeakReference(this), currentGeneration, relay) { ad ->
@@ -337,7 +337,7 @@ class AdsBannerView(
                         }
                         loader?.destroy()
                         if (loadView === loader) loadView = null
-                        if (isCurrent(currentGeneration) && checkPolicy(reserve = true)) {
+                        if (isCurrent(currentGeneration) && checkPolicy()) {
                             view.registerBannerAd(ad, context as Activity)
                         }
                     }
@@ -407,6 +407,7 @@ class AdsBannerView(
         val view = adView ?: return
         if (!canShow()) { view.visibility = INVISIBLE; return }
         if (bannerAd == null && !failed) return
+        // Hidden inventory must not reserve another page's last display quota.
         if (!checkPolicy(reserve = true)) return
         if (view.parent == null) addView(view, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER))
         if (view.visibility != VISIBLE) {

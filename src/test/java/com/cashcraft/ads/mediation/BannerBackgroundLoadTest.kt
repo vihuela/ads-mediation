@@ -9,6 +9,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import com.cashcraft.ads.mediation.internal.AdLifecycleMonitor
+import com.cashcraft.ads.mediation.internal.AdPolicyChecker
+import com.cashcraft.ads.mediation.internal.AdPolicyRequest
+import com.cashcraft.ads.mediation.internal.AdUsageStore
+import com.cashcraft.ads.mediation.internal.ShadowMMKV
 import com.cashcraft.ads.mediation.internal.BannerProviderReadiness
 import com.cashcraft.ads.mediation.internal.BannerReadiness
 import com.cashcraft.ads.mediation.internal.UmpConsentManager
@@ -37,7 +41,7 @@ import org.robolectric.util.ReflectionHelpers
 @RunWith(RobolectricTestRunner::class)
 @LooperMode(LooperMode.Mode.PAUSED)
 @Config(sdk = [33], manifest = Config.NONE,
-    shadows = [ShadowBackgroundBannerAdView::class],
+    shadows = [ShadowBackgroundBannerAdView::class, ShadowMMKV::class],
     instrumentedPackages = ["com.google.android.libraries.ads.mobile.sdk.banner.AdView"])
 class BannerBackgroundLoadTest {
     private val savedAds = listOf("application", "config", "umpConsentManager", "policyChecker")
@@ -54,6 +58,7 @@ class BannerBackgroundLoadTest {
         AdLifecycleMonitor::class.java, "callbacks")
 
     @Before fun prepare() {
+        ShadowMMKV.reset()
         ShadowBackgroundBannerAdView.loads.clear()
         ReflectionHelpers.setStaticField(Ads::class.java, "application", app)
         ReflectionHelpers.setStaticField(Ads::class.java, "config", AdsConfig(
@@ -175,6 +180,82 @@ class BannerBackgroundLoadTest {
         assertEquals(BannerState.Waiting, fixture.states.last())
         assertEquals(0, fixture.banner.childCount)
         assertTrue(ShadowBackgroundBannerAdView.loads.isEmpty())
+    }
+
+    @Test fun `hidden loading and registration leave last quota available until display`() {
+        for (typed in listOf(false, true)) for (gate in Gate.entries) {
+            val checker = installQuota(typed)
+            val other = AdPolicyRequest("other-page", sceneType = AdSceneType.BANNER)
+            val fixture = fixture()
+            gate.hide(fixture)
+            fixture.banner.setActive(true)
+            val child = pendingChild(fixture)
+            finishLayout(fixture, child)
+            assertEquals("$typed $gate: loading must not reserve", AdPolicyCheckResult.Passed, checker.check(other))
+            ShadowBackgroundBannerAdView.loads.last().succeed(TestAd().value)
+            drain()
+            assertEquals(BannerState.Ready, fixture.states.last())
+            assertEquals(View.INVISIBLE, child.visibility)
+            assertEquals("$typed $gate: registration must not reserve", AdPolicyCheckResult.Passed, checker.check(other))
+
+            gate.show(fixture)
+            drain()
+            assertEquals(displayState(fixture), View.VISIBLE, child.visibility)
+            assertEquals(AdPolicyCheckResult.Blocked(AdBlockReason.DAILY_SHOW_LIMIT), checker.check(other))
+            assertEquals(1, ShadowBackgroundBannerAdView.loads.count { it.request.adUnitId == fixture.unit })
+            fixture.banner.destroy()
+            drain()
+            assertEquals("An unexposed display releases its reservation", AdPolicyCheckResult.Passed, checker.check(other))
+        }
+    }
+
+    @Test fun `foreground page can use last quota while another banner loads hidden`() {
+        val checker = installQuota(typed = true)
+        val hidden = fixture()
+        Gate.BACKGROUND.hide(hidden)
+        hidden.banner.setActive(true)
+        finishLayout(hidden, pendingChild(hidden))
+        val visible = fixture()
+        visible.banner.setActive(true)
+        val child = pendingChild(visible)
+        finishLayout(visible, child)
+        val other = AdPolicyRequest("third-page", sceneType = AdSceneType.BANNER)
+        assertEquals("Even visible in-flight loading must not reserve", AdPolicyCheckResult.Passed, checker.check(other))
+        ShadowBackgroundBannerAdView.loads.last().succeed(TestAd().value)
+        drain()
+        assertEquals(BannerState.Ready, visible.states.last())
+        assertEquals(View.VISIBLE, child.visibility)
+        assertEquals(AdPolicyCheckResult.Blocked(AdBlockReason.DAILY_SHOW_LIMIT), checker.check(other))
+    }
+
+    @Test fun `quota consumed after hidden registration is rechecked before making banner visible`() {
+        val checker = installQuota(typed = true)
+        val fixture = fixture()
+        Gate.FOCUS.hide(fixture)
+        fixture.banner.setActive(true)
+        val child = pendingChild(fixture)
+        finishLayout(fixture, child)
+        val ad = TestAd()
+        ShadowBackgroundBannerAdView.loads.last().succeed(ad.value)
+        drain()
+        assertEquals(BannerState.Ready, fixture.states.last())
+        checker.impression("other-page", AdSceneType.BANNER)
+        Gate.FOCUS.show(fixture)
+        drain()
+        assertEquals(AdShowResult.Blocked(AdBlockReason.DAILY_SHOW_LIMIT), fixture.states.last())
+        assertEquals(View.INVISIBLE, child.visibility)
+        assertEquals(0, fixture.banner.childCount)
+        assertEquals(1, ad.destroyed)
+        assertEquals(1, events.count { it.adUnitId == fixture.unit && it.name == AdEventName.SHOW_FAIL })
+    }
+
+    private fun installQuota(typed: Boolean): AdPolicyChecker {
+        ShadowMMKV.reset()
+        return AdPolicyChecker(AdUsageStore(app, 0L)).also {
+            it.policy = AdPolicy(frequency = AdFrequencyPolicy(enabled = true, dailyMaxShows = 1,
+                sceneQuotas = if (typed) mapOf(AdSceneType.BANNER to AdSceneQuota(true, 1, 10)) else null))
+            ReflectionHelpers.setStaticField(Ads::class.java, "policyChecker", it)
+        }
     }
 
     private fun fixture(completeReadiness: Boolean = true): Fixture {

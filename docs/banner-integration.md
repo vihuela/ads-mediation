@@ -170,6 +170,7 @@ override fun onDestroyView() {
 
 - `setActive(false)` 结束业务周期并释放；再次启用创建新 slot。最终 `destroy()` 后不能重新启用。
 - 临时隐藏使用 `visibility = View.INVISIBLE`，保留合法占位。后台、失焦和临时隐藏不拦截加载；宿主存活、业务启用、SDK 就绪且容器已附着并有有效宽度时可加载。后台收到加载成功仍隐藏真实广告，恢复展示资格后复用原实例；临时脱离也会隐藏广告，重新附着后再检查资格。
+- 加载和成功注册广告只检查策略，不预留展示名额。广告就绪且完整展示资格满足、即将变为可见时才原子预留，避免隐藏实例占用其他页面的最后名额；恢复时名额已耗尽则返回 `DAILY_SHOW_LIMIT`。实际曝光才记入展示次数，未曝光机会结束会释放预留；同一展示周期内 SDK 刷新的既有频控计数规则不变。
 - 完整页面离开应结束其业务归属。Fragment 的 View owner 销毁会自动释放；不能把所有 `ON_PAUSE` 都视为离页，因为 Dialog、落地页和后台属于临时暂停。
 
 ## 可选预加载与补货
@@ -241,17 +242,22 @@ Google 文档说明自动刷新依赖广告可见，开启后也可处理加载�
 
 ## 事件、收益与兼容
 
+有效 Banner `ad_show_fail` 必含 `ad_source`：有可确认的失败素材来源时使用该来源；没有实际素材或来源为 null／空白时，`analyticsParameters()` 输出字面量 `"unknow"`，原始 `AdEvent.adSource` 仍可为空。来源描述失败素材，不表示故障归因；加载阶段失败等没有实际素材的路径不从缓存候选猜测来源。此契约不改变已曝光后的终态、其他事件字段或非法事件返回空 Map 的门禁；`ad_load_fail` 的业务输出不变，不增加 `ad_source`。
+
 `ad_position` 每个页面 active 周期一次，业务 `ad_session_id` 使用该周期的 `slotId`。临时隐藏、失焦、前后台切换、公共底栏 Tab 切换、尺寸重载和显式 `refresh()` 均保留仍有效的周期；销毁后重建或 `setActive(false)` 后重新启用才建立新周期。
 实际本层加载才产生 request；失败后平台内部成功不补第二个 load result。首次展示关联已确认的初始 request；平台刷新没有本层 request，刷新诊断不冒充曝光。
-每个已确认 response ID 的展示仍有独立内部 session，paid／impression 分别去重，顺序不限，合法零收益照常交付。AdMob 在有效 `onAdPaid` 回调时向业务 `ad_impression` 和全局 `revenueListener` 分别交付，不再发送 `ad_paid`；一个监听抛异常不阻断另一个。
-业务 `ad_impression` 带 `refresh_index`：首条广告为 1，下一条为 2，依次递增；自动刷新和宿主重载均沿用该页面序列。序号在确认新广告身份时固定，重复回调、刷新失败、缺失身份不递增；迟到或乱序收益保留原广告序号，无有效收益回调的广告可能使已上报序号出现空缺。新周期从 1 开始。
+每个已确认 response ID 的展示仍有独立内部 session。每次平台实际曝光回调发送一条 `ad_show`，首次展示和每次刷新后的新广告独立去重，失败收口后的迟到曝光不发送；Ready、刷新成功、恢复可见或收益回调都不代替实际曝光。
+`ad_show` 业务参数同 `ad_click`：`ad_format`、`ad_platform`、`mediation_mode`、`position_id`、`ad_session_id`，以及可用时的 `ad_unit_id`、`ad_source`，Banner 另带 `refresh_index`；不含 `revenue_amount`、`currency`、`precision_type`。`ad_show` 与 `ad_impression` 分别去重，顺序不限，合法零收益照常交付。AdMob 在有效 `onAdPaid` 回调时向业务 `ad_impression` 和全局 `revenueListener` 分别交付，不再发送 `ad_paid`；一个监听抛异常不阻断另一个。
+业务 `ad_show` 与 `ad_impression` 均带 `refresh_index`：首条广告为 1，下一条为 2，依次递增；自动刷新和宿主重载均沿用该页面序列。序号在确认新广告身份时固定，重复回调、刷新失败、缺失身份不递增；迟到或乱序收益保留原广告序号，无有效收益回调的广告仍可发送 `ad_show`，但可能使 `ad_impression` 的已上报序号出现空缺。新周期从 1 开始。
 同周期的位置、曝光、点击等业务事件共享 `ad_session_id`，但原始 `AdEvent.sessionId` 和收益 payload 的 `sessionId` / `eventId` 仍按每条广告独立，不会把刷新后的收益合并去重。
 
 每次本层加载最多保留 32 个展示的不可变身份和去重元数据，不含页面引用。
 已确认的旧展示收益即使页面销毁仍可交付；未知／已淘汰身份只写诊断，不归给最新广告，不补造正常收益。
 这不保证 SDK 在销毁后一定回调。AdMob 全屏内容关闭表示落地内容退出，**不映射为 Banner 本体 `ad_close`**；本版不提供 Banner 关闭按钮。
 
-新增 `AdFormat.BANNER`、`AdEventName.BANNER_REFRESH` 需要更新穷尽 `when` 与事件解析。
+Banner/Native 日志按页面周期 `slot_id` 检索，全屏按 `session_id`，加载按 `request_id`；Banner 内部 `session_id` 仍随每条广告变化。Banner `ad_banner_refresh` 只作诊断，且 Banner `ad_close` 不进入业务参数。展示率按有 `ad_show` 的周期去重，刷新次数用“每次机会展示数”，详见 [README 十项指标与验算样例](../README.md#指标口径)。
+
+新增 `AdFormat.BANNER`、`AdEventName.BANNER_REFRESH` 需要更新穷尽 `when` 与事件解析。本次新增 `AdEventName.SHOW("ad_show")` 也需要为无 `else` 的穷举 `when` 补分支，并为按事件名分发的上报器配置 `ad_show` 去向。
 原 `BannerState.Failed` 已移除，构造、类型判断及穷尽 `when` 分支统一改为 `AdShowResult.Failed`，
 并重新编译使用 Banner 的宿主与依赖模块；`onState` 参数类型和 `reason: String` 保持不变。
 `AdEvent` 增加 `slotId`、`refreshIndex` 后构造及 `copy` 的 JVM 签名改变，宿主及依赖它的二进制模块必须重新编译；不能把默认参数视为二进制兼容保证。
