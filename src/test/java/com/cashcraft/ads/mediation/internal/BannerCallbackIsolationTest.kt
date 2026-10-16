@@ -18,7 +18,7 @@ class BannerCallbackIsolationTest {
     fun `each throwing event callback leaves load and display terminal and a new slot usable`() {
         val expected = listOf(
             AdEventName.POSITION, AdEventName.LOAD, AdEventName.LOADED,
-            AdEventName.IMPRESSION, AdEventName.CLICK, AdEventName.DISMISS,
+            AdEventName.SHOW, AdEventName.IMPRESSION, AdEventName.CLICK, AdEventName.DISMISS,
         )
         for (throwAt in expected) {
             val events = mutableListOf<AdEvent>()
@@ -74,8 +74,8 @@ class BannerCallbackIsolationTest {
             next.paid(2L, "USD", null, 2L)
             assertEquals(
                 "new slot after $throwAt",
-                listOf(AdEventName.POSITION, AdEventName.IMPRESSION),
-                events.takeLast(2).map(AdEvent::name),
+                listOf(AdEventName.POSITION, AdEventName.SHOW, AdEventName.IMPRESSION),
+                events.filter { it.slotId == "next" }.map(AdEvent::name),
             )
             assertEquals(2, revenues.size)
             assertEquals(next.sessionId, revenues.last().sessionId)
@@ -124,12 +124,12 @@ class BannerCallbackIsolationTest {
 
         assertEquals(
             listOf(AdEventName.POSITION, AdEventName.LOAD, AdEventName.LOAD_FAIL,
-                AdEventName.IMPRESSION),
+                AdEventName.SHOW, AdEventName.IMPRESSION),
             events.map(AdEvent::name),
         )
         assertEquals("failed", events[2].result)
         assertEquals(1, resultThrows)
-        assertNull(events[3].requestId)
+        assertNull(events.single { it.name == AdEventName.IMPRESSION }.requestId)
         assertEquals(1, revenueThrows)
         assertEquals("recovered", revenues.single().impressionId)
         assertEquals(events.last().sessionId, revenues.single().sessionId)

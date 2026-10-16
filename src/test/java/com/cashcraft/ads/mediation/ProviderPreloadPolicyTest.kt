@@ -2,13 +2,17 @@
 
 package com.cashcraft.ads.mediation
 
+import android.app.Activity
 import android.os.Looper
+import android.os.Bundle
 import android.os.SystemClock
 import com.cashcraft.ads.mediation.admob.AdMobAds
 import com.cashcraft.ads.mediation.admob.AdMobState
 import com.cashcraft.ads.mediation.admob.RetainedAd
 import com.cashcraft.ads.mediation.internal.AdBiddingCoordinator
 import com.cashcraft.ads.mediation.internal.AdEventDispatcher
+import com.cashcraft.ads.mediation.internal.AdShowSession
+import com.cashcraft.ads.mediation.internal.AutoAppOpenController
 import com.cashcraft.ads.mediation.internal.AdPolicyChecker
 import com.cashcraft.ads.mediation.internal.AdPolicyRequest
 import com.cashcraft.ads.mediation.internal.AdUsageStore
@@ -22,9 +26,14 @@ import com.google.android.libraries.ads.mobile.sdk.appopen.AppOpenAd
 import com.google.android.libraries.ads.mobile.sdk.banner.AdSize
 import com.google.android.libraries.ads.mobile.sdk.banner.BannerAd
 import com.google.android.libraries.ads.mobile.sdk.common.Ad
+import com.google.android.libraries.ads.mobile.sdk.common.AdSourceResponseInfo
 import com.google.android.libraries.ads.mobile.sdk.common.LoadAdError
 import com.google.android.libraries.ads.mobile.sdk.common.PreloadCallback
 import com.google.android.libraries.ads.mobile.sdk.common.PreloadConfiguration
+import com.google.android.libraries.ads.mobile.sdk.common.ResponseInfo
+import com.google.android.libraries.ads.mobile.sdk.interstitial.InterstitialAd
+import com.google.android.libraries.ads.mobile.sdk.rewarded.RewardedAd
+import java.lang.ref.WeakReference
 import java.lang.reflect.Proxy
 import com.cashcraft.ads.mediation.internal.ShadowMMKV
 import org.junit.After
@@ -33,6 +42,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Robolectric
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
@@ -64,7 +74,7 @@ class ProviderPreloadPolicyTest {
     private lateinit var checker: AdPolicyChecker
 
     @Before fun prepare() {
-        listOf("config", "events", "state").forEach {
+        listOf("config", "events", "state", "autoAppOpenController").forEach {
             savedFields[it] = ReflectionHelpers.getStaticField<Any?>(AdMobAds::class.java, it)
         }
         savedFields["policyChecker"] = Ads.policyChecker
@@ -90,6 +100,11 @@ class ProviderPreloadPolicyTest {
         installChecker(checker)
         ReflectionHelpers.setStaticField(AdMobAds::class.java, "config", AdMobConfig(AdMobIds.TEST))
         ReflectionHelpers.setStaticField(AdMobAds::class.java, "state", AdMobState.READY)
+        ReflectionHelpers.setStaticField(AdMobAds::class.java, "autoAppOpenController",
+            AutoAppOpenController<AdShowSession>(isEnabled = { false }, isProviderReady = { true },
+                providerFailureReason = { null }, isAdAvailable = { false },
+                beginOpportunity = { error("Auto app-open disabled in load tests") },
+                show = { _, _ -> }, fail = { _, _ -> }, noAdFailureReason = "no_fill"))
         ReflectionHelpers.setStaticField(
             AdMobAds::class.java, "events",
             AdEventDispatcher(application, AdPlatform.ADMOB, AdMediationMode.ADMOB,
@@ -99,6 +114,8 @@ class ProviderPreloadPolicyTest {
 
     @After fun restore() {
         shadowOf(Looper.getMainLooper()).idle()
+        val controller = ReflectionHelpers.getStaticField<AutoAppOpenController<*>>(AdMobAds::class.java, "autoAppOpenController")
+        AdLifecycleMonitor.removeListener(ReflectionHelpers.getField(controller, "lifecycleListener"))
         savedMaps.forEach { (name, values) -> providerMap(name).apply { clear(); putAll(values) } }
         savedFields.filterKeys { it != "policyChecker" && it != "topOnState" }.forEach { (name, value) ->
             ReflectionHelpers.setStaticField(AdMobAds::class.java, name, value)
@@ -201,6 +218,59 @@ class ProviderPreloadPolicyTest {
         assertEquals(3, PolicyPreloaderCalls.active.size)
     }
 
+    @Test fun `fullscreen callbacks after first result report fresh automatic load pairs without latency`() {
+        startFullScreenPools()
+        PolicyPreloaderCalls.active.toMap().forEach { (id, callback) ->
+            val format = when {
+                id.contains("app_open") -> AdFormat.APP_OPEN
+                id.contains("interstitial") -> AdFormat.INTERSTITIAL
+                else -> AdFormat.REWARDED
+            }
+            val response = ResponseInfo(null, "response", Bundle(), null, emptyList())
+            callback.onAdPreloaded(id, response)
+            shadowOf(Looper.getMainLooper()).idle()
+            callback.onAdPreloaded(id, response)
+            shadowOf(Looper.getMainLooper()).idle()
+            callback.onAdFailedToPreload(id, LoadAdError(LoadAdError.ErrorCode.NO_FILL, "no fill", null))
+            shadowOf(Looper.getMainLooper()).idle()
+            val loads = events.filter { it.format == format }
+            assertEquals(listOf(AdEventName.LOAD, AdEventName.LOADED, AdEventName.LOAD,
+                AdEventName.LOADED, AdEventName.LOAD, AdEventName.LOAD_FAIL), loads.map { it.name })
+            assertEquals(3, loads.map { it.requestId }.distinct().size)
+            loads.chunked(2).forEachIndexed { index, pair ->
+                assertEquals(pair.first().requestId, pair.last().requestId)
+                assertEquals(index > 0, pair.last().sdkAutoLoad)
+                if (index == 0) {
+                    assertTrue(pair.last().analyticsParameters().containsKey("latency_ms"))
+                } else pair.forEach { event ->
+                    assertEquals("sdk_auto", event.analyticsParameters()["load_trigger"])
+                    assertFalse(event.analyticsParameters().containsKey("latency_ms"))
+                }
+            }
+            val count = events.size
+            callback.onAdsExhausted(id)
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(count, events.size)
+        }
+    }
+
+    @Test fun `initial full screen failure does not swallow automatic retries or recovery`() {
+        startFullScreenPools()
+        PolicyPreloaderCalls.active.toMap().forEach { (id, callback) ->
+            repeat(2) { callback.onAdFailedToPreload(id, LoadAdError(LoadAdError.ErrorCode.NO_FILL, "no fill", null)) }
+            callback.onAdPreloaded(id, ResponseInfo(null, "recovered", Bundle(), null, emptyList()))
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+        for (format in listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL, AdFormat.REWARDED)) {
+            val loads = events.filter { it.format == format }
+            assertEquals(listOf(AdEventName.LOAD, AdEventName.LOAD_FAIL, AdEventName.LOAD,
+                AdEventName.LOAD_FAIL, AdEventName.LOAD, AdEventName.LOADED), loads.map { it.name })
+            assertEquals(3, loads.map { it.requestId }.distinct().size)
+            assertTrue(loads.drop(2).all { it.sdkAutoLoad && it.analyticsParameters()["load_trigger"] == "sdk_auto" &&
+                !it.analyticsParameters().containsKey("latency_ms") })
+        }
+    }
+
     @Test fun `late fullscreen callbacks from a destroyed pool cannot report failure into its replacement`() {
         startFullScreenPools()
         val oldCallbacks = PolicyPreloaderCalls.active.toMap()
@@ -208,11 +278,14 @@ class ProviderPreloadPolicyTest {
         AdMobAds.onPolicyChanged()
         checker.policy = AdPolicy()
         AdMobAds.onPolicyChanged()
+        val count = events.size
         oldCallbacks.forEach { (id, callback) ->
             callback.onAdsExhausted(id)
+            callback.onAdPreloaded(id, ResponseInfo(null, "obsolete", Bundle(), null, emptyList()))
             callback.onAdFailedToPreload(id, LoadAdError(LoadAdError.ErrorCode.NO_FILL, "late", null))
         }
         shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(count, events.size)
         assertTrue(providerMap("loadFailures").isEmpty())
         assertEquals(6, PolicyPreloaderCalls.starts)
     }
@@ -303,6 +376,57 @@ class ProviderPreloadPolicyTest {
     }
 
     private fun startFullScreenPools() = ReflectionHelpers.callInstanceMethod<Any?>(AdMobAds, "startPreloading")
+
+    @Test fun `all AdMob full screen show exceptions carry the consumed ads source`() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup().visible()
+        controller.windowFocusChanged(true)
+        val activity = controller.get()
+        val previousActivity = ReflectionHelpers.getStaticField<Any?>(AdLifecycleMonitor::class.java, "resumedActivity")
+        val foreground = AdLifecycleMonitor.isAppInForeground
+        ReflectionHelpers.setStaticField(AdLifecycleMonitor::class.java, "resumedActivity", WeakReference(activity))
+        ReflectionHelpers.setStaticField(AdLifecycleMonitor::class.java, "isAppInForeground", true)
+        try {
+            for ((format, type, methodName) in listOf(
+                Triple(AdFormat.APP_OPEN, AppOpenAd::class.java, "showAppOpenOnMain"),
+                Triple(AdFormat.INTERSTITIAL, InterstitialAd::class.java, "showInterstitialOnMain"),
+                Triple(AdFormat.REWARDED, RewardedAd::class.java, "showRewardedOnMain"),
+            )) for (source in listOf("network-${format.analyticsValue}", " ", null)) {
+                val sourceInfo = source?.let { AdSourceResponseInfo("adapter", 0L, null, Bundle(), it, "id", "", "") }
+                val response = ResponseInfo("adapter", "response", Bundle(), sourceInfo, listOfNotNull(sourceInfo))
+                var shows = 0
+                val ad = Proxy.newProxyInstance(type.classLoader, arrayOf(type)) { proxy, method, args ->
+                    when (method.name) {
+                        "getResponseInfo" -> response
+                        "show" -> { shows++; error("test show exception") }
+                        "hashCode" -> System.identityHashCode(proxy)
+                        "equals" -> proxy === args?.firstOrNull()
+                        else -> null
+                    }
+                } as Ad
+                providerMap("pendingAds")[format] = RetainedAd(ad, SystemClock.elapsedRealtime(), 60_000L)
+                events.clear()
+                val results = mutableListOf<Any>()
+                val session = AdShowSession(AdEventListener(events::add), AdPlatform.ADMOB,
+                    AdMediationMode.ADMOB, format, "show-source", "unit", "session", 1)
+                val callback: (Any) -> Unit = { results += it }
+                val method = AdMobAds::class.java.getDeclaredMethod(methodName,
+                    Activity::class.java, String::class.java, Function1::class.java, AdShowSession::class.java)
+                    .apply { isAccessible = true }
+                try {
+                    method.invoke(AdMobAds, activity, "show-source", callback, session)
+                    assertEquals("$format: SDK show must be reached", 1, shows)
+                    val failure = events.single { it.name == AdEventName.SHOW_FAIL }
+                    assertEquals(source?.takeIf { it.isNotBlank() } ?: "unknow", failure.analyticsParameters()["ad_source"])
+                    assertEquals("exception", failure.reason)
+                    assertEquals(1, results.size)
+                } finally { session.attempt.complete() }
+            }
+        } finally {
+            controller.pause().stop().destroy()
+            ReflectionHelpers.setStaticField(AdLifecycleMonitor::class.java, "resumedActivity", previousActivity)
+            ReflectionHelpers.setStaticField(AdLifecycleMonitor::class.java, "isAppInForeground", foreground)
+        }
+    }
 
     @Test fun `inter quota exhaustion leaves shared pools available for open fallback`() {
         checker.policy = AdPolicy(frequency = AdFrequencyPolicy(enabled = true,

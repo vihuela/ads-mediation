@@ -8,6 +8,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NativeFlowLogTest {
+    @Test fun `actual Native show log confirms physical exposure`() {
+        val shown = AdEvent(AdEventName.SHOW, AdPlatform.ADMOB, AdFormat.NATIVE,
+            "home", "session", "unit", 1)
+        assertTrue(requireNotNull(formatNativeEventLogMessage(shown)).contains("已确认实际曝光"))
+    }
+
     @Test fun `native log separates human results from identity and keeps unknown distinct from zero`() {
         val event = AdEvent(AdEventName.BID_RESULT, AdPlatform.TOPON, AdFormat.NATIVE,
             "home_native", "session-secret", "full-platform-id", 1,

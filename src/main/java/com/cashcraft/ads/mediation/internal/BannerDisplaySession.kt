@@ -31,8 +31,9 @@ internal class BannerDisplaySession(
     private val refreshed = AtomicBoolean(false)
 
     fun impression() {
-        if (!slotEnded.get() && impressionOrFailure.compareAndSet(false, true) && event.platform == AdPlatform.TOPON) {
-            dispatch(event)
+        if (!slotEnded.get() && impressionOrFailure.compareAndSet(false, true)) {
+            dispatch(event.copy(name = AdEventName.SHOW))
+            if (event.platform == AdPlatform.TOPON) dispatch(event)
         }
     }
 

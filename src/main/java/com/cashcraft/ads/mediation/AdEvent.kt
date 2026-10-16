@@ -24,6 +24,7 @@ enum class AdEventName(val analyticsName: String) {
     DISMISS("ad_close"),
     REWARD("ad_reward"),
     BANNER_REFRESH("ad_banner_refresh"),
+    SHOW("ad_show"),
 }
 
 /** SDK-neutral event payload shared by AdMob and TopOn. */
@@ -133,11 +134,19 @@ data class AdEvent(
                 admobAdUnitId?.takeIf { it.isNotBlank() }?.let { properties["admob_ad_unit_id"] = it }
                 topOnAdUnitId?.takeIf { it.isNotBlank() }?.let { properties["topon_ad_unit_id"] = it }
             }
-            AdEventName.LOADED, AdEventName.CLICK ->
+            AdEventName.LOADED, AdEventName.SHOW, AdEventName.CLICK -> {
                 adSource?.takeIf { it.isNotBlank() }?.let { properties["ad_source"] = it }
+                if (name == AdEventName.SHOW && format == AdFormat.BANNER) {
+                    refreshIndex?.takeIf { it > 0 }?.let { properties["refresh_index"] = it }
+                }
+            }
             AdEventName.LOAD_FAIL, AdEventName.SHOW_FAIL -> {
+                if (name == AdEventName.SHOW_FAIL) properties["ad_source"] = adSource?.takeIf { it.isNotBlank() } ?: "unknow"
                 val failure = failureReason()
                 properties["reason"] = failure
+                if (failure != "exception" && reason != failure && reason?.matches(LOCAL_REASON_CODE) == true) {
+                    properties["reason_detail"] = reason
+                }
                 if (failure != "exception") errorCode?.takeIf { it.isNotBlank() }?.let { properties["error_code"] = it }
                 errorDetail?.trim()?.takeIf { it.isNotEmpty() }?.let {
                     properties["error_detail"] = it.take(MAX_ERROR_DETAIL_LENGTH)
@@ -187,6 +196,7 @@ data class AdEvent(
 
     private companion object {
         const val MAX_ERROR_DETAIL_LENGTH = 8_192
+        val LOCAL_REASON_CODE = Regex("^[a-z][a-z0-9_]{0,63}$")
         val skipReasons = mapOf(
             "global_disabled" to "global_disabled",
             "platform_disabled" to "platform_disabled",

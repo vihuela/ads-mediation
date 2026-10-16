@@ -282,7 +282,7 @@ class AdPolicyIntegrationTest {
             session.emit(AdEventName.DISMISS)
             attempt.complete()
             assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION,
-                AdEventName.DISMISS), events.map { it.name })
+                AdEventName.SHOW, AdEventName.DISMISS), events.map { it.name })
             assertTrue(events.all { it.platform == platform && it.platformKnown && it.position == "cold_start" })
             assertTrue(events.none { it.analyticsParameters().containsKey("platform_known") })
         }

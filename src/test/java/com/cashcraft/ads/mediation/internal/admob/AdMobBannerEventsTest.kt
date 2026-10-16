@@ -15,6 +15,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AdMobBannerEventsTest {
+    @Test fun `Banner callback source reaches the failure of a replaced unexposed ad`() {
+        val events = mutableListOf<AdEvent>()
+        val relay = relay(events, mutableListOf())
+        relay.loaded(BannerResponse("first", "network-a"))
+        relay.refreshed(BannerResponse("second", "network-b"))
+        relay.refreshed(BannerResponse("third"))
+        relay.refreshed(BannerResponse("fourth"))
+        val failures = events.filter { it.name == AdEventName.SHOW_FAIL }
+        assertEquals(listOf("first", "second", "third"), failures.map { it.responseId })
+        assertEquals(listOf("network-a", "network-b", "unknow"),
+            failures.map { it.analyticsParameters()["ad_source"] })
+    }
+
     @Test
     fun `failed local load can recover internally without a second result or request association`() {
         val events = mutableListOf<AdEvent>()
@@ -25,9 +38,9 @@ class AdMobBannerEventsTest {
         relay.impression(BannerResponse("recovered"))
         relay.paid(BannerResponse("recovered"), 0L, "USD", null, 1L)
         assertEquals(listOf(AdEventName.POSITION, AdEventName.LOAD, AdEventName.LOAD_FAIL,
-            AdEventName.IMPRESSION), events.map { it.name })
-        assertEquals("failed", events[2].result)
-        assertNull(events[3].requestId)
+            AdEventName.SHOW, AdEventName.IMPRESSION), events.map { it.name })
+        assertEquals("failed", events.single { it.name == AdEventName.LOAD_FAIL }.result)
+        assertNull(events.single { it.name == AdEventName.IMPRESSION }.requestId)
         assertEquals(1, revenues.size)
     }
 
@@ -126,11 +139,12 @@ class AdMobBannerEventsTest {
         cachedRelay.suppressLoadTracking()
         cachedRelay.loaded(BannerResponse("cached"))
         cachedRelay.impression(BannerResponse("cached"))
-        assertEquals(listOf(AdEventName.POSITION), cached.map { it.name })
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW), cached.map { it.name })
         cachedRelay.paid(BannerResponse("cached"), 0L, "USD", "UNKNOWN", 1L)
-        assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION), cached.map { it.name })
-        assertEquals(cached[0].sessionId, cached[1].sessionId)
-        assertNull(cached[1].requestId)
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW, AdEventName.IMPRESSION), cached.map { it.name })
+        val impression = cached.single { it.name == AdEventName.IMPRESSION }
+        assertEquals(cached.single { it.name == AdEventName.POSITION }.sessionId, impression.sessionId)
+        assertNull(impression.requestId)
 
         val actual = mutableListOf<AdEvent>()
         val actualRelay = relay(actual, mutableListOf())

@@ -9,6 +9,11 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AppOpenLogTest {
+    @Test fun `actual show log confirms physical exposure`() {
+        val shown = event.copy(name = AdEventName.SHOW).appOpenLogLines()
+        assertTrue(shown.first().contains("已确认实际曝光"))
+    }
+
     private val event = AdEvent(
         name = AdEventName.IMPRESSION, platform = AdPlatform.TOPON,
         format = AdFormat.APP_OPEN, position = "SP_AppStart",

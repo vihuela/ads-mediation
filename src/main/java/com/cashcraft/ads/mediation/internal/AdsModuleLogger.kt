@@ -5,6 +5,7 @@ import com.cashcraft.ads.mediation.AdConsentSnapshot
 import com.cashcraft.ads.mediation.AdEvent
 import com.cashcraft.ads.mediation.AdEventName
 import com.cashcraft.ads.mediation.AdFormat
+import com.cashcraft.ads.mediation.AdPlatform
 import com.cashcraft.ads.mediation.appOpenLogLines
 import com.cashcraft.ads.mediation.flowName
 import java.math.BigDecimal
@@ -17,6 +18,11 @@ internal class AdsModuleLogger(
 ) {
     fun event(event: AdEvent) {
         if (!enabled) return
+        if (event.name != AdEventName.BANNER_REFRESH &&
+            !(event.format == AdFormat.BANNER && event.name == AdEventName.DISMISS) &&
+            event.analyticsParameters().isEmpty()) {
+            Log.w(tag, "ad_event_contract_violation event=${event.name.analyticsName} format=${event.format.analyticsValue}")
+        }
         if (event.format == AdFormat.APP_OPEN) {
             event.appOpenLogLines().forEachIndexed { index, message ->
                 if (index > 0) Log.d(tag, message)
@@ -93,6 +99,13 @@ internal class AdsModuleLogger(
                 "session_id=${event.sessionId} reason=${error.message.orEmpty().oneLine()}",
             error,
         )
+    }
+
+    fun invalidRevenue(platform: AdPlatform, format: AdFormat, sessionId: String?, rawValue: String?, currency: String?) {
+        if (!enabled) return
+        Log.w(tag, "ad_revenue_diagnostic reason=invalid_revenue platform=${platform.analyticsValue} " +
+            "format=${format.analyticsValue} session_id=${sessionId?.oneLine()} " +
+            "value=${rawValue?.oneLine()} currency=${currency?.oneLine()}")
     }
 
     fun bannerDiagnostic(
@@ -197,6 +210,7 @@ internal fun formatNativeEventLogMessage(event: AdEvent): String? {
             }
             "比价：AdMob ${nativePrice(event.admobValue)}、TopOn ${nativePrice(event.topOnValue)} 美元/次展示，$winner。"
         }
+        AdEventName.SHOW -> "$platform 已确认实际曝光。"
         AdEventName.IMPRESSION -> {
             // 优先使用原始微单位，避免大额 Double 丢失精度；仅改变日志显示。
             val amount = event.valueMicros?.let { BigDecimal.valueOf(it, 6).stripTrailingZeros().toPlainString() }

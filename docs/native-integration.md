@@ -190,6 +190,8 @@ Activity、owner、等值 request、layout 对象和 retentionPolicy 组成配�
 
 ## 事件、收益与全屏
 
+有效 Native（含全屏 Native）`ad_show_fail` 必含 `ad_source`：使用可确认的失败素材来源；没有实际素材或来源为 null／空白时，由 `analyticsParameters()` 输出字面量 `"unknow"`，原始 `AdEvent.adSource` 仍可为空。该来源不是故障归因；无填充、等待超时、取消或未选平台等没有实际素材的失败，不从缓存候选猜测来源。此契约不改变已曝光后的终态、其他事件字段或非法事件返回空 Map 的门禁；`ad_load_fail` 的业务输出不变，不增加 `ad_source`。
+
 - `AdFormat.NATIVE` 区分广告格式，`slotId` 字段保留但改为原始业务 position（无后缀），不再生成页面 UUID；每次请求有 requestId，同一广告对象有自己的展示 sessionId。加载事件延续 requestId 作为加载 sessionId 的原口径，不能当成曝光会话。
 - position 使用业务位置的 `_native` 后缀，页面加载不是全局 preload。每个有效周期仅一次 ad_position，失败重试不增加机会；业务 ad_session_id 使用稳定 slotId，每次本层加载仍有独立 request/result 和素材收益身份。取消有独立原因，曝光前失败按尝试去重。
 - 曝光/点击以平台回调为准；Loaded、挂载和可见度不伪造曝光。合法多次点击保留，页面释放和覆盖层关闭不伪装成 ad_close。
@@ -314,6 +316,8 @@ Fragment检查默认仍用官方AdMob测试ID。显式TopOn运行可另传 `-e p
 双平台 smoke 可在上述启动命令加入 `--ez bidding true`；使用已配置的 TopOn 测试广告位及 AdMob 官方测试 ID，日志包含 `winner`、两端可用性和 USD 报价。
 
 常见 reason 还包括 `invalid_native_bid_timeout`、`native_bid_timeout`、`native_no_bid_candidate`、`native_conflicting_platform_selection`；原有 reason 包括 `invalid_ad_unit_id`、`invalid_position`、`invalid_template_ratio`、`sdk_not_initialized`、`native_platform_not_configured`、`native_platform_initialization_failed`、`consent_not_obtained`、`no_fill`、`native_load_failed`、`native_layout_invalid`、`unsupported_native_render_mode` 和 `native_template_size_unknown`。平台错误码在可用时单独保留。
+
+`native_video_media_too_small` 表示 Google 视频的 SDK 媒体 View 小于 120 × 120 dp（含 padding 影响），渲染前校验失败或展示中布局缩小时产生。它不在自动重试名单内，需修正布局空间后显式 retry。该原因经 `SHOW_FAIL` 上报时，业务属性 `reason` 归一为 `ad_error`，原始原因码保留在 `reason_detail`，统计需同时按两者过滤；无平台 `error_code`。已确认曝光后因布局缩小而释放的卡片不再产生 `SHOW_FAIL`。
 
 页面失败不自动无限重试；仅当前周期 Failed 且满足资格时 retry 生效。共享库存消费后准备下一条，TopOn 单轮最多按 2/4/8 秒额外重试三次，并遵守同 placement 至少 2.1 秒失败冷却；后台及无人使用时继续加载、补货及退避。耗尽后停止本层重试，网络恢复、新页面显式获取或合资格页面 retry 或许可恢复可重开，网络/许可恢复不要求页面需求；普通通知、重复 preload/ensure、无人使用及单纯回前台不能重开，不无限轮询。无填充时可收起区域，不阻塞正文；不定时刷新已经展示的广告。单平台冷库存等待最多30秒，双平台仍遵守请求的比价期限（默认七秒）。
 

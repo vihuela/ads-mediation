@@ -6,6 +6,39 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AdEventTest {
+    @Test fun `failure detail preserves only distinct bounded local codes outside exception paths`() {
+        for (name in listOf(AdEventName.LOAD_FAIL, AdEventName.SHOW_FAIL)) {
+            for ((raw, canonical) in mapOf("native_render_failed" to "ad_error", "wait_timeout" to "timeout")) {
+                val parameters = event(name).copy(reason = raw).analyticsParameters()
+                assertEquals(canonical, parameters["reason"])
+                assertEquals(raw, parameters["reason_detail"])
+            }
+            for (raw in listOf("no_fill", "SDK failed to connect", "bad\ntext", "Upper_Case", "a".repeat(65))) {
+                assertFalse(event(name).copy(reason = raw).analyticsParameters().containsKey("reason_detail"))
+            }
+            for (raw in listOf("disconnected", "load_exception")) {
+                val parameters = event(name).copy(reason = raw, errorCode = "load_exception").analyticsParameters()
+                assertEquals("exception", parameters["reason"])
+                assertFalse(parameters.containsKey("reason_detail"))
+            }
+        }
+    }
+
+    @Test fun `actual show has click identity and source without revenue for every format`() {
+        val show = AdEventName.SHOW
+        assertEquals("ad_show", show.analyticsName)
+        for (format in AdFormat.entries) for (platform in AdPlatform.entries) {
+            val shown = event(show, format).copy(platform = platform, refreshIndex = 3,
+                precisionType = "exact")
+            val expected = event(AdEventName.CLICK, format).copy(platform = platform).analyticsParameters().toMutableMap()
+            if (format == AdFormat.BANNER) expected["refresh_index"] = 3L
+            assertEquals(expected, shown.analyticsParameters())
+            for (key in listOf("revenue_amount", "currency", "precision_type")) {
+                assertFalse(shown.analyticsParameters().containsKey(key))
+            }
+        }
+    }
+
     private fun event(name: AdEventName = AdEventName.IMPRESSION, format: AdFormat = AdFormat.INTERSTITIAL) =
         AdEvent(name, AdPlatform.ADMOB, format, "business-position", "display-1", "unit", 1,
             requestId = "load-1", latencyMillis = 25, valueMicros = 1_250, currency = "USD",
@@ -54,7 +87,7 @@ class AdEventTest {
     @Test fun `仅 Banner 业务曝光携带从一开始的刷新序号且无页面身份时保持原会话`() {
         for (format in AdFormat.entries) for (name in AdEventName.entries) {
             val parameters = event(name, format).copy(refreshIndex = 2).analyticsParameters()
-            if (format == AdFormat.BANNER && name == AdEventName.IMPRESSION) {
+            if (format == AdFormat.BANNER && name in setOf(AdEventName.SHOW, AdEventName.IMPRESSION)) {
                 assertEquals(2L, parameters["refresh_index"])
             } else {
                 assertFalse(parameters.containsKey("refresh_index"))
@@ -70,7 +103,7 @@ class AdEventTest {
 
     @Test fun `native and banner business identity falls back to the original session without a slot`() {
         for (format in listOf(AdFormat.NATIVE, AdFormat.BANNER)) {
-            for (name in listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL, AdEventName.IMPRESSION, AdEventName.CLICK)) {
+            for (name in listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL, AdEventName.SHOW, AdEventName.IMPRESSION, AdEventName.CLICK)) {
                 val ad = event(name, format).copy(slotId = null)
                 assertEquals("display-1", ad.analyticsParameters()["ad_session_id"])
                 assertEquals("display-1", ad.sessionId)
@@ -117,16 +150,80 @@ class AdEventTest {
     }
 
     @Test fun `unselected show failure is unknown and never exposes a configured unit`() {
-        for (format in AdFormat.entries) {
-            val parameters = event(AdEventName.SHOW_FAIL, format)
-                .copy(platformKnown = false, mediationMode = AdMediationMode.BIDDING).analyticsParameters()
-            assertEquals("unknown", parameters["ad_platform"])
-            assertEquals("bidding", parameters["mediation_mode"])
-            assertFalse(parameters.containsKey("ad_unit_id"))
+        for (format in AdFormat.entries) for (platform in AdPlatform.entries) {
+            for (source in listOf(null, "", " \t\n")) {
+                val parameters = event(AdEventName.SHOW_FAIL, format)
+                    .copy(platform = platform, platformKnown = false, mediationMode = AdMediationMode.BIDDING,
+                        adSource = source).analyticsParameters()
+                assertEquals("unknown", parameters["ad_platform"])
+                assertEquals("unknow", parameters["ad_source"])
+                assertEquals("bidding", parameters["mediation_mode"])
+                assertFalse(parameters.containsKey("ad_unit_id"))
+            }
         }
         for (name in listOf(AdEventName.LOAD, AdEventName.LOADED, AdEventName.LOAD_FAIL,
             AdEventName.IMPRESSION, AdEventName.CLICK, AdEventName.DISMISS, AdEventName.IMPRESSION, AdEventName.REWARD)) {
             assertTrue(event(name).copy(platformKnown = false).analyticsParameters().isEmpty())
+        }
+    }
+
+    @Test fun `show failures always serialize confirmed source or unknow without changing raw source`() {
+        for (format in AdFormat.entries) for (platform in AdPlatform.entries) {
+            for (source in listOf("Google", "Pangle", "  confirmed network  ", null, "", " \t\n")) {
+                val ad = event(AdEventName.SHOW_FAIL, format).copy(
+                    platform = platform, adSource = source, reason = "wait_timeout", errorCode = "SDK_ERROR",
+                    errorDetail = " provider detail ",
+                )
+                assertEquals(mapOf(
+                    "ad_format" to format.analyticsValue,
+                    "ad_platform" to platform.analyticsValue,
+                    "mediation_mode" to ad.mediationMode.analyticsValue,
+                    "position_id" to "business-position",
+                    "ad_session_id" to if (format in listOf(AdFormat.BANNER, AdFormat.NATIVE)) "slot-1" else "display-1",
+                    "ad_unit_id" to "unit",
+                    "ad_source" to (source?.takeIf { it.isNotBlank() } ?: "unknow"),
+                    "reason" to "timeout",
+                    "reason_detail" to "wait_timeout",
+                    "error_code" to "SDK_ERROR",
+                    "error_detail" to "provider detail",
+                ), ad.analyticsParameters())
+                assertEquals(source, ad.adSource)
+                assertTrue(ad.copy(position = " ").analyticsParameters().isEmpty())
+                assertTrue(ad.copy(sessionId = " ", slotId = null).analyticsParameters().isEmpty())
+                if (format in listOf(AdFormat.BANNER, AdFormat.NATIVE)) {
+                    assertTrue(ad.copy(slotId = " ").analyticsParameters().isEmpty())
+                }
+            }
+        }
+    }
+
+    @Test fun `load failures retain complete business output without source including sdk auto loads`() {
+        for (format in AdFormat.entries) for (platform in AdPlatform.entries) {
+            for (source in listOf("Google", null, "", " \t\n")) for (sdkAuto in listOf(false, true)) {
+                val ad = event(AdEventName.LOAD_FAIL, format).copy(
+                    platform = platform, adSource = source, sdkAutoLoad = sdkAuto,
+                    reason = "wait_timeout", errorCode = "SDK_ERROR", errorDetail = " provider detail ",
+                )
+                val expected = linkedMapOf<String, Any>(
+                    "ad_format" to format.analyticsValue,
+                    "ad_platform" to platform.analyticsValue,
+                    "mediation_mode" to ad.mediationMode.analyticsValue,
+                    "request_id" to "load-1",
+                )
+                if (sdkAuto) expected["load_trigger"] = "sdk_auto" else expected["latency_ms"] = 25L
+                expected.putAll(mapOf(
+                    "ad_unit_id" to "unit", "reason" to "timeout", "reason_detail" to "wait_timeout",
+                    "error_code" to "SDK_ERROR", "error_detail" to "provider detail",
+                ))
+                assertEquals(expected, ad.analyticsParameters())
+                assertFalse(ad.analyticsParameters().containsKey("ad_source"))
+                assertTrue(ad.copy(requestId = " ").analyticsParameters().isEmpty())
+                assertTrue(ad.copy(platformKnown = false).analyticsParameters().isEmpty())
+                if (!sdkAuto) {
+                    assertTrue(ad.copy(latencyMillis = null).analyticsParameters().isEmpty())
+                    assertTrue(ad.copy(latencyMillis = -1).analyticsParameters().isEmpty())
+                }
+            }
         }
     }
 

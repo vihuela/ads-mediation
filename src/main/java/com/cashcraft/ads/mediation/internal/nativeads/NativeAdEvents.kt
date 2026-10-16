@@ -190,6 +190,7 @@ internal class NativeAttempt(
         if (shown || failed) return
         shown = true
         runCatching { onActualImpression?.invoke() }
+        emit(base.copy(name = AdEventName.SHOW, adSource = source, responseId = response))
         if (base.platform == AdPlatform.TOPON) emitImpression(source, response, revenue)
     }
     private fun emitImpression(source: String?, response: String?, revenue: NativeRevenue?) {

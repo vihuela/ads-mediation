@@ -29,7 +29,7 @@ internal class AdEventDispatcher(
         if (platform == AdPlatform.ADMOB) ADMOB_PREFERENCES_NAME else TOPON_PREFERENCES_NAME,
         Context.MODE_PRIVATE,
     )
-    private val logger = AdsModuleLogger(loggingEnabled, logTag)
+    val logger = AdsModuleLogger(loggingEnabled, logTag)
 
     private fun nextNumber(format: AdFormat, kind: String): Long = synchronized(preferences) {
         val key = "${format.analyticsValue}_${kind}_count"
@@ -196,6 +196,8 @@ internal class AdLoadSession(
     private val sdkAutoLoad: Boolean = false,
 ) {
     private val terminal = AtomicBoolean(false)
+
+    val hasTerminalEvent: Boolean get() = terminal.get()
 
     private var requested = false
     private var pendingTerminal: (() -> Unit)? = null
@@ -473,6 +475,7 @@ internal class AdShowSession(
     private val impressionReported = AtomicBoolean(false)
     private val rewarded = AtomicBoolean(false)
     private val dismissed = AtomicBoolean(false)
+    private var confirmedAdSource: String? = null
     var onImpressionConfirmed: (() -> Unit)? = null
 
     init {
@@ -516,6 +519,11 @@ internal class AdShowSession(
     val hasTerminalEvent: Boolean
         get() = terminal.get()
 
+    /** Only the consumed ad or an identity-checked callback can identify this material. */
+    fun recordAdSource(source: String?) {
+        source?.takeIf { it.isNotBlank() }?.let { confirmedAdSource = it }
+    }
+
     fun impression(
         adSource: String?, responseId: String?, valueMicros: Long? = null,
         currency: String? = null, precisionType: String? = null,
@@ -528,6 +536,7 @@ internal class AdShowSession(
             val callback = onImpressionConfirmed
             onImpressionConfirmed = null
             runCatching { callback?.invoke() }
+            emit(AdEventName.SHOW, adSource = adSource, responseId = responseId)
             if (reportsImpressionOnShow) {
                 emit(AdEventName.IMPRESSION, adSource = adSource, responseId = responseId,
                     value = valueMicros?.div(1_000_000.0), valueMicros = valueMicros,
@@ -539,13 +548,16 @@ internal class AdShowSession(
     private val reportsImpressionOnShow: Boolean
         get() = platform == AdPlatform.TOPON && format in setOf(AdFormat.APP_OPEN, AdFormat.NATIVE)
 
-    /** Revenue delivery has its own lifetime and dedup, independent of the SDK show callback. */
+    /** Revenue delivery has its own lifetime and dedup; callers must confirm failure source separately. */
     fun revenue(
         adSource: String? = null, responseId: String? = null, value: Double? = null,
         valueMicros: Long?, currency: String?, mediationAdapterClassName: String? = null,
         precisionType: String? = null,
     ): Boolean {
-        if (valueMicros == null || valueMicros < 0 || currency?.matches(Regex("[A-Z]{3}")) != true) return false
+        if (valueMicros == null || valueMicros < 0 || currency?.matches(Regex("[A-Z]{3}")) != true) {
+            logger?.invalidRevenue(platform, format, sessionId, valueMicros?.toString(), currency)
+            return false
+        }
         if (!admit(qualify = false) || !paid.compareAndSet(false, true)) return false
         if (!reportsImpressionOnShow) {
             emit(AdEventName.IMPRESSION, adSource = adSource, responseId = responseId,
@@ -561,7 +573,7 @@ internal class AdShowSession(
         if (terminal.compareAndSet(false, true)) {
             onImpressionConfirmed = null
             emit(AdEventName.SHOW_FAIL, reason = attempt.policy?.blocked?.let { it.sceneSkipReason() ?: it.code } ?: reason,
-                errorCode = errorCode, errorDetail = errorDetail)
+                errorCode = errorCode, errorDetail = errorDetail, adSource = confirmedAdSource)
             cause?.let { error ->
                 logger?.showFailureException(
                     format = format,

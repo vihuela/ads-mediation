@@ -4,6 +4,8 @@ import android.app.Application
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.cashcraft.ads.mediation.AdEvent
+import com.cashcraft.ads.mediation.AdEventListener
 import com.cashcraft.ads.mediation.AdMobIds
 import com.cashcraft.ads.mediation.AdMobProviderConfig
 import com.cashcraft.ads.mediation.AdFormat
@@ -15,10 +17,13 @@ import com.thinkup.core.api.TUNetworkConfig
 import com.thinkup.core.api.TUDebuggerConfig
 import com.thinkup.core.api.TUSDK
 import com.thinkup.core.api.TUSDKInitListener
+import org.json.JSONObject
+import java.util.concurrent.CopyOnWriteArrayList
 
 /** Device probe only. Full-screen R8 smoke remains in the release source set. */
 class ProbeApplication : Application() {
     private val mainHandler = Handler(Looper.getMainLooper())
+    val interstitialEvents = CopyOnWriteArrayList<AdEvent>()
     val hasTopOnConfig: Boolean
         get() = BuildConfig.TOPON_APP_ID.isNotBlank() &&
             BuildConfig.TOPON_APP_KEY.isNotBlank() &&
@@ -37,6 +42,12 @@ class ProbeApplication : Application() {
                 umpConsent = UmpConsentConfig(enabled = false),
                 autoShowAppOpen = false,
                 loggingEnabled = true,
+                eventListener = AdEventListener { event ->
+                    if (event.format == AdFormat.INTERSTITIAL) {
+                        interstitialEvents += event
+                        Log.i("AdTracking", "event=${event.name.analyticsName} params=${JSONObject(event.analyticsParameters())}")
+                    }
+                },
                 revenueListener = AdRevenueListener { payload ->
                     if (payload.format == AdFormat.BANNER) Log.i("BannerRevenue",
                         "session_id=${payload.sessionId} response_id=${payload.impressionId} micros=${payload.valueMicros}")

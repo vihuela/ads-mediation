@@ -82,7 +82,7 @@ enum class AdMobState {
  * Do not mix this entry point with `Ads`; this legacy entry point does not provide the unified gates.
  *
  * The SDK preloaders own cache lifetime and replenishment. Every public show attempt emits one
- * `ad_position`, followed by exactly one terminal `ad_impression` or `ad_show_fail` event.
+ * `ad_position`, followed by `ad_show` or `ad_show_fail`; `ad_impression` tracks revenue independently.
  */
 @Deprecated(
     message = "Retained for existing integrations only. Use com.cashcraft.ads.mediation.Ads with " +
@@ -469,7 +469,7 @@ object AdMobAds {
                     if (!responseId.isNullOrBlank() && loadBound != null) {
                         responseLoadBounds[responseId] = loadBound
                     }
-                    preloadLoadSessions[preloadId]?.loaded(
+                    preloadLoadSession(preloadId, descriptor)?.loaded(
                         adSource = responseInfo.loadedAdSourceResponseInfo?.name,
                         responseId = responseInfo.responseId,
                     )
@@ -488,7 +488,7 @@ object AdMobAds {
                         return@post
                     }
                     loadFailures[preloadId] = (loadFailures[preloadId] ?: 0L) + 1
-                    preloadLoadSessions[preloadId]?.failed(
+                    preloadLoadSession(preloadId, descriptor)?.failed(
                         result = adError.analyticsLoadResult(),
                         errorCode = adError.code.name,
                         reason = adError.message,
@@ -527,6 +527,15 @@ object AdMobAds {
         } catch (error: Throwable) {
             loadSession.failed("error", "exception", error.message, null)
             throw error // Preserve the SDK start failure behavior.
+        }
+    }
+
+    private fun preloadLoadSession(preloadId: String, descriptor: PreloadDescriptor): AdLoadSession? {
+        val current = preloadLoadSessions[preloadId] ?: return null
+        if (!current.hasTerminalEvent) return current
+        return events.createLoad(descriptor.format, descriptor.adUnitId, descriptor.bufferSize, sdkAutoLoad = true).also {
+            preloadLoadSessions[preloadId] = it
+            it.request()
         }
     }
 
@@ -681,6 +690,7 @@ object AdMobAds {
             return
         }
         val responseInfo = ad.getResponseInfo()
+        session.recordAdSource(responseInfo.loadedAdSourceResponseInfo?.name)
         ad.adEventCallback = object : AppOpenAdEventCallback {
             override fun onAdImpression() = onMain {
                 session.impression(responseInfo.loadedAdSourceResponseInfo?.name, responseInfo.responseId)
@@ -712,6 +722,7 @@ object AdMobAds {
             return
         }
         val responseInfo = ad.getResponseInfo()
+        session.recordAdSource(responseInfo.loadedAdSourceResponseInfo?.name)
         ad.adEventCallback = object : InterstitialAdEventCallback {
             override fun onAdImpression() = onMain {
                 session.impression(responseInfo.loadedAdSourceResponseInfo?.name, responseInfo.responseId)
@@ -753,6 +764,7 @@ object AdMobAds {
         }
         var rewardEarned = false
         val responseInfo = ad.getResponseInfo()
+        session.recordAdSource(responseInfo.loadedAdSourceResponseInfo?.name)
         ad.adEventCallback = object : RewardedAdEventCallback {
             override fun onAdImpression() = onMain {
                 session.impression(responseInfo.loadedAdSourceResponseInfo?.name, responseInfo.responseId)
@@ -897,12 +909,18 @@ object AdMobAds {
     private fun AdShowSession.paid(value: AdValue, responseInfo: ResponseInfo) {
         val adSourceInfo = responseInfo.loadedAdSourceResponseInfo
         val adapterClassName = adSourceInfo?.adapterClassName ?: responseInfo.adapterClassName
-        val valueMicros = value.valueMicros.takeIf { it >= 0L } ?: return
+        val valueMicros = value.valueMicros.takeIf { it >= 0L } ?: run {
+            events.logger.invalidRevenue(AdPlatform.ADMOB, format, sessionId, value.valueMicros.toString(), value.currencyCode)
+            return
+        }
         val currencyCode = value.currencyCode
             ?.trim()
             ?.takeIf(String::isNotEmpty)
             ?.uppercase(Locale.ROOT)
-            ?: return
+            ?: run {
+                events.logger.invalidRevenue(AdPlatform.ADMOB, format, sessionId, valueMicros.toString(), value.currencyCode)
+                return
+            }
         val adNetwork = adSourceInfo?.name?.trim()?.takeIf(String::isNotEmpty)
         val impressionId = responseInfo.responseId?.trim()?.takeIf(String::isNotEmpty)
         val precisionType = value.precisionType.name.takeIf(String::isNotEmpty)

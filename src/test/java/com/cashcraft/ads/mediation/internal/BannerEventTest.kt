@@ -32,17 +32,19 @@ class BannerEventTest {
         second.impression()
 
         assertEquals(
-            listOf(AdEventName.POSITION, AdEventName.IMPRESSION, AdEventName.BANNER_REFRESH, AdEventName.IMPRESSION),
+            listOf(AdEventName.POSITION, AdEventName.SHOW, AdEventName.IMPRESSION,
+                AdEventName.BANNER_REFRESH, AdEventName.SHOW, AdEventName.IMPRESSION),
             events.map(AdEvent::name),
         )
-        assertEquals(listOf(first.sessionId, first.sessionId, second.sessionId, second.sessionId), events.map(AdEvent::sessionId))
-        assertEquals(List(4) { "slot-1" }, events.map(AdEvent::slotId))
-        assertEquals(List(4) { 4L }, events.map(AdEvent::number))
+        assertEquals(listOf(first.sessionId, first.sessionId, first.sessionId,
+            second.sessionId, second.sessionId, second.sessionId), events.map(AdEvent::sessionId))
+        assertEquals(List(6) { "slot-1" }, events.map(AdEvent::slotId))
+        assertEquals(List(6) { 4L }, events.map(AdEvent::number))
         val impressions = events.filter { it.name == AdEventName.IMPRESSION }
         assertEquals(listOf(1L, 2L), impressions.map { it.analyticsParameters()["refresh_index"] })
         assertEquals(listOf("slot-1", "slot-1"), impressions.map { it.analyticsParameters()["ad_session_id"] })
         assertEquals("BA_Home_bottom", events.last().position)
-        assertEquals("request-1", events[1].requestId)
+        assertEquals("request-1", impressions.first().requestId)
         assertEquals(null, events.last().requestId)
     }
 

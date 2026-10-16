@@ -26,6 +26,7 @@ fun AdEvent.appOpenLogLines(): List<String> = buildList {
             }
             "比价：AdMob ${admobValue.flowPrice()}、TopOn ${topOnValue.flowPrice()} 美元/次展示，$winner。"
         }
+        AdEventName.SHOW -> "$provider 已确认实际曝光，实际来源=$source。"
         AdEventName.IMPRESSION -> {
             val amount = valueMicros?.let { BigDecimal.valueOf(it, 6).stripTrailingZeros().toPlainString() }
                 ?: value?.takeIf { it.isFinite() }?.logPrice() ?: "金额未知"
@@ -48,6 +49,7 @@ fun AdEvent.appOpenLogLines(): List<String> = buildList {
         }
         AdEventName.POSITION -> "尝试展示"
         AdEventName.BID_RESULT -> "竞价结束"
+        AdEventName.SHOW -> "已确认实际曝光"
         AdEventName.IMPRESSION -> "已展示"
         AdEventName.SHOW_FAIL -> "展示失败"
         AdEventName.CLICK -> "用户点击"

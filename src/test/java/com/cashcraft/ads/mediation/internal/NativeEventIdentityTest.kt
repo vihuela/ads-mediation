@@ -8,6 +8,28 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NativeEventIdentityTest {
+    @Test fun `Native render failure keeps loaded source while a retry without material stays unknown`() {
+        for (platform in AdPlatform.entries) {
+            val events = mutableListOf<AdEvent>()
+            val slot = NativeSlot(ResolvedNativeRequest(platform, "unit", "home"), 1, { 1 },
+                AdEventListener(events::add), AdRevenueListener.NONE)
+            val loaded = slot.attempt({ 0 }, recordLoadEvents = false)
+            loaded.loaded(Ad(platform))
+            loaded.fail("native_video_media_too_small")
+            loaded.cancel("native_destroyed")
+            slot.attempt({ 0 }, recordLoadEvents = false).fail("no_fill")
+            val failures = events.filter { it.name == AdEventName.SHOW_FAIL }
+            assertEquals(listOf("real-source", "unknow"), failures.map { it.analyticsParameters()["ad_source"] })
+            assertEquals("native_video_media_too_small", failures.first().analyticsParameters()["reason_detail"])
+            assertTrue(events.none { it.name == AdEventName.SHOW })
+            val shown = slot.attempt({ 0 }, recordLoadEvents = false)
+            shown.loaded(Ad(platform))
+            shown.impression("real-source", "response")
+            shown.fail("native_video_media_too_small")
+            assertEquals(2, events.count { it.name == AdEventName.SHOW_FAIL })
+        }
+    }
+
     @Test fun `cached bidding opportunity follows actual material and has no fabricated load identity`() {
         val events = mutableListOf<AdEvent>()
         val revenues = mutableListOf<AdRevenuePayload>()
@@ -25,7 +47,7 @@ class NativeEventIdentityTest {
         attempt.click("real-source", "response")
         attempt.close()
         attempt.close()
-        assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION,
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW, AdEventName.IMPRESSION,
             AdEventName.CLICK, AdEventName.DISMISS), events.map { it.name })
         assertEquals(1, events.map { it.sessionId }.distinct().size)
         assertNotEquals("home", attempt.id)
@@ -170,6 +192,31 @@ class NativeEventIdentityTest {
         assertNull(impression.valueMicros)
         assertNull(impression.currency)
         assertNull(impression.precisionType)
+    }
+
+    @Test fun `both Native platforms emit actual show once without attaching impression revenue`() {
+        for (platform in AdPlatform.entries) {
+            val events = mutableListOf<AdEvent>()
+            val slot = NativeSlot(ResolvedNativeRequest(platform, "unit", "home"), 1, { 1 },
+                AdEventListener(events::add), AdRevenueListener.NONE)
+            val attempt = slot.attempt({ 0 }, recordLoadEvents = false)
+            val revenue = NativeRevenue(42, "USD", "source", "response", "estimated", topOnAdInfo = Any())
+            repeat(2) { attempt.impression("source", "response", revenue) }
+            assertEquals(listOf("ad_position", "ad_show") +
+                (if (platform == AdPlatform.TOPON) listOf("ad_impression") else emptyList()),
+                events.map { it.name.analyticsName })
+            val shown = events.single { it.name.analyticsName == "ad_show" }
+            assertEquals(slot.id, shown.analyticsParameters()["ad_session_id"])
+            assertEquals("source", shown.adSource)
+            assertNull(shown.valueMicros)
+            assertNull(shown.currency)
+            assertNull(shown.precisionType)
+            val failed = slot.attempt({ 0 }, recordLoadEvents = false)
+            failed.fail("no_fill")
+            repeat(2) { failed.impression("source", "late", revenue) }
+            assertEquals(1, events.count { it.name.analyticsName == "ad_show" })
+            assertEquals(1, events.count { it.name == AdEventName.SHOW_FAIL })
+        }
     }
 
     private class Ad(override val platform: AdPlatform) : NativeAdHandle {

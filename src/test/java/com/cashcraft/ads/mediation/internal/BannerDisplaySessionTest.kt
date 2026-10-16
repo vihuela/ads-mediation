@@ -12,6 +12,23 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class BannerDisplaySessionTest {
+    @Test fun `Banner failure source belongs to its display and survives slot end`() {
+        for (platform in AdPlatform.entries) {
+            val events = mutableListOf<AdEvent>()
+            val slot = slot(events, mutableListOf(), platform = platform)
+            checkNotNull(slot.newDisplay("known", adSource = "network-a"))
+            // Replacing an unexposed material ends that material, not the replacement.
+            checkNotNull(slot.newDisplay("unknown"))
+            slot.end()
+            slot.end()
+            assertEquals(listOf("network-a", "unknow"), events.filter { it.name == AdEventName.SHOW_FAIL }
+                .map { it.analyticsParameters()["ad_source"] })
+            val noMaterial = slot(events, mutableListOf(), "empty", platform)
+            noMaterial.showFailure("no_fill")
+            assertEquals("unknow", events.last().analyticsParameters()["ad_source"])
+        }
+    }
+
     @Test
     fun `AdMob reports one impression at paid for either callback order and each refresh`() {
         for (paidFirst in listOf(true, false)) {
@@ -44,7 +61,7 @@ class BannerDisplaySessionTest {
                 assertEquals(payload.impressionId, displayEvents.last().responseId)
                 assertTrue(displayEvents.all { it.position == "home_banner" })
                 assertNotEquals(displayEvents.first().slotId, payload.sessionId)
-                assertEquals(AdEventName.IMPRESSION,
+                assertEquals(if (paidFirst) AdEventName.IMPRESSION else AdEventName.SHOW,
                     displayEvents.first { it.name !in listOf(AdEventName.BANNER_REFRESH, AdEventName.POSITION) }.name)
             }
             assertTrue(events.none { it.name == AdEventName.LOAD })
@@ -125,7 +142,7 @@ class BannerDisplaySessionTest {
         display.paid(1L, "USD", null, 1L)
         display.paid(1L, "USD", null, 1L)
         assertEquals(1, revenueCalls)
-        assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION), events.map { it.name })
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW, AdEventName.IMPRESSION), events.map { it.name })
         val next = checkNotNull(slot(events, mutableListOf(), "next").newDisplay("next-response"))
         next.impression()
         next.paid(2L, "USD", null, 2L)
@@ -158,11 +175,11 @@ class BannerDisplaySessionTest {
         display.close()
         display.close()
         assertTrue(slot.isEnded)
-        assertEquals(listOf(AdEventName.POSITION, AdEventName.IMPRESSION, AdEventName.BANNER_REFRESH,
+        assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW, AdEventName.IMPRESSION, AdEventName.BANNER_REFRESH,
             AdEventName.CLICK, AdEventName.DISMISS), events.map { it.name })
-        assertEquals("failed", events[2].result)
-        assertNull(events[2].requestId)
-        assertNull(events[2].responseId)
+        assertEquals("failed", events[3].result)
+        assertNull(events[3].requestId)
+        assertNull(events[3].responseId)
         assertNull(slot.newDisplay("after-close"))
     }
 
@@ -199,7 +216,7 @@ class BannerDisplaySessionTest {
         slot.showFailure("must not fail confirmed exposure")
         slot.end()
         assertEquals(listOf(AdEventName.POSITION, AdEventName.SHOW_FAIL,
-            AdEventName.IMPRESSION), events.map { it.name })
+            AdEventName.SHOW, AdEventName.IMPRESSION), events.map { it.name })
         assertNotEquals(events.first().sessionId, next.sessionId)
         assertEquals("slot", events.last().analyticsParameters()["ad_session_id"])
         assertEquals(1L, events.last().analyticsParameters()["refresh_index"])
@@ -306,6 +323,35 @@ class BannerDisplaySessionTest {
         assertEquals(pending.sessionId, failed.sessionId)
         assertEquals("scene_inactive", failed.reason)
         assertEquals(0, events.count { it.name == AdEventName.IMPRESSION })
+    }
+
+    @Test fun `both platforms emit one actual show per refresh and none after failure`() {
+        for (platform in AdPlatform.entries) {
+            val events = mutableListOf<AdEvent>()
+            val revenues = mutableListOf<AdRevenuePayload>()
+            val slot = slot(events, revenues, platform = platform)
+            repeat(3) { index ->
+                val display = checkNotNull(slot.newDisplay("response-$index", adSource = "source"))
+                repeat(2) { display.impression() }
+                display.showFailure("late_failure")
+            }
+            val shows = events.filter { it.name.analyticsName == "ad_show" }
+            assertEquals(listOf(1L, 2L, 3L), shows.map { it.analyticsParameters()["refresh_index"] })
+            assertTrue(shows.all { it.analyticsParameters()["ad_session_id"] == "slot" && it.adSource == "source" })
+            assertTrue(shows.all { it.valueMicros == null && it.currency == null && it.precisionType == null })
+            if (platform == AdPlatform.TOPON) {
+                assertEquals(listOf("ad_position") + List(3) { listOf("ad_show", "ad_impression") }.flatten(),
+                    events.map { it.name.analyticsName })
+            } else {
+                assertEquals(0, events.count { it.name == AdEventName.IMPRESSION })
+            }
+            assertTrue(revenues.isEmpty())
+            val failed = checkNotNull(slot.newDisplay("failed"))
+            failed.showFailure("sdk_show_failed")
+            repeat(2) { failed.impression() }
+            assertEquals(3, events.count { it.name.analyticsName == "ad_show" })
+            assertEquals(1, events.count { it.name == AdEventName.SHOW_FAIL })
+        }
     }
 
     private fun slot(
