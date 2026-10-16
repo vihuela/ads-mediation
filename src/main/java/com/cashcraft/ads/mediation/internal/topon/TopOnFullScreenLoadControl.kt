@@ -23,7 +23,6 @@ internal class TopOnFullScreenLoadControl(
     }
 
     private val rounds = mutableMapOf<String, Round>()
-    private var paused = false
     private var loadAllowed = true
 
     fun request(
@@ -90,16 +89,6 @@ internal class TopOnFullScreenLoadControl(
         }
     }
 
-    fun pause() {
-        paused = true
-        rounds.values.forEach(::cancelPending)
-    }
-
-    fun resume() {
-        paused = false
-        rounds.toMap().forEach { (id, round) -> drive(id, round) }
-    }
-
     private fun begin(round: Round, afterShow: Boolean) {
         round.active = true
         round.exhausted = false
@@ -109,7 +98,7 @@ internal class TopOnFullScreenLoadControl(
     }
 
     private fun drive(placementId: String, round: Round) {
-        if (!round.active || round.inFlight || round.pending != null || paused || !loadAllowed || !canLoad()) return
+        if (!round.active || round.inFlight || round.pending != null || !loadAllowed || !canLoad()) return
         if (round.isLoading()) return
         if (!round.afterShow && round.isReady()) {
             finishRound(round)
@@ -127,8 +116,8 @@ internal class TopOnFullScreenLoadControl(
             postDelayed(task, wait)
             return
         }
-        // 真正调用 SDK 前复查；暂停、库存命中和已有请求都不消耗次数。
-        if (paused || !loadAllowed || !canLoad() || round.isLoading()) return
+        // 真正调用 SDK 前复查；策略禁止、库存命中和已有请求都不消耗次数。
+        if (!loadAllowed || !canLoad() || round.isLoading()) return
         if (!round.afterShow && round.isReady()) {
             finishRound(round)
             return

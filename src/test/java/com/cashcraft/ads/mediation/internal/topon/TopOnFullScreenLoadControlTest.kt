@@ -85,14 +85,12 @@ class TopOnFullScreenLoadControlTest {
         assertEquals(7_100L, h.tasks.single().at)
     }
 
-    @Test fun `耗尽后普通策略通知及前台恢复不重开而新机会可以`() {
+    @Test fun `耗尽后普通策略通知及重复请求不重开而新机会可以`() {
         val h = Harness()
         h.exhaust()
         repeat(3) {
             h.control.onPolicyChanged(true)
             h.request()
-            h.control.pause()
-            h.control.resume()
         }
         assertEquals(4, h.requests.size)
         assertTrue(h.tasks.isEmpty())
@@ -115,12 +113,15 @@ class TopOnFullScreenLoadControlTest {
         assertEquals(5, h.requests.size)
     }
 
-    @Test fun `连续重试保留失败预算和绝对截止`() {
+    @Test fun `重试截止前撤回恢复策略保留失败预算和绝对截止`() {
         val h = Harness()
         h.request()
         h.fail()
         h.advanceTo(1_000)
+        h.policy(false)
+        assertTrue(h.tasks.isEmpty())
         h.advanceTo(1_500)
+        h.policy(true)
         assertEquals(2_100L, h.tasks.single().at)
         h.advanceTo(2_100)
         h.fail()
@@ -206,7 +207,7 @@ class TopOnFullScreenLoadControlTest {
         assertEquals(1, loading.requests.size)
         assertTrue(loading.tasks.isEmpty())
         loading.slot().loading = false
-        loading.control.resume()
+        loading.request()
         assertEquals(2, loading.requests.size)
     }
 
@@ -273,8 +274,8 @@ class TopOnFullScreenLoadControlTest {
         h.request()
         h.fail()
         val old = h.tasks.single().task
-        h.control.pause()
-        h.control.resume()
+        h.policy(false)
+        h.policy(true)
         val replacement = h.tasks.single()
         old.run()
         assertSame(replacement, h.tasks.single())
@@ -366,19 +367,17 @@ class TopOnFullScreenLoadControlTest {
         assertTrue(h.tasks.isEmpty())
     }
 
-    @Test fun `策略恢复和前台恢复的同步加载回调可重入新增广告位`() {
-        for (fromPolicy in listOf(true, false)) {
-            val h = Harness()
-            if (fromPolicy) h.policy(false) else h.control.pause()
-            h.request("open")
-            h.request("reward")
-            h.onInvoke = {
-                if (h.requests.last().id == "open") h.request("inter")
-            }
-            if (fromPolicy) h.policy(true) else h.control.resume()
-            assertEquals(listOf("open", "inter", "reward"), h.requests.map { it.id })
-            assertTrue(h.tasks.isEmpty())
+    @Test fun `策略恢复的同步加载回调可重入新增广告位`() {
+        val h = Harness()
+        h.policy(false)
+        h.request("open")
+        h.request("reward")
+        h.onInvoke = {
+            if (h.requests.last().id == "open") h.request("inter")
         }
+        h.policy(true)
+        assertEquals(listOf("open", "inter", "reward"), h.requests.map { it.id })
+        assertTrue(h.tasks.isEmpty())
     }
 
     @Test fun `二零零八逐次失败仍发送真实请求终态而等待不发额外事件`() {

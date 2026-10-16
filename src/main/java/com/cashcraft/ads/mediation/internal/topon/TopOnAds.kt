@@ -65,8 +65,6 @@ internal enum class TopOnState {
 internal object TopOnAds {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val initializationListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
-    private var removePolicyListener: (() -> Unit)? = null
-    private var readinessSubscription: AutoCloseable? = null
     private val fullScreenLoadControl = TopOnFullScreenLoadControl(
         clock = SystemClock::elapsedRealtime,
         cooldown = TopOnLoadCooldown.shared,
@@ -218,12 +216,6 @@ internal object TopOnAds {
         }
 
         onMain {
-            if (removePolicyListener == null) {
-                removePolicyListener = Ads.addPolicyListener(::onPolicyChanged)
-            }
-            if (readinessSubscription == null) {
-                readinessSubscription = Ads.observeNativeReadiness(::onPolicyChanged)
-            }
             AdLifecycleMonitor.install(application, initialActivity)
             TUSDK.setNetworkLogDebug(commonConfig.loggingEnabled)
             runCatching {

@@ -157,7 +157,6 @@ object Ads {
         mainHandler.post {
             policyUpdatePosted = false
             AdMobAds.onPolicyChanged()
-            TopOnAds.onPolicyChanged()
             notifyNativeReadiness()
             policyListeners.forEach { runCatching(it) }
             FullScreenLoadSignals.changed()
@@ -1412,6 +1411,8 @@ object Ads {
     }
 
     internal fun notifyNativeReadiness() {
+        // Keep provider failures isolated from other readiness listeners and host callbacks.
+        runCatching { TopOnAds.onPolicyChanged() }
         if (!consentSnapshot.canRequestAds) {
             com.cashcraft.ads.mediation.internal.nativeads.NativeAdCache.consentRevoked()
         }

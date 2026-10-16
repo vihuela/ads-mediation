@@ -112,7 +112,7 @@ class TopOnDeviceContractTest : InstrumentationTestCase() {
             }
         } finally {
             onMain {
-                full?.pause()
+                full?.onPolicyChanged(false)
                 native?.let {
                     leases.forEach { it.close() }
                     it.clear()
@@ -123,7 +123,7 @@ class TopOnDeviceContractTest : InstrumentationTestCase() {
         }
     }
 
-    fun testThreeFullscreenFormatsHaveFourAttemptsAndPreserveBudgetAcrossPauseAndDemand() {
+    fun testThreeFullscreenFormatsHaveFourAttemptsAndPreserveBudgetAcrossPolicyWithdrawalAndDemand() {
         withDispatcher { dispatcher, events ->
             for (format in listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL, AdFormat.REWARDED)) {
                 val h = FullscreenFixture(format, dispatcher)
@@ -143,10 +143,10 @@ class TopOnDeviceContractTest : InstrumentationTestCase() {
                 assertSame(pending, h.timers.tasks.keys.single())
                 assertEquals(2_100L, h.timers.tasks.values.single())
                 h.timers.advanceTo(1_000L)
-                h.control.pause()
+                h.control.onPolicyChanged(false)
                 assertTrue(h.timers.tasks.isEmpty())
                 h.timers.advanceTo(1_500L)
-                h.control.resume()
+                h.control.onPolicyChanged(true)
                 assertEquals(2_100L, h.timers.tasks.values.single())
                 for ((before, deadline) in listOf(2_099L to 2_100L, 6_099L to 6_100L, 14_099L to 14_100L)) {
                     val count = h.calls.size
@@ -160,8 +160,6 @@ class TopOnDeviceContractTest : InstrumentationTestCase() {
                 repeat(3) {
                     h.request()
                     h.control.onPolicyChanged(true)
-                    h.control.pause()
-                    h.control.resume()
                 }
                 assertEquals(4, h.calls.size)
                 assertTrue(h.timers.tasks.isEmpty())
@@ -179,7 +177,7 @@ class TopOnDeviceContractTest : InstrumentationTestCase() {
                 assertEquals(5, h.calls.size)
                 assertEquals(18_300L, h.timers.tasks.values.single())
                 assertEquals(5, events.count { it.format == format && it.name == AdEventName.LOAD })
-                h.control.pause()
+                h.control.onPolicyChanged(false)
                 assertTrue(h.timers.tasks.isEmpty())
             }
         }
