@@ -1,6 +1,6 @@
 # Ads Mediation SDK 1.0.10 业务更新说明
 
-发布日期：2026-10-18（台北时间）。Maven 坐标为 `com.cashcraft.sdk:ads-mediation:1.0.10`，仓库沿用 `https://maven.pkg.github.com/vihuela/ads-mediation`。源码包名仍为 `com.cashcraft.ads.mediation`。
+发布时间：2026-10-18 15:36:28（台北时间）。Maven 坐标为 `com.cashcraft.sdk:ads-mediation:1.0.10`，仓库沿用 `https://maven.pkg.github.com/vihuela/ads-mediation`。源码包名仍为 `com.cashcraft.ads.mediation`。
 
 本版基于 `codex/1.0.10` 的 `4bb8bfd`，仅修改发布坐标、版本配置及文档，没有新增功能或进行重构。旧 group `com.cashcraft` 下的 `1.0.10` / `1.0.11` 来自另一条开发线，不代表本版功能。
 
@@ -37,6 +37,8 @@
 
 本地发布前验证：640 项 JVM 单测通过，0 失败、0 错误、0 跳过；Lint 和 Release/R8 构建通过。生成的 POM 与 Gradle Module Metadata 坐标均为 `com.cashcraft.sdk:ads-mediation:1.0.10`，源码包包含当前 Banner/Native 实现。
 
-本机 token 只有 `read:packages`，上传返回 401；改由仓库手动发布工作流使用具备 `packages: write` 权限的 `GITHUB_TOKEN` 发布。远程发布结果以对应 Actions 运行及包版本记录为准。
+本机 token 只有 `read:packages`，上传返回 401；改由仓库手动发布工作流使用具备 `packages: write` 权限的 `GITHUB_TOKEN` 发布。[发布任务](https://github.com/vihuela/ads-mediation/actions/runs/39108039466)已成功，发布提交为 `9e78985`；[远程版本](https://github.com/vihuela/ads-mediation/packages/3320026?version=1.0.10)为 public。
+
+发布后已使用现有读取凭据从远程回读 POM、Gradle Module Metadata、AAR 和源码包：坐标正确；源码包的 58 个唯一 Kotlin 文件与当前源码完全一致，文件集合无遗漏；AAR 包含 Banner/Native 类。远程 AAR 的 SHA-256 为 `4aaee658f4801ba475452b2c3a185df42da30570884005048d51a0d48bee1ccb`。
 
 本次不新增设备、真实广告填充、点击、收益后台入库或各来源素材恢复验收；构建和单测通过不代表这些业务验收已完成。
