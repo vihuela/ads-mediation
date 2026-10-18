@@ -22,6 +22,8 @@ implementation("com.cashcraft.sdk:ads-mediation:1.0.11")
 
 该源码已在本地通过 641 项 JVM 单测（0 失败、0 错误、0 跳过）、Lint 和 Release/R8 构建，并在 [CI 任务](https://github.com/vihuela/ads-mediation/actions/runs/39108865423)中通过完整验证。该任务后续因 GitHub 不允许单独删除最后一个版本而停止，未删除原包；随后的包级替换任务已取消。
 
-当前按 `1.0.11` 走正常发布流程，发布后补充远程包和产物核对结果。
+已于 2026-10-18 16:05:25（台北时间）正常发布，[发布任务](https://github.com/vihuela/ads-mediation/actions/runs/39109729329)成功，发布提交为 `4bbdcf4`；[远程 1.0.11](https://github.com/vihuela/ads-mediation/packages/3320026?version=1.0.11)可用。
+
+发布后已使用现有读取凭据回读 POM、Gradle Module Metadata、AAR 和源码包：新坐标正确；58 个唯一 Kotlin 源码文件与发布提交完全一致，文件集合无遗漏，包含金额字段修正；AAR 含 Banner/Native。远程 AAR SHA-256：`16e911aba1355bf73d986aa12c25083f94123a9ccab227687bf55cc795d046ad`。原 `1.0.10` AAR 的 SHA-256 保持不变，未删除或覆盖。
 
 未新增设备实网广告、点击、收益后台入库或素材恢复验收。
