@@ -4,7 +4,7 @@
 宿主可以选择直连 AdMob GMA Next-Gen、TopOn 海外版，或者同时初始化两者并按缓存广告的
 单次展示收益进行端内缓存竞价。
 
-当前版本：`1.0.12`（Maven group：`com.cashcraft.sdk`）
+当前版本：`1.0.13`（Maven group：`com.cashcraft.sdk`）
 
 从当前源码接入五种广告的完整步骤见 [广告接入文档](docs/integration-guide.md)，包含依赖、初始化、全屏展示、Banner/Native 的 View 与 Compose 示例，以及事件、收益和常见问题。
 
@@ -15,8 +15,14 @@
 依赖坐标：
 
 ```kotlin
-implementation("com.cashcraft.sdk:ads-mediation:1.0.12")
+implementation("com.cashcraft.sdk:ads-mediation:1.0.13")
 ```
+
+### 1.0.13 更新
+
+- 新增 `AdsConfig.nativeValidatorDisabled`（默认 `false`）：设为 `true` 时，AdMob 测试广告不再弹出原生广告验证器浮层（初始化时调用 `InitializationConfig.Builder.setNativeValidatorDisabled()`）。只对 AdMob 生效，正式广告请求本来就不会显示该浮层；Manifest 里的 `NATIVE_AD_DEBUGGER_ENABLED` 是旧版 SDK 的开关，对 GMA Next-Gen 无效。
+- 默认值不变，宿主无需改动。`AdsConfig` 的最后一个参数由 `onAdBlocked` 变为 `nativeValidatorDisabled`，用尾随 lambda 传 `onAdBlocked` 的宿主需改为 `onAdBlocked = { ... }`。
+- 业务更新步骤及验证边界见 [1.0.13 发布说明](docs/sdk-1.0.13-release.md)。
 
 ### 1.0.12 更新
 
@@ -172,7 +178,7 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.cashcraft.sdk:ads-mediation:1.0.12")
+    implementation("com.cashcraft.sdk:ads-mediation:1.0.13")
 }
 ```
 
@@ -730,13 +736,14 @@ README 的指标表以本节为准。“会话”指业务参数 `ad_session_id`
 检索时使用对应 ID 的值；Native 加载记录在 DEBUG 中标为“获取记录”。这些是日志身份；业务参数使用 `ad_session_id`，全屏取展示 session，Banner/Native 取页面 slot，不输出 `session_id` 或 `slot_id` 键。`ad_scene_skip` 无业务会话。
 日志开启时，业务事件因契约不满足而返回空业务参数会输出警告，`BANNER_REFRESH` 与 Banner `DISMISS` 除外；无效收益被丢弃时输出平台、格式及可确认的会话诊断。诊断不会新增业务事件，也不改变回调交付。
 
-### 字段与接入变更记录（com.cashcraft.sdk:ads-mediation:1.0.12）
+### 字段与接入变更记录（com.cashcraft.sdk:ads-mediation:1.0.13）
 
 - 新增 `AdEventName.SHOW("ad_show")`，实际曝光新增一条事件，`ad_impression` 的回调时机、收益字段和去重不变。宿主对公共枚举做无 `else` 的穷举 `when` 时必须补 `SHOW` 分支，否则升级后源码编译失败；按事件名分发上报平台时，必须为 `ad_show` 配置去向。
 - `ad_load_fail` / `ad_show_fail` 新增可选 `reason_detail`，保留现有 `reason` 类别；`error_detail` 继续承载平台错误文本。
 - 有效 `ad_show_fail` 必传 `ad_source`，失败素材来源不可确认时为 `"unknow"`；`ad_load_fail` 不增加来源字段。
 - AdMob 开屏、插屏、激励持续预加载首个终态后的成功/失败回调各建新 `request_id`，补报加载与终态并带 `load_trigger=sdk_auto`、不带 `latency_ms`，包含首个结果之后仍属于初始填池的回调；库存耗尽及过期代次回调不产生加载事件。详见[加载语义](docs/integration-guide.md#事件回调)。
 - 不再发送 `ad_load_request`、`ad_load_result`、`ad_paid`、`ad_reward_earned`；现行事件分别使用 `ad_load` 与 `ad_loaded` / `ad_load_fail`、`ad_impression`、`ad_reward`。
+- 新增 `AdsConfig.nativeValidatorDisabled`（默认 `false`）：设为 `true` 时关闭 AdMob 测试广告的原生验证器浮层，只对 AdMob 路径生效。
 
 ## 6. 收益回调
 
@@ -897,7 +904,7 @@ GMA Next-Gen 同时打包。
 
 ```shell
 ./gradlew clean testDebugUnitTest lintDebug :r8-smoke-app:assembleRelease publishToMavenLocal \
-  -PVERSION_NAME=1.0.12
+  -PVERSION_NAME=1.0.13
 ```
 
 R8 smoke app 会让 AdMob、TopOn 和竞价路径都保持可达，然后构建开启压缩和资源收缩的 Release
@@ -923,10 +930,10 @@ done
 此入口仅接受上述单个方法名；不要额外覆盖 instrumentation 的 `class` 参数。
 
 GitHub Actions 中的 `CI` 和 `Publish GitHub Package` 都只支持在 Actions 页面手动触发，不会因
-push、PR 或 tag 自动运行。发布时可填写 `version` 指定版本；本次填写 `1.0.12`。
+push、PR 或 tag 自动运行。发布时可填写 `version` 指定版本；本次填写 `1.0.13`。
 
 本地或手动发布 CI 都会先读取 GitHub Packages 的 `maven-metadata.xml`，找到最高的稳定
-`major.minor.patch` 版本并自动递增 patch。例如新 group 当前为 `1.0.12` 时，下一次会发布 `1.0.13`。
+`major.minor.patch` 版本并自动递增 patch。例如新 group 当前为 `1.0.13` 时，下一次会发布 `1.0.14`。
 
 查看下一版本但不发布：
 
@@ -957,7 +964,7 @@ GitHub Package 版本不可覆盖；脚本默认自动递增可避免重复版�
 请在当前 Android 工程中完整接入 Ads Mediation SDK，并直接修改、编译和验证项目。
 
 固定信息：
-- Maven 坐标：com.cashcraft.sdk:ads-mediation:1.0.12
+- Maven 坐标：com.cashcraft.sdk:ads-mediation:1.0.13
 - GitHub Packages 仓库：https://maven.pkg.github.com/vihuela/ads-mediation
 - 公共包名：com.cashcraft.ads.mediation
 - 支持 APP_OPEN、INTERSTITIAL、REWARDED
@@ -969,7 +976,7 @@ GitHub Package 版本不可覆盖；脚本默认自动递增可避免重复版�
 1. 检查 settings.gradle.kts，在 dependencyResolutionManagement 中加入 GitHub Packages、
    Pangle、Mintegral 和 TopOn 仓库。GitHub 用户名/token 优先从 Gradle property 或环境变量读取，
    本地再从已被 Git 忽略的 local.properties 读取；绝对不能把 token 写进可提交文件。
-2. 在 App 模块加入 implementation("com.cashcraft.sdk:ads-mediation:1.0.12")。
+2. 在 App 模块加入 implementation("com.cashcraft.sdk:ads-mediation:1.0.13")。
 3. 为每个 product flavor 设置 manifestPlaceholders["admobApplicationId"]。不要使用生产 ID
    进行测试；开发环境可使用 AdMobIds.TEST 对应的官方测试 App ID。
 4. 检查现有配置来源，选择 AdMob、TopOn 或 Bidding。不要把 App ID、App Key、ad unit ID、

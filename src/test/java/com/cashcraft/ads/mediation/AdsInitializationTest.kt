@@ -54,6 +54,7 @@ class AdsInitializationTest {
         // Consent and GMA initialization are intercepted; no real advertising SDK starts.
         ConsentPlatformShadow.reset()
         InitializationMobileAdsShadow.calls = 0
+        InitializationMobileAdsShadow.lastConfig = null
         InitializationMobileAdsShadow.error = null
         listOf("initializationFailure", "admobInitializationResult", "topOnInitializationResult").forEach {
             ReflectionHelpers.setStaticField(Ads::class.java, it, null)
@@ -739,6 +740,44 @@ class AdsInitializationTest {
         assertEquals(0, InitializationMobileAdsShadow.calls)
     }
 
+    @Test
+    fun `native validator stays enabled unless the host disables it`() {
+        assertFalse(initializeAndCaptureMobileAdsConfig(recoveryConfig()).nativeAdDebuggerDisabled)
+    }
+
+    @Test
+    fun `native validator can be disabled for direct AdMob`() {
+        val config = recoveryConfig().copy(nativeValidatorDisabled = true)
+        assertTrue(initializeAndCaptureMobileAdsConfig(config).nativeAdDebuggerDisabled)
+    }
+
+    @Test
+    fun `native validator can be disabled for bidding`() {
+        val config = recoveryConfig().copy(
+            provider = BiddingProviderConfig(recoveryConfig().provider as AdMobProviderConfig, topOn()),
+            nativeValidatorDisabled = true,
+        )
+        assertTrue(initializeAndCaptureMobileAdsConfig(config).nativeAdDebuggerDisabled)
+    }
+
+    /** 走完 UMP 放行，返回传给 MobileAds.initialize 的配置；GMA 初始化已被 shadow 拦截。 */
+    private fun initializeAndCaptureMobileAdsConfig(config: AdsConfig): InitializationConfig {
+        val host = Robolectric.buildActivity(ConsentHost::class.java).setup()
+        host.get().registry.currentState = Lifecycle.State.RESUMED
+        try {
+            Ads.initialize(host.get(), config)
+            ConsentPlatformShadow.allowed = true
+            ConsentPlatformShadow.successes.last().onConsentInfoUpdateSuccess()
+            // Bidding 的 TopOn 在单测里不会完成，所以只等 GMA 初始化被调用，不等 Ads 进入 READY。
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3)
+            while (InitializationMobileAdsShadow.lastConfig == null && System.nanoTime() < deadline) {
+                shadowOf(Looper.getMainLooper()).idle()
+                Thread.sleep(5)
+            }
+            return checkNotNull(InitializationMobileAdsShadow.lastConfig) { "MobileAds.initialize 未被调用" }
+        } finally { host.pause().stop().destroy() }
+    }
+
     private fun recoveryConfig() = AdsConfig(
         AdMobProviderConfig(AdMobIds(AdMobIds.TEST.applicationId)),
         autoShowAppOpen = false, loggingEnabled = false)
@@ -842,11 +881,13 @@ class InitializationMobileAdsShadow {
     @Implementation
     fun initialize(context: android.content.Context, config: InitializationConfig) {
         calls++
+        lastConfig = config
         error?.let { throw it }
     }
 
     companion object {
         @Volatile var calls = 0
+        @Volatile var lastConfig: InitializationConfig? = null
         @Volatile var error: Throwable? = null
     }
 }

@@ -1,6 +1,6 @@
 # 页面 Native 卡片接入
 
-此入口包含在 `com.cashcraft.sdk:ads-mediation:1.0.12` 中，升级步骤见 [发布说明](sdk-1.0.12-release.md)。继续使用现有 `Ads.initialize` 和 UMP 配置，Native 广告位 ID 在初始化配置中传入；只接 Native 时可省略全屏 ID，应用 ID 和 TopOn App Key 等所选平台的必需凭据仍需提供。Compose 与 View 入口都包含在 `ads-mediation` 中。
+此入口包含在 `com.cashcraft.sdk:ads-mediation:1.0.13` 中，升级步骤见 [发布说明](sdk-1.0.13-release.md)。继续使用现有 `Ads.initialize` 和 UMP 配置，Native 广告位 ID 在初始化配置中传入；只接 Native 时可省略全屏 ID，应用 ID 和 TopOn App Key 等所选平台的必需凭据仍需提供。Compose 与 View 入口都包含在 `ads-mediation` 中。
 
 ## 双平台比价：业务只持有一个卡片
 
@@ -144,6 +144,8 @@ TopOn 模板提供空快照；这些字段只反映 SDK 已提供的数据，不
 TopOn 返回的标题、描述、CTA 为空时隐藏对应 View；图标优先使用 SDK View，随后使用 URL。可选 `adFrom`（可退回 advertiser）、domain、warning、advertiserInfo 和 close 用于对应来源素材及 SDK 操作；已有自定义布局启用这些来源时须补齐槽位。媒体 View、图标和 CTA 的 SDK View 由库挂载与注册，业务无需接触它们。
 
 默认卡片和自定义布局使用同一绑定流程。Google 使用 SDK 自动 AdChoices overlay，不依赖 allow-list 专用的自定义披露 API，布局仍须保留右上角披露空间。提供媒体槽位时，媒体必须满足平台真实比例及视频要求，Google 视频至少 120 × 120 dp；不将该下限当成所有媒体的固定尺寸。注册前会测量填充后的 SDK 媒体 View，包含宿主和媒体容器 padding 的影响；不足时返回 `native_video_media_too_small`。后续布局缩小也会隐藏并释放该卡片，修正空间后可显式 retry。实际素材比例由 SDK MediaView 呈现，宿主仍须检查完整展示。宿主 Activity 需开启硬件加速。依据：[Google Native 尺寸要求](https://support.google.com/admob/answer/6329638)、[MediaContent](https://developers.google.com/admob/android/next-gen/reference/com/google/android/libraries/ads/mobile/sdk/nativead/MediaContent)。
+
+Google 测试广告会弹出 AdMob native ad validator 浮层。紧凑布局的媒体槽位小于 120 × 120 dp 时，即使当前素材是图片，也会提示 `MediaView is too small for video`；视频素材的 120 dp 下限由上面的注册前检查保证，正式广告请求不会显示该浮层。开发期不需要这条提示时，设置 `AdsConfig.nativeValidatorDisabled = true`（默认 false，只对 AdMob 生效）；宿主 Manifest 里的 `NATIVE_AD_DEBUGGER_ENABLED` 是旧版 SDK 的开关，对 GMA Next-Gen 无效。依据：[Native validator](https://developers.google.com/admob/android/next-gen/native/validator)。
 
 自定义布局禁止给广告内部、外围空白或背景加点击处理器。可选文字缺失时清空隐藏；平台必需素材不完整将失败。布局结构校验无法证明没有视觉遮挡，接入仍需验证大字体、深色、长文案、窄屏、AdChoices 及点击范围。
 

@@ -233,6 +233,8 @@ data class AdsConfig(
     /** Host's persisted first app launch, not the time the ad SDK was initialized. */
     val firstLaunchTimeMillis: Long = System.currentTimeMillis(),
     val onAdBlocked: (AdBlockInfo) -> Unit = {},
+    /** 关闭 AdMob 测试广告的原生验证器弹窗；只对 AdMob 生效，正式广告请求本来就不会显示它。 */
+    val nativeValidatorDisabled: Boolean = false,
 ) {
     init {
         require(logTag.isNotBlank()) { "logTag must not be blank" }

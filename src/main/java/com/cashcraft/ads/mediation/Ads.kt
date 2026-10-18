@@ -490,6 +490,7 @@ object Ads {
                     autoShowAppOpen = config.autoShowAppOpen,
                     appOpenPosition = config.appOpenPosition,
                     mediationMode = AdMediationMode.ADMOB,
+                    nativeValidatorDisabled = config.nativeValidatorDisabled,
                 ),
                 onInitialized = { success ->
                     if (token == initializationAttempt) finishSingleProviderInitialization(AdPlatform.ADMOB, success)
@@ -520,6 +521,7 @@ object Ads {
                         autoShowAppOpen = false,
                         appOpenPosition = config.appOpenPosition,
                         mediationMode = AdMediationMode.BIDDING,
+                        nativeValidatorDisabled = config.nativeValidatorDisabled,
                     ),
                     onInitialized = { success -> if (token == initializationAttempt) finishBiddingProviderInitialization(true, success) },
                     initialActivity = initialActivity,

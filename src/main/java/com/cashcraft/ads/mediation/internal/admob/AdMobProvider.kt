@@ -222,7 +222,9 @@ object AdMobAds {
             val result = runCatching {
                 MobileAds.initialize(
                     application,
-                    InitializationConfig.Builder(config.ids.applicationId).build(),
+                    InitializationConfig.Builder(config.ids.applicationId).apply {
+                        if (config.nativeValidatorDisabled) setNativeValidatorDisabled()
+                    }.build(),
                 )
             }
             mainHandler.post {

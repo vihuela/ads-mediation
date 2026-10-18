@@ -50,4 +50,5 @@ data class AdMobConfig(
     val appOpenPosition: String = "app_foreground",
     val revenueListener: AdRevenueListener = AdRevenueListener.NONE,
     val mediationMode: AdMediationMode = AdMediationMode.ADMOB,
+    val nativeValidatorDisabled: Boolean = false,
 )
