@@ -19,7 +19,6 @@ jobs:
       VERSION_NAME: ${{ inputs.version }}
       GITHUB_PACKAGES_USERNAME: ${{ github.actor }}
       GITHUB_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -27,16 +26,5 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v4
-      - name: Build and replace the authorized 1.0.10 package
-        run: |
-          set -euo pipefail
-          test "$VERSION_NAME" = "1.0.10"
-          ./gradlew :assembleRelease :releaseSourcesJar :generatePomFileForReleasePublication :generateMetadataFileForReleasePublication
-          package_api="users/vihuela/packages/maven/com.cashcraft.sdk.ads-mediation"
-          test "$(gh api "$package_api/versions" --jq 'length')" = "1"
-          test "$(gh api "$package_api/versions" --jq '.[0] | [.id, .name] | @tsv')" = $'69223791\t1.0.10'
-          gh api --method DELETE "$package_api"
-          if ! ./gradlew :publishReleasePublicationToGitHubPackagesRepository; then
-            gh api --method POST "$package_api/restore"
-            exit 1
-          fi
+      - name: Verify and publish next version
+        run: ./scripts/publish-next-version.sh
