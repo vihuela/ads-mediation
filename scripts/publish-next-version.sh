@@ -44,7 +44,7 @@ printf 'machine maven.pkg.github.com\nlogin %s\npassword %s\n' \
     "${packages_username}" "${packages_token}" > "${credentials_file}"
 chmod 600 "${credentials_file}"
 
-metadata_url="https://maven.pkg.github.com/vihuela/ads-mediation/com/cashcraft/ads-mediation/maven-metadata.xml"
+metadata_url="https://maven.pkg.github.com/vihuela/ads-mediation/com/cashcraft/sdk/ads-mediation/maven-metadata.xml"
 http_status="$(curl --silent --show-error --netrc-file "${credentials_file}" \
     --output "${metadata_file}" --write-out '%{http_code}' "${metadata_url}")"
 

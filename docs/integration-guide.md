@@ -2,7 +2,7 @@
 
 本文面向 Android 宿主开发者，说明如何通过统一入口 `com.cashcraft.ads.mediation.Ads` 接入开屏、插屏、激励、Banner 和 Native 广告，覆盖工程配置、初始化、页面生命周期、事件及收益回调。
 
-文档依据 2026 年 10 月 3 日的当前工作树编写，基线提交为 `32634be`。**下文以当前源码构建的库为准。**仓库 README 标注的远程稳定版为 `1.0.5`，并明确 Banner、Native 等新增接口尚未包含在该版本中；本次没有查询远程包版本。不要直接使用 `1.0.5` 依赖后复制全部新 API。
+当前发行坐标为 `com.cashcraft.sdk:ads-mediation:1.0.10`，源码包名仍为 `com.cashcraft.ads.mediation`。旧 group `com.cashcraft` 下的同版本属于另一条开发线，不能替代本版本；新旧坐标不可同时引入。升级说明见 [1.0.10 发布说明](sdk-1.0.10-release.md)。
 
 ## 1 接入前选择
 
@@ -27,7 +27,7 @@
 | Java 和 Kotlin 字节码 | JVM 17 |
 | 构建插件 | AGP `8.13.1`，Kotlin `2.2.21` |
 | AdMob | GMA Next-Gen `1.2.1` |
-| TopOn 核心 | `6.6.22.3` |
+| TopOn 核心 | `6.6.52` |
 | Google UMP | `4.0.0` |
 | WorkManager | `2.11.2` |
 
@@ -43,7 +43,7 @@
 ./gradlew :publishReleasePublicationToMavenLocal -PVERSION_NAME=1.0.0-SNAPSHOT
 ```
 
-这一步只发布到本机，不会发布远程版本。`1.0.0-SNAPSHOT` 来自当前仓库的 `gradle.properties`，也可以用 `-PVERSION_NAME=...` 指定一个团队约定的本地版本；宿主依赖必须使用相同版本。
+这一步只发布到本机，不会发布远程版本。`1.0.0-SNAPSHOT` 是此命令显式指定的本地验证版本，也可以用 `-PVERSION_NAME=...` 指定一个团队约定的本地版本；宿主依赖必须使用相同版本。
 
 在宿主 `settings.gradle.kts` 的现有仓库配置中加入：
 
@@ -52,7 +52,7 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         mavenLocal {
-            content { includeModule("com.cashcraft", "ads-mediation") }
+            content { includeModule("com.cashcraft.sdk", "ads-mediation") }
         }
         google()
         mavenCentral()
@@ -97,7 +97,7 @@ kotlin {
 }
 
 dependencies {
-    implementation("com.cashcraft:ads-mediation:1.0.0-SNAPSHOT")
+    implementation("com.cashcraft.sdk:ads-mediation:1.0.0-SNAPSHOT")
 }
 ```
 
@@ -109,7 +109,7 @@ dependencies {
 
 已经确认发行包包含所需 API 后，再使用团队发布的版本。GitHub Packages 仓库为 `https://maven.pkg.github.com/vihuela/ads-mediation`；凭据配置和现有稳定版接入见 [README 的接入依赖部分](../README.md#1-接入依赖)。用户名及 token 放在不提交的 `local.properties`、Gradle 属性或 CI 环境变量中。
 
-当前源码的完整接入按上面的本地构建步骤进行，不要把未核实的版本号当作已发布版本。团队构建环境不能依赖另一台机器的 `mavenLocal`，应使用一致源码构建或已发布的对应包。
+业务宿主使用 `implementation("com.cashcraft.sdk:ads-mediation:1.0.10")`；团队构建环境使用远程发行包，不依赖另一台机器的 `mavenLocal`。
 
 ### SDK 与混淆依赖
 
