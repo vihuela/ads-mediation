@@ -27,15 +27,16 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v4
-      - name: Verify and replace the authorized 1.0.10 version
+      - name: Build and replace the authorized 1.0.10 package
         run: |
           set -euo pipefail
           test "$VERSION_NAME" = "1.0.10"
-          ./gradlew testDebugUnitTest lintDebug :r8-smoke-app:assembleRelease :assembleRelease :releaseSourcesJar
-          version_api="users/vihuela/packages/maven/com.cashcraft.sdk.ads-mediation/versions/69223791"
-          test "$(gh api "$version_api" --jq .name)" = "1.0.10"
-          gh api --method DELETE "$version_api"
+          ./gradlew :assembleRelease :releaseSourcesJar :generatePomFileForReleasePublication :generateMetadataFileForReleasePublication
+          package_api="users/vihuela/packages/maven/com.cashcraft.sdk.ads-mediation"
+          test "$(gh api "$package_api/versions" --jq 'length')" = "1"
+          test "$(gh api "$package_api/versions" --jq '.[0] | [.id, .name] | @tsv')" = $'69223791\t1.0.10'
+          gh api --method DELETE "$package_api"
           if ! ./gradlew :publishReleasePublicationToGitHubPackagesRepository; then
-            gh api --method POST "$version_api/restore"
+            gh api --method POST "$package_api/restore"
             exit 1
           fi
