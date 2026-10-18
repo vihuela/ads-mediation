@@ -1,4 +1,4 @@
-# Banner 接入（com.cashcraft.sdk:ads-mediation:1.0.11）
+# Banner 接入（com.cashcraft.sdk:ads-mediation:1.0.12）
 
 正式入口支持 AdMob GMA Next-Gen 1.2.1。显式 TopOn 请求通过 `onState` 返回
 `AdShowResult.Failed("topon_banner_not_supported")`，不会请求 TopOn 或回退 AdMob。
@@ -7,7 +7,7 @@ TopOn 的尺寸、刷新身份反例保留在 [验证记录](../openspec/changes
 
 ## 依赖与初始化
 
-发行包依赖 `com.cashcraft.sdk:ads-mediation:1.0.11`；同一库包含 View 与 Compose 入口。
+发行包依赖 `com.cashcraft.sdk:ads-mediation:1.0.12`；同一库包含 View 与 Compose 入口。
 稳定版 `1.0.5` 尚不包含这些新入口。库为 minSdk 26、compileSdk 36、JVM 17；Compose 使用 Kotlin／Compose 编译插件 2.2.21、Compose UI 1.7.6、Lifecycle Compose 2.8.7。
 
 沿用 `Ads.initialize()`，配置 AdMob 或含 AdMob 的 Bidding provider。Banner 检查 AdMob 自身初始化结果与请求前 UMP 许可；整体 Bidding 初始化成功不能放行失败的 AdMob。

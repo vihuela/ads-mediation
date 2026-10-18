@@ -341,6 +341,10 @@ class AdsBannerViewTest {
                 assertEquals("request", failedLoad.requestId)
                 assertEquals(observed.single { it.name == AdEventName.POSITION }.sessionId, failedDisplay.sessionId)
                 assertEquals(AdShowResult.Failed("SDK diagnostic message"), states.last())
+                // A failed banner must not keep the placeholder as a blank strip.
+                view.measure(View.MeasureSpec.makeMeasureSpec(320, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.AT_MOST))
+                assertEquals(0, view.measuredHeight)
             } finally { view.destroy() }
         }
     }

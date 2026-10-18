@@ -2,7 +2,7 @@
 
 本文面向 Android 宿主开发者，说明如何通过统一入口 `com.cashcraft.ads.mediation.Ads` 接入开屏、插屏、激励、Banner 和 Native 广告，覆盖工程配置、初始化、页面生命周期、事件及收益回调。
 
-当前发行坐标为 `com.cashcraft.sdk:ads-mediation:1.0.11`，源码包名仍为 `com.cashcraft.ads.mediation`。旧 group `com.cashcraft` 下的同版本属于另一条开发线，不能替代本版本；新旧坐标不可同时引入。升级说明见 [1.0.11 发布说明](sdk-1.0.11-release.md)。
+当前发行坐标为 `com.cashcraft.sdk:ads-mediation:1.0.12`，源码包名仍为 `com.cashcraft.ads.mediation`。旧 group `com.cashcraft` 下的同版本属于另一条开发线，不能替代本版本；新旧坐标不可同时引入。升级说明见 [1.0.11 发布说明](sdk-1.0.11-release.md)。
 
 ## 1 接入前选择
 
@@ -109,7 +109,7 @@ dependencies {
 
 已经确认发行包包含所需 API 后，再使用团队发布的版本。GitHub Packages 仓库为 `https://maven.pkg.github.com/vihuela/ads-mediation`；凭据配置和现有稳定版接入见 [README 的接入依赖部分](../README.md#1-接入依赖)。用户名及 token 放在不提交的 `local.properties`、Gradle 属性或 CI 环境变量中。
 
-业务宿主使用 `implementation("com.cashcraft.sdk:ads-mediation:1.0.11")`；团队构建环境使用远程发行包，不依赖另一台机器的 `mavenLocal`。
+业务宿主使用 `implementation("com.cashcraft.sdk:ads-mediation:1.0.12")`；团队构建环境使用远程发行包，不依赖另一台机器的 `mavenLocal`。
 
 ### SDK 与混淆依赖
 

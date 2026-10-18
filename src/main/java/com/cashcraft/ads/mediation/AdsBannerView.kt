@@ -74,6 +74,8 @@ class AdsBannerView(
     private var requestedSize: RequestSize? = null
     private var failed = false
     private var state: BannerState? = null
+    // Failed/Blocked never show an ad (Inactive keeps its legal space); keeping the placeholder would leave a blank strip.
+    private var collapsed = false
     private var removeReadinessObserver: (() -> Unit)? = null
     private var removePolicyObserver: (() -> Unit)? = null
     private var stateCallback: (BannerState) -> Unit = onState
@@ -192,7 +194,9 @@ class AdsBannerView(
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        if (constructed && request.platform == AdPlatform.ADMOB) {
+        if (collapsed) {
+            if (minimumHeight != 0) minimumHeight = 0
+        } else if (constructed && request.platform == AdPlatform.ADMOB) {
             val widthDp = ((MeasureSpec.getSize(widthMeasureSpec) - paddingLeft - paddingRight) /
                 resources.displayMetrics.density).toInt()
             if (widthDp > 0 && request.sizeError(widthDp) == null) {
@@ -489,6 +493,12 @@ class AdsBannerView(
     private fun updateState(value: BannerState) {
         if (destroyed || state == value) return
         state = value
+        val collapse = value is AdShowResult.Failed || value is AdShowResult.Blocked
+        if (collapse != collapsed) {
+            collapsed = collapse
+            if (collapse) minimumHeight = 0
+            requestLayout()
+        }
         notify(onState, value)
     }
 
