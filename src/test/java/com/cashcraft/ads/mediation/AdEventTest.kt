@@ -288,7 +288,7 @@ class AdEventTest {
         }
     }
 
-    @Test fun `no bid candidate reports unknow amounts without inventing a winner unit or zero prices`() {
+    @Test fun `no bid candidate omits amounts without inventing a winner unit or zero prices`() {
         val parameters = event(AdEventName.BID_RESULT, AdFormat.NATIVE).copy(
             mediationMode = AdMediationMode.BIDDING, platformKnown = false,
             admobAvailable = false, topOnAvailable = false, currency = "USD",
@@ -304,12 +304,12 @@ class AdEventTest {
         assertEquals(false, parameters["topon_price_available"])
         assertFalse(parameters.containsKey("ad_unit_id"))
         for (key in listOf("admob_value", "topon_value", "winning_value")) {
-            assertEquals(key, "unknow", parameters[key])
+            assertFalse(key, parameters.containsKey(key))
         }
     }
 
-    @Test fun `unknown invalid and nonfinite bid prices report unknow without dropping the result`() {
-        for (price in listOf(null, -1.0, Double.NaN, Double.POSITIVE_INFINITY)) {
+    @Test fun `unknown invalid and nonfinite bid prices are omitted without dropping the result`() {
+        for (price in listOf(null, -1.0, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY)) {
             val bid = event(AdEventName.BID_RESULT).copy(mediationMode = AdMediationMode.BIDDING,
                 winnerPlatform = AdPlatform.TOPON, admobAvailable = true, topOnAvailable = true,
                 admobValue = price, topOnValue = price, winningValue = price, currency = "USD")
@@ -317,11 +317,33 @@ class AdEventTest {
             assertEquals("won", parameters["result"])
             assertEquals(false, parameters["admob_price_available"])
             assertEquals(false, parameters["topon_price_available"])
-            for (key in listOf("admob_value", "topon_value", "winning_value")) assertEquals("unknow", parameters[key])
+            for (key in listOf("admob_value", "topon_value", "winning_value")) assertFalse(key, parameters.containsKey(key))
             assertTrue(bid.copy(position = "").analyticsParameters().isEmpty())
             assertTrue(bid.copy(sessionId = "").analyticsParameters().isEmpty())
             assertTrue(bid.copy(currency = "EUR").analyticsParameters().isEmpty())
             assertTrue(bid.copy(mediationMode = AdMediationMode.ADMOB).analyticsParameters().isEmpty())
+        }
+    }
+
+    @Test fun `bid prices remain numeric when only one platform has a known zero price`() {
+        for (format in listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL, AdFormat.REWARDED, AdFormat.NATIVE)) {
+            for (winner in AdPlatform.entries) {
+                val bid = event(AdEventName.BID_RESULT, format).copy(
+                    mediationMode = AdMediationMode.BIDDING, winnerPlatform = winner,
+                    admobAvailable = true, topOnAvailable = true,
+                    admobValue = if (winner == AdPlatform.ADMOB) 0.0 else null,
+                    topOnValue = if (winner == AdPlatform.TOPON) 0.0 else null,
+                    winningValue = 0.0, currency = "USD",
+                )
+                val parameters = bid.analyticsParameters()
+                val knownKey = if (winner == AdPlatform.ADMOB) "admob_value" else "topon_value"
+                val unknownKey = if (winner == AdPlatform.ADMOB) "topon_value" else "admob_value"
+                assertEquals(0.0, parameters[knownKey])
+                assertTrue(parameters[knownKey] is Double)
+                assertFalse(parameters.containsKey(unknownKey))
+                assertEquals(0.0, parameters["winning_value"])
+                assertFalse(bid.copy(winnerPlatform = null).analyticsParameters().containsKey("winning_value"))
+            }
         }
     }
 

@@ -125,11 +125,11 @@ data class AdEvent(
                 val topOnPrice = topOnValue?.takeIf { it.isFinite() && it >= 0 }
                 properties["admob_price_available"] = admobPrice != null
                 properties["topon_price_available"] = topOnPrice != null
-                properties["admob_value"] = admobPrice?.roundUsdForAnalytics() ?: "unknow"
-                properties["topon_value"] = topOnPrice?.roundUsdForAnalytics() ?: "unknow"
-                properties["winning_value"] = winningValue?.takeIf {
+                admobPrice?.let { properties["admob_value"] = it.roundUsdForAnalytics() }
+                topOnPrice?.let { properties["topon_value"] = it.roundUsdForAnalytics() }
+                winningValue?.takeIf {
                     winnerPlatform != null && it.isFinite() && it >= 0
-                }?.roundUsdForAnalytics() ?: "unknow"
+                }?.let { properties["winning_value"] = it.roundUsdForAnalytics() }
                 properties["currency"] = "USD"
                 admobAdUnitId?.takeIf { it.isNotBlank() }?.let { properties["admob_ad_unit_id"] = it }
                 topOnAdUnitId?.takeIf { it.isNotBlank() }?.let { properties["topon_ad_unit_id"] = it }

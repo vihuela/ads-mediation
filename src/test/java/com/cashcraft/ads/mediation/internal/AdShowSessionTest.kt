@@ -501,7 +501,7 @@ class AdShowSessionTest {
     }
 
     @Test
-    fun `bid result reports unknow for unavailable prices and preserves real zero`() {
+    fun `bid result omits unavailable prices and preserves real zero`() {
         val events = mutableListOf<AdEvent>()
         val session = session(events, mediationMode = AdMediationMode.BIDDING)
 
@@ -530,7 +530,7 @@ class AdShowSessionTest {
         assertEquals("topon", properties["ad_platform"])
         assertEquals("topon-unit", properties["ad_unit_id"])
         assertEquals(false, properties["admob_price_available"])
-        assertEquals("unknow", properties["admob_value"])
+        assertFalse(properties.containsKey("admob_value"))
         assertEquals(true, properties["topon_price_available"])
         assertEquals(0.0, properties["topon_value"])
         assertEquals(0.0, properties["winning_value"])

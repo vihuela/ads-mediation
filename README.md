@@ -648,7 +648,7 @@ TopOn 开屏 `onAdShow`、插屏 `onInterstitialAdShow`、激励 `onRewardedVide
 | `ad_platform` / `winner_platform` | 胜出平台；无胜者为 `unknown`，此时不传 `ad_unit_id` |
 | `admob_available` / `topon_available` | 比价时该平台是否有可用素材；不是加载请求是否发起 |
 | `admob_price_available` / `topon_price_available` | 是否有有效报价；未知、负数、非有限值不作为有效价格 |
-| `admob_value` / `topon_value` / `winning_value` | USD 每次展示报价，不是 eCPM；未知金额上报字符串 `"unknow"`，已知金额为数值，真实零价保留 |
+| `admob_value` / `topon_value` / `winning_value` | USD 每次展示报价，不是 eCPM；仅传合法数值，未知或无效金额省略字段，真实零价保留；无胜者时省略 `winning_value` |
 | `currency` | `USD` |
 | `admob_ad_unit_id` / `topon_ad_unit_id` | 可用时记录候选平台广告单元；配置了广告单元不代表已有素材 |
 

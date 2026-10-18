@@ -615,6 +615,8 @@ AdMob 开屏、插屏、激励的持续预加载也采用这一自动加载口�
 | `ad_reward` | 激励平台确认奖励 |
 | `ad_banner_refresh` | Banner 刷新诊断，业务参数为空，不上报 |
 
+`ad_bid_result` 的 `admob_value`、`topon_value`、`winning_value` 只传合法的 USD 数值；未知、负数或非有限金额时省略对应字段，无胜者时省略 `winning_value`，真实零价保留。使用现有价格可用性布尔字段和 `result` 判断未知报价与无候选，不用字符串或假零值填充金额。若统计后台已将这些属性建成字符串类型，需先核对并处理后台元数据；客户端修正不会自动改变既有字段类型。
+
 `ad_show` 业务参数同 `ad_click`：`ad_format`、`ad_platform`、`mediation_mode`、`position_id`、`ad_session_id`，以及可用时的 `ad_unit_id`、`ad_source`；Banner 另带 `refresh_index`。不含 `revenue_amount`、`currency`、`precision_type`。收益先到时可先收到 `ad_impression`，再收到 `ad_show`，两者各自去重；失败收口后的迟到曝光不发送 `ad_show`。TopOn 开屏在展示身份确认后、Native 按原有规则，在同一展示回调内先发 `ad_show` 再发 `ad_impression`，缺少金额仍发送二者，不能将未知收益补零。
 
 TopOn 开屏 `onAdShow`、插屏 `onInterstitialAdShow`、激励 `onRewardedVideoAdPlayStart` 必须先由现有 `revenueTracker.confirm(revenueIdentity(info, session.format), session)` 确认归属，再登记 showId/收益关联并处理曝光。无 token 但已有可靠 showId → 当前 session 关联仍兼容；无 token 且 showId 未知、缺失或空白时拒绝，不以 active 会话兜底。被拒绝的回调不认领 `ad_show` / `hasImpression` / 开屏业务 `ad_impression`，不触发展示频控或该回调的 `afterShow` 补量。
