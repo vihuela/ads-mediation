@@ -18,6 +18,12 @@ implementation("com.cashcraft.sdk:ads-mediation:1.0.13")
 
 ## 验证与发布记录
 
-本地按 README 的完整验证命令（`clean testDebugUnitTest lintDebug :r8-smoke-app:assembleRelease publishToMavenLocal`）执行，全部通过：JVM 单测 646 个用例无失败，其中新增 3 个用例覆盖默认保持开启、直连关闭、Bidding 关闭；临时去掉 `AdMobProvider` 里的调用或 Bidding 的映射后，对应用例会失败。R8 Release 构建通过，本地产物坐标为 `com.cashcraft.sdk:ads-mediation:1.0.13`，其中 `AdsConfig` 含新字段。发布结果、发布任务及远程回读记录见后续提交补充。
+本地按 README 的完整验证命令（`clean testDebugUnitTest lintDebug :r8-smoke-app:assembleRelease publishToMavenLocal`）执行，全部通过：JVM 单测 646 个用例无失败，其中新增 3 个用例覆盖默认保持开启、直连关闭、Bidding 关闭；临时去掉 `AdMobProvider` 里的调用或 Bidding 的映射后，对应用例会失败。R8 Release 构建通过，本地产物坐标为 `com.cashcraft.sdk:ads-mediation:1.0.13`，其中 `AdsConfig` 含新字段。
 
-未做设备实机验证：浮层在真机上是否消失，需宿主升级后确认；未新增设备实网广告、点击、收益后台入库或素材恢复验收。
+已于 2026-10-18 19:05 启动、19:14 完成（台北时间）正常发布，[发布任务](https://github.com/vihuela/ads-mediation/actions/runs/39121823508)成功，发布提交为 `9472286`；远程 1.0.13 可用。
+
+发布后已使用现有读取凭据回读元数据、POM、Gradle Module Metadata、AAR 和源码包：`maven-metadata.xml` 的 latest 为 1.0.13；新坐标正确；58 个 Kotlin 源码文件与发布提交完全一致（源码包另含构建生成的 `BuildConfig.java`）；AAR 的 `AdsConfig` 含 `getNativeValidatorDisabled()`。远程 AAR SHA-256：`b1868023935642857cf8efe617837aaae2816196acdaa4d3d3e0e02b39babadd`。
+
+宿主 HealthTracker（Samsung SM-S721U1，Android 15）升级到远程 1.0.13 并设置 `nativeValidatorDisabled = true` 后覆盖安装验证：New Record 页（standard 布局）截图确认广告正常渲染且没有浮层；Alarm Management 页（card7 布局）的广告加载后也没有验证器请求。新包安装后 GMA 记录的 516 次网络请求中验证器请求为 0 次，旧版每次加载 card7、standard 布局后都会请求一次。
+
+未新增设备实网广告、点击、收益后台入库或素材恢复验收。
