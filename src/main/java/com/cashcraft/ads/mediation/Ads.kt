@@ -955,7 +955,8 @@ object Ads {
                 onLoadingChanged = onLoadingChanged,
                 preferCachedImmediately = scene == AdFormat.INTERSTITIAL,
                 policy = policy,
-                excludeWaitingTime = { initializationStage == InitializationStage.WAITING_FOR_UMP },
+                // Open ads share one deadline with UMP; consent still gates loading and showing.
+                excludeWaitingTime = { scene != AdFormat.APP_OPEN && initializationStage == InitializationStage.WAITING_FOR_UMP },
             )
             waiting.attempt.telemetryFormats = sceneFormats(scene, fallback = true)
             controller = waiting
