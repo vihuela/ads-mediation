@@ -543,6 +543,104 @@ class TopOnRevenueIsolationTest {
         }
     }
 
+    @Test fun `bidding lambda keeps late revenue and serialized events on their original full screen sessions`() {
+        formats.forEach { format -> isolated(biddingWithLambda = true) {
+            val (a, tokenA) = start(format, "A")
+            show(a, TestTopOnAdInfo("A-id", "A-network", token = tokenA))
+            close(format)
+            val (b, tokenB) = start(format, "B")
+            val beforeLateRevenue = events.size
+            paid(format, TestTopOnAdInfo(null, "A-network", token = tokenA))
+            paid(format, TestTopOnAdInfo("A-id", "A-network", token = tokenA))
+            paid(format, TestTopOnAdInfo("A-id", "A-network"))
+            assertEquals(if (format == AdFormat.APP_OPEN) emptyList() else listOf(AdEventName.IMPRESSION),
+                events.drop(beforeLateRevenue).map { it.name })
+            assertFalse(b.hasImpression)
+            assertFalse(isPaid(b))
+            assertEquals(listOf("A"), revenues.map { it.sessionId })
+
+            val bInfo = TestTopOnAdInfo("B-id", "B-network", amount = 0.5, token = tokenB)
+            repeat(2) { show(b, bInfo) }
+            assertEquals(1, revenues.size)
+            assertFalse(isPaid(b))
+            assertEquals(if (format == AdFormat.APP_OPEN) 1 else 0,
+                events.count { it.sessionId == "B" && it.name == AdEventName.IMPRESSION })
+            repeat(2) { paid(format, bInfo) }
+            paid(format, TestTopOnAdInfo("B-id", "B-network", amount = 0.5))
+            assertEquals(listOf("A", "B"), revenues.map { it.sessionId })
+            assertEquals(2, revenues.map { it.eventId }.distinct().size)
+            assertTrue(isPaid(a))
+            assertTrue(isPaid(b))
+            assertTrue(unknown.isEmpty())
+
+            for ((id, amount) in listOf("A" to 0.25, "B" to 0.5)) {
+                val displayEvents = events.filter { it.sessionId == id &&
+                    it.name in listOf(AdEventName.SHOW, AdEventName.IMPRESSION) }
+                assertEquals(listOf(AdEventName.SHOW, AdEventName.IMPRESSION), displayEvents.map { it.name })
+                val identity = mapOf<String, Any>("ad_format" to format.analyticsValue,
+                    "ad_platform" to "topon", "mediation_mode" to "bidding",
+                    "position_id" to "position-$id", "ad_session_id" to id,
+                    "ad_unit_id" to "unit", "ad_source" to "$id-network")
+                assertEquals(identity, displayEvents[0].analyticsParameters())
+                assertEquals(identity + mapOf("revenue_amount" to amount, "currency" to "USD",
+                    "precision_type" to "publisher_defined"), displayEvents[1].analyticsParameters())
+                val payload = revenues.single { it.sessionId == id }
+                assertEquals(AdMediationMode.BIDDING, payload.mediationMode)
+                assertEquals(AdPlatform.TOPON, payload.platform)
+                assertEquals(format, payload.format)
+                assertEquals("position-$id", payload.position)
+                assertEquals("unit", payload.placementId)
+                assertEquals((amount * 1_000_000).toLong(), payload.valueMicros)
+                assertEquals("USD", payload.currencyCode)
+            }
+        } }
+    }
+
+    @Test fun `bidding lambda ignores unknown and conflicting callbacks without consuming the next session`() {
+        formats.forEach { format -> isolated(biddingWithLambda = true) {
+            val (a, tokenA) = start(format, "A")
+            show(a, TestTopOnAdInfo("A-id", "A-network", token = tokenA))
+            close(format)
+            val (b, tokenB) = start(format, "B")
+            events.clear()
+            val orphan = TestTopOnAdInfo("B-id", "unknown-network")
+            val conflicting = TestTopOnAdInfo("A-id", "conflicting-network", token = tokenB)
+            show(b, TestTopOnAdInfo("A-id", "A-network", token = tokenA))
+            show(b, orphan)
+            show(b, conflicting)
+            repeat(2) {
+                paid(format, TestTopOnAdInfo(null, "unknown-network"))
+                paid(format, orphan)
+                paid(format, conflicting)
+            }
+            advanceTimeout()
+            assertTrue(events.isEmpty())
+            assertTrue(revenues.isEmpty())
+            assertTrue(unknown.isEmpty())
+            assertFalse(isPaid(a))
+            assertFalse(b.hasImpression)
+            assertFalse(b.hasTerminalEvent)
+            assertFalse(isPaid(b))
+
+            val bInfo = TestTopOnAdInfo("B-id", "B-network", amount = 0.5, token = tokenB)
+            show(b, bInfo)
+            paid(format, bInfo)
+            paid(format, TestTopOnAdInfo("B-id", "B-network", amount = 0.5))
+            paid(format, conflicting)
+            advanceTimeout()
+            assertEquals(listOf("B"), revenues.map { it.sessionId })
+            assertEquals(500_000L, revenues.single().valueMicros)
+            assertEquals(listOf(AdEventName.SHOW, AdEventName.IMPRESSION), events.map { it.name })
+            assertTrue(events.all { it.sessionId == "B" && it.position == "position-B" &&
+                it.format == format && it.mediationMode == AdMediationMode.BIDDING && it.adSource == "B-network" })
+            assertTrue(isPaid(b))
+            assertFalse(isPaid(a))
+            paid(format, TestTopOnAdInfo(null, "A-network", token = tokenA))
+            assertEquals(listOf("B", "A"), revenues.map { it.sessionId })
+            assertTrue(unknown.isEmpty())
+        } }
+    }
+
     private val formats = listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL, AdFormat.REWARDED)
     private val events = mutableListOf<AdEvent>()
     private val revenues = mutableListOf<AdRevenuePayload>()
@@ -550,7 +648,7 @@ class TopOnRevenueIsolationTest {
     private val results = mutableListOf<Any>()
     private val attempts = mutableListOf<FullScreenShowAttempt>()
 
-    private fun isolated(block: () -> Unit) {
+    private fun isolated(biddingWithLambda: Boolean = false, block: () -> Unit) {
         val fields = listOf("events", "commonConfig", "config", "activeAppOpen", "activeInterstitial",
             "activeRewarded", "revenueTracker", "state", "application", "appOpenAd", "splashContainer").associateWith { name ->
             TopOnAds::class.java.getDeclaredField(name).apply { isAccessible = true }
@@ -573,13 +671,16 @@ class TopOnRevenueIsolationTest {
             fields.getValue("revenueTracker").set(null, TopOnRevenueTracker())
             val provider = TopOnProviderConfig(TopOnIds("test-app", "test-key"))
             fields.getValue("config").set(null, provider)
-            fields.getValue("commonConfig").set(null, AdsConfig(provider,
-                revenueListener = object : AdRevenueListenerWithUnattributed {
-                    override fun onRevenuePaid(payload: AdRevenuePayload) { revenues += payload }
-                    override fun onUnattributedRevenuePaid(payload: UnattributedTopOnRevenuePayload) { unknown += payload }
-                }))
+            val commonConfig = if (biddingWithLambda) {
+                AdsConfig(BiddingProviderConfig(AdMobProviderConfig(AdMobIds.TEST), provider),
+                    revenueListener = AdRevenueListener(revenues::add))
+            } else AdsConfig(provider, revenueListener = object : AdRevenueListenerWithUnattributed {
+                override fun onRevenuePaid(payload: AdRevenuePayload) { revenues += payload }
+                override fun onUnattributedRevenuePaid(payload: UnattributedTopOnRevenuePayload) { unknown += payload }
+            })
+            fields.getValue("commonConfig").set(null, commonConfig)
             fields.getValue("events").set(null, AdEventDispatcher(RuntimeEnvironment.getApplication(),
-                AdPlatform.TOPON, AdMediationMode.TOPON, AdEventListener(events::add), false, "RevenueTest"))
+                AdPlatform.TOPON, commonConfig.provider.mediationMode, AdEventListener(events::add), false, "RevenueTest"))
             block()
         } finally {
             attempts.forEach { it.complete() }; attempts.clear()
@@ -594,7 +695,8 @@ class TopOnRevenueIsolationTest {
     }
 
     private fun start(format: AdFormat, id: String): Pair<AdShowSession, String> {
-        val session = AdShowSession(AdEventListener(events::add), AdPlatform.TOPON, AdMediationMode.TOPON,
+        val commonConfig = ReflectionHelpers.getStaticField<AdsConfig>(TopOnAds::class.java, "commonConfig")
+        val session = AdShowSession(AdEventListener(events::add), AdPlatform.TOPON, commonConfig.provider.mediationMode,
             format, "position-$id", "unit", id, 1)
         attempts += session.attempt
         assertTrue(session.admit())

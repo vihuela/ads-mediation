@@ -35,15 +35,20 @@ android {
     }
 
     providers.gradleProperty("topOnLiveTest").orNull?.let { method ->
-        require(method in listOf(
+        val testClass = when (method) {
             "testRealLoadsAndSharedNativeRefill",
             "testRealFailuresRespectCooldownAndRetryBudget",
             "testRealSharedNativeTakeRefillAndRender",
-        )) { "topOnLiveTest must name exactly one TopOnLiveDeviceTest method" }
+            "testRealTemplateNativeTakeRefillAndRender" -> "TopOnLiveDeviceTest"
+            "testAppOpenIdentityAndLegacyRevenue",
+            "testInterstitialIdentityAndLegacyRevenue",
+            "testRewardedIdentityAndLegacyRevenue" -> "TopOnFullscreenIdentityDeviceTest"
+            else -> error("topOnLiveTest must name exactly one supported TopOn live test method")
+        }
         // TopOn cannot be reset between methods; each invocation must start a fresh process.
         sourceSets.getByName("androidTest").java.srcDir("src/topOnLiveTest/java")
         defaultConfig.testInstrumentationRunnerArguments["class"] =
-            "com.cashcraft.ads.mediation.TopOnLiveDeviceTest#$method"
+            "com.cashcraft.ads.mediation.$testClass#$method"
     }
 
     buildFeatures {

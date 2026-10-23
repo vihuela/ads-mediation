@@ -22,6 +22,11 @@ internal class UmpConsentManager(
     private val logger = AdsModuleLogger(loggingEnabled, logTag)
     private val requestStarted = AtomicBoolean(false)
     private val gateCompleted = AtomicBoolean(false)
+    // 请求发出后即按上次会话的授权结果放行；本次请求的结果不再用于否决已启动的提供方。
+    private var earlyAdsAllowed = false
+    // 表单显示期间开屏不计时；UMP 不回调"已显示"，表单加载耗时一并排除。
+    var formShowing = false
+        private set
 
     private var attempt = 0L
     var failure: ConsentInitializationFailure? = null
@@ -32,6 +37,8 @@ internal class UmpConsentManager(
         if (failure?.retryable != true) return false
         attempt++
         failure = null
+        earlyAdsAllowed = false
+        formShowing = false
         requestStarted.set(false)
         gateCompleted.set(false)
         return true
@@ -55,6 +62,7 @@ internal class UmpConsentManager(
     /** Refreshes consent before provider initialization; only a failed transient gate may be retried. */
     fun gatherConsent(
         activity: Activity,
+        onConsentUpdated: () -> Unit,
         onAdsAllowed: () -> Unit,
         onAdsUnavailable: (String) -> Unit,
     ) {
@@ -76,9 +84,13 @@ internal class UmpConsentManager(
             {
                 if (token != attempt || gateCompleted.get()) return@requestConsentInfoUpdate
                 logger.consent("request_succeeded", snapshot)
+                onConsentUpdated()
+                formShowing = consentInformation.consentStatus == ConsentInformation.ConsentStatus.REQUIRED
                 UserMessagingPlatform.loadAndShowConsentFormIfRequired(activity) { formError ->
+                    formShowing = false
                     if (token != attempt || gateCompleted.get()) return@loadAndShowConsentFormIfRequired
                     logger.consent("form_completed", snapshot, formError?.message)
+                    onConsentUpdated()
                     completeGate(
                         error = formError,
                         stage = "ump_form",
@@ -90,6 +102,7 @@ internal class UmpConsentManager(
             { requestError ->
                 if (token != attempt || gateCompleted.get()) return@requestConsentInfoUpdate
                 logger.consent("request_failed", snapshot, requestError.message)
+                onConsentUpdated()
                 completeGate(
                     error = requestError,
                     stage = "ump_request",
@@ -98,6 +111,13 @@ internal class UmpConsentManager(
                 )
             },
         )
+        // UMP 官方做法：requestConsentInfoUpdate 调用后 canRequestAds() 即反映上次会话的授权，
+        // 无需等待网络回调；表单与状态刷新仍照常进行，下游启动提供方是幂等的。
+        if (consentInformation.canRequestAds()) {
+            earlyAdsAllowed = true
+            logger.consent("early_can_request_ads", snapshot)
+            onAdsAllowed()
+        }
     }
 
     fun showPrivacyOptions(
@@ -124,6 +144,8 @@ internal class UmpConsentManager(
         if (consentInformation.canRequestAds()) {
             deliverAdsAllowed(onAdsAllowed)
         } else if (gateCompleted.compareAndSet(false, true)) {
+            // 授权变化已通知加载方；已启动的提供方不改判初始化失败。
+            if (earlyAdsAllowed) return
             failure = ConsentInitializationFailure(stage, error?.errorCode, error?.message ?: "consent_not_obtained")
             onAdsUnavailable(failure!!.message)
         }

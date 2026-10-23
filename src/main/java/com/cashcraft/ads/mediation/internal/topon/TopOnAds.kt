@@ -473,8 +473,7 @@ internal object TopOnAds {
         }
     }
 
-    private fun fullScreenLoadAllowed(): Boolean =
-        Ads.canLoadAds(AdPlatform.TOPON) && Ads.consentSnapshot.canRequestAds
+    private fun fullScreenLoadAllowed(): Boolean = Ads.canLoadAds(AdPlatform.TOPON)
 
     private fun canLoadFullScreenAds(): Boolean =
         state == TopOnState.READY && fullScreenLoadAllowed()

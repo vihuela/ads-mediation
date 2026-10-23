@@ -917,15 +917,28 @@ TopOn 实网测试位于 `src/topOnLiveTest/java`，默认设备测试不编译�
 不要提交该配置。
 
 使用 `topOnLiveTest` 显式选择一个方法；每条命令单独启动 instrumentation 进程，
-避免 TopOn 单例初始化状态串扰。运行全部实网场景时逐条执行，任一失败即停止：
+避免 TopOn 单例初始化状态串扰。支持以下七个方法，参数会自动选择对应测试类：
+
+| 方法 | 场景 |
+|---|---|
+| `testRealLoadsAndSharedNativeRefill` | 全屏加载与自渲染 Native 补量 |
+| `testRealFailuresRespectCooldownAndRetryBudget` | 失败冷却与重试预算 |
+| `testRealSharedNativeTakeRefillAndRender` | 自渲染 Native 领取、补量与渲染 |
+| `testRealTemplateNativeTakeRefillAndRender` | 模板 Native 领取、补量与渲染 |
+| `testAppOpenIdentityAndLegacyRevenue` | 开屏展示身份与普通收益监听器 |
+| `testInterstitialIdentityAndLegacyRevenue` | 插屏展示身份与普通收益监听器 |
+| `testRewardedIdentityAndLegacyRevenue` | 激励展示身份与普通收益监听器 |
+
+每次只运行一个方法，例如：
 
 ```shell
-for method in testRealLoadsAndSharedNativeRefill \
-  testRealFailuresRespectCooldownAndRetryBudget \
-  testRealSharedNativeTakeRefillAndRender; do
-  ./gradlew :connectedDebugAndroidTest -PtopOnLiveTest="$method" || break
-done
+./gradlew :connectedDebugAndroidTest -PtopOnLiveTest=testAppOpenIdentityAndLegacyRevenue
 ```
+
+运行前按目标场景准备广告位：`testRealLoadsAndSharedNativeRefill` 和
+`testRealSharedNativeTakeRefillAndRender` 需要自渲染 Native；
+`testRealTemplateNativeTakeRefillAndRender` 需要已确认比例为 2:1 的模板 Native。
+两类用例须分别配置私有 `nativePlacement` 后单独运行对应命令，参数不会强制后台返回指定类型。
 
 此入口仅接受上述单个方法名；不要额外覆盖 instrumentation 的 `class` 参数。
 

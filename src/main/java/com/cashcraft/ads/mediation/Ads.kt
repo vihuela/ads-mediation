@@ -140,7 +140,8 @@ object Ads {
         (attempt.eventSession ?: facadeSession(format, position, attempt = attempt))?.admit() == true
 
     internal fun canLoadAds(platform: AdPlatform): Boolean =
-        isPlatformEnabled(platform) && policyChecker?.checkLoad() !is AdPolicyCheckResult.Blocked
+        (!::umpConsentManager.isInitialized || consentSnapshot.canRequestAds) &&
+            isPlatformEnabled(platform) && policyChecker?.checkLoad() !is AdPolicyCheckResult.Blocked
 
     internal fun addPolicyListener(listener: () -> Unit): () -> Unit {
         policyListeners += listener
@@ -156,7 +157,6 @@ object Ads {
         policyUpdatePosted = true
         mainHandler.post {
             policyUpdatePosted = false
-            AdMobAds.onPolicyChanged()
             notifyNativeReadiness()
             policyListeners.forEach { runCatching(it) }
             FullScreenLoadSignals.changed()
@@ -455,6 +455,8 @@ object Ads {
         val token = initializationAttempt
         umpConsentManager.gatherConsent(
             activity = activity,
+            // UMP 隔离过期请求；提供方重试不能屏蔽仍在途的授权更新。
+            onConsentUpdated = ::notifyNativeReadiness,
             onAdsAllowed = { if (token == initializationAttempt) startProviderInitialization() },
             onAdsUnavailable = { reason ->
                 if (token == initializationAttempt) {
@@ -955,7 +957,7 @@ object Ads {
                 onLoadingChanged = onLoadingChanged,
                 preferCachedImmediately = scene == AdFormat.INTERSTITIAL,
                 policy = policy,
-                excludeWaitingTime = { initializationStage == InitializationStage.WAITING_FOR_UMP },
+                excludeWaitingTime = { umpWaitExcluded(scene) },
             )
             waiting.attempt.telemetryFormats = sceneFormats(scene, fallback = true)
             controller = waiting
@@ -1177,7 +1179,7 @@ object Ads {
             preferCachedImmediately = format != AdFormat.APP_OPEN,
             policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true,
                 userInitiated = format == AdFormat.REWARDED, sceneType = sceneType)),
-            excludeWaitingTime = { initializationStage == InitializationStage.WAITING_FOR_UMP },
+            excludeWaitingTime = { umpWaitExcluded(format) },
         )
         onMain {
             admobFailureVersion = AdMobAds.loadFailureVersion(format)
@@ -1339,6 +1341,11 @@ object Ads {
         return session.sessionId.takeIf(String::isNotEmpty)
     }
 
+    // 开屏只排除同意表单显示时间，UMP 网络等待计入超时；其他格式排除整个 UMP 阶段。
+    private fun umpWaitExcluded(format: AdFormat): Boolean =
+        if (format == AdFormat.APP_OPEN) ::umpConsentManager.isInitialized && umpConsentManager.formShowing
+        else initializationStage == InitializationStage.WAITING_FOR_UMP
+
     /** Current global UMP state, independent of the selected mediation provider. */
     val consentSnapshot: AdConsentSnapshot
         get() = if (::umpConsentManager.isInitialized) umpConsentManager.snapshot else AdConsentSnapshot.UNKNOWN
@@ -1414,6 +1421,7 @@ object Ads {
 
     internal fun notifyNativeReadiness() {
         // Keep provider failures isolated from other readiness listeners and host callbacks.
+        runCatching { AdMobAds.onPolicyChanged() }
         runCatching { TopOnAds.onPolicyChanged() }
         if (!consentSnapshot.canRequestAds) {
             com.cashcraft.ads.mediation.internal.nativeads.NativeAdCache.consentRevoked()

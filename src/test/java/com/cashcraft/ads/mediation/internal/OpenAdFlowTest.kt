@@ -1,14 +1,27 @@
 package com.cashcraft.ads.mediation.internal
 
+import android.app.Activity
+import android.app.Application
+import android.os.Looper
 import com.cashcraft.ads.mediation.*
+import java.time.Duration
+import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.Before
+import org.junit.runner.RunWith
+import org.robolectric.Robolectric
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
+import org.robolectric.annotation.Config
+import org.robolectric.util.ReflectionHelpers
 
 /** Exercises the shared scene auction + waiting controller with a deterministic clock. */
 class OpenAdFlowTest {
     private val tasks = mutableListOf<Task>()
-    private fun task() = Task().also(tasks::add)
+    private fun task(timeout: Long = 500) = Task(timeout = timeout).also(tasks::add)
     private fun interTask() = Task(listOf(AdFormat.INTERSTITIAL)).also(tasks::add)
     @After fun cleanup() { tasks.forEach { it.close() } }
 
@@ -84,6 +97,85 @@ class OpenAdFlowTest {
         assertEquals(AdPlatform.ADMOB, t.winner!!.bid.selection!!.winner)
         assertEquals(0, t.nativeRequests)
         t.dismiss()
+    }
+
+    @Test fun `pending privacy consumes the open budget without loading showing or late revival`() {
+        val t = task(timeout = 15_000)
+        t.precondition = "sdk_initializing"
+        t.nativeReady = true
+        repeat(4) { t.ready(it, .02) }
+        t.start()
+        t.now = 14_999
+        t.tick()
+        assertTrue(t.results.isEmpty())
+        assertEquals(0, t.loadRequests)
+        assertEquals(0, t.shows)
+        t.now = 15_000
+        t.tick()
+        assertEquals(15_000L, t.controller.elapsedMillis())
+        assertEquals(listOf(AdShowResult.Failed("wait_timeout")), t.results)
+        assertEquals(0, t.loadRequests)
+        assertEquals(0, t.shows)
+        assertEquals(0, t.nativeRequests)
+        assertNull(t.scheduled)
+
+        t.precondition = null
+        t.now = 22_000
+        repeat(4) { t.loaded(it, .03) }
+        t.controller.inventoryChanged()
+        t.controller.resume()
+        t.controller.start()
+        t.tick()
+        assertEquals(listOf(AdShowResult.Failed("wait_timeout")), t.results)
+        assertEquals(0, t.loadRequests)
+        assertEquals(0, t.shows)
+        assertEquals(0, t.nativeRequests)
+        assertNull(t.scheduled)
+    }
+
+    @Test fun `privacy granted within open budget leaves only the remaining auction time`() {
+        val t = task(timeout = 15_000)
+        t.precondition = "sdk_initializing"
+        t.start()
+        t.now = 7_000
+        t.precondition = null
+        t.loaded(0, .02)
+        assertEquals(1, t.loadRequests)
+        assertEquals(0, t.shows)
+        t.now = 14_999
+        t.tick()
+        assertTrue(t.results.isEmpty())
+        assertEquals(0, t.shows)
+        t.now = 15_000
+        t.tick()
+        assertEquals(15_000L, t.controller.elapsedMillis())
+        assertEquals(1, t.shows)
+        assertEquals(AdFormat.APP_OPEN, t.winner!!.format)
+        assertEquals(0, t.nativeRequests)
+        t.dismiss()
+    }
+
+    @Test fun `pending privacy counts foreground time but preserves background pause semantics`() {
+        val t = task(timeout = 15_000)
+        t.precondition = "sdk_initializing"
+        t.start()
+        t.now = 2_000
+        t.controller.pause()
+        t.now = 22_000
+        t.controller.inventoryChanged()
+        assertNull(t.scheduled)
+        assertEquals(2_000L, t.controller.elapsedMillis())
+        t.controller.resume()
+        t.now = 34_999
+        t.tick()
+        assertTrue(t.results.isEmpty())
+        t.now = 35_000
+        t.tick()
+        assertEquals(15_000L, t.controller.elapsedMillis())
+        assertEquals(listOf(AdShowResult.Failed("wait_timeout")), t.results)
+        assertEquals(0, t.loadRequests)
+        assertEquals(0, t.shows)
+        assertEquals(0, t.nativeRequests)
     }
 
     @Test fun `no successes uses native immediately after all fail or at timeout`() {
@@ -297,7 +389,10 @@ class OpenAdFlowTest {
         }
     }
 
-    private class Task(formats: List<AdFormat> = listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL)) {
+    private class Task(
+        formats: List<AdFormat> = listOf(AdFormat.APP_OPEN, AdFormat.INTERSTITIAL),
+        private val timeout: Long = 500,
+    ) {
         val keys = formats.flatMap { f -> AdPlatform.entries.map { f to it } }
         val inventory = MutableList(keys.size) { FullScreenAdAuction.Inventory(false, false) }
         val prices = MutableList<Double?>(keys.size) { null }
@@ -309,6 +404,7 @@ class OpenAdFlowTest {
         var precondition: String? = null
         var nativeReady = false
         var nativeRequests = 0
+        var loadRequests = 0
         var shows = 0
         var deferHandoff = false
         var scheduled: Runnable? = null
@@ -322,10 +418,10 @@ class OpenAdFlowTest {
         )
         private val listener: () -> Unit = { changed() }
         val controller = DisplayOpportunityController(
-            startedAtMillis = 0, timeoutMillis = 500, nowMillis = { now },
+            startedAtMillis = 0, timeoutMillis = timeout, nowMillis = { now },
             schedule = { r, _ -> scheduled = r }, unschedule = { scheduled = null },
             precondition = { precondition }, sceneValid = { sceneValid }, hostFailure = { hostFailure },
-            loadSnapshot = { snapshot() }, ensureLoaded = {},
+            loadSnapshot = { snapshot() }, ensureLoaded = { loadRequests++ },
             show = { attempt, result ->
                 FullScreenLoadSignals.remove(listener)
                 winner = auction.select()
@@ -340,7 +436,7 @@ class OpenAdFlowTest {
             onResult = { results += it.showResult },
             showWhenEmpty = true, preferAvailableAfterResume = false, trace = logs::add,
         )
-        private fun snapshot(): DisplayOpportunityController.LoadSnapshot = auction.snapshot(controller.elapsedMillis() < 500)
+        private fun snapshot(): DisplayOpportunityController.LoadSnapshot = auction.snapshot(controller.elapsedMillis() < timeout)
         private fun changed() { snapshot(); controller.inventoryChanged() }
         fun start() { auction.snapshot(true); FullScreenLoadSignals.add(listener); controller.start() }
         fun ready(index: Int, price: Double?) { inventory[index] = FullScreenAdAuction.Inventory(true, true); prices[index] = price }
@@ -355,5 +451,101 @@ class OpenAdFlowTest {
         fun dismiss() { controller.attempt.complete(); callback?.invoke(AdRewardResult(false, AdShowResult.Dismissed)) }
         fun failShow() { controller.attempt.complete(); callback?.invoke(AdRewardResult(false, AdShowResult.Failed("show_failed"))) }
         fun close() { FullScreenLoadSignals.remove(listener); controller.cancel(); controller.attempt.complete() }
+    }
+}
+
+/** Verifies the public entries bind different UMP timing policies to the shared controller. */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [33], manifest = Config.NONE, shadows = [ShadowMMKV::class])
+class OpenAdConsentBudgetTest {
+    private val fields = listOf("application", "config", "umpConsentManager", "initializationStage", "policyChecker", "policyUpdatePosted")
+        .associateWith { ReflectionHelpers.getStaticField<Any?>(Ads::class.java, it) }
+    private val providerStarted = ReflectionHelpers.getStaticField<AtomicBoolean>(Ads::class.java, "providerInitializationStarted")
+    private val wasStarted = providerStarted.get()
+    private val host = Robolectric.buildActivity(Activity::class.java)
+    private val tasks = mutableListOf<AdTask>()
+
+    @Before fun prepare() {
+        resetInstallation()
+        val app = RuntimeEnvironment.getApplication()
+        ReflectionHelpers.setStaticField(Ads::class.java, "application", app)
+        ReflectionHelpers.setStaticField(Ads::class.java, "config", AdsConfig(
+            AdMobProviderConfig(AdMobIds.TEST), autoShowAppOpen = false,
+            openTimeoutMillis = { 15_000 }, interTimeoutMillis = { 15_000 },
+        ))
+        ShadowMMKV.reset()
+        ReflectionHelpers.setStaticField(Ads::class.java, "policyChecker", AdPolicyChecker(AdUsageStore(app, 0)))
+        ReflectionHelpers.setStaticField(Ads::class.java, "policyUpdatePosted", true)
+        ReflectionHelpers.setStaticField(Ads::class.java, "umpConsentManager",
+            UmpConsentManager(app, UmpConsentConfig(enabled = true), false, "OpenConsentBudgetTest"))
+        stage("WAITING_FOR_UMP")
+        providerStarted.set(false)
+        AdLifecycleMonitor.install(app)
+        host.setup().visible().windowFocusChanged(true)
+    }
+
+    @After fun restore() {
+        tasks.forEach(AdTask::cancel)
+        host.pause().stop().destroy()
+        resetInstallation()
+        fields.forEach { (key, value) -> ReflectionHelpers.setStaticField(Ads::class.java, key, value) }
+        providerStarted.set(wasStarted)
+    }
+
+    @Test fun `public open expires during UMP while public inter preserves UMP exclusion and consent gate`() {
+        val open = mutableListOf<AdShowResult>()
+        tasks += Ads.showOpen("cold", onResult = open::add)
+        advance(14_999)
+        assertTrue(open.isEmpty())
+        advance(1)
+        assertEquals(listOf(AdShowResult.Failed("wait_timeout")), open)
+        assertFalse(providerStarted.get())
+        assertFalse(Ads.isFullScreenAdShowing)
+        assertEquals("WAITING_FOR_UMP", ReflectionHelpers.getStaticField<Any>(Ads::class.java, "initializationStage").toString())
+
+        val inter = mutableListOf<AdShowResult>()
+        tasks += Ads.showInter("save", onResult = inter::add)
+        advance(30_000)
+        assertTrue(inter.isEmpty())
+        assertFalse(providerStarted.get())
+        assertFalse(Ads.isFullScreenAdShowing)
+        // Finishing UMP without permission must reject the remaining interstitial opportunity.
+        stage("COMPLETE")
+        FullScreenLoadSignals.changed()
+        advance(100)
+        assertEquals(listOf(AdShowResult.Failed("consent_not_obtained")), inter)
+        assertEquals(listOf(AdShowResult.Failed("wait_timeout")), open)
+        assertFalse(providerStarted.get())
+    }
+
+    @Test fun `public open excludes only consent form time from deadline`() {
+        val ump = ReflectionHelpers.getStaticField<UmpConsentManager>(Ads::class.java, "umpConsentManager")
+        val open = mutableListOf<AdShowResult>()
+        tasks += Ads.showOpen("cold", onResult = open::add)
+        advance(5_000)
+        ReflectionHelpers.setField(ump, "formShowing", true)
+        advance(30_000)
+        assertTrue(open.isEmpty())
+        ReflectionHelpers.setField(ump, "formShowing", false)
+        advance(9_999)
+        assertTrue(open.isEmpty())
+        advance(1)
+        assertEquals(listOf(AdShowResult.Failed("wait_timeout")), open)
+    }
+
+    private fun stage(name: String) {
+        val stage = fields.getValue("initializationStage")!!.javaClass.enumConstants!!
+            .single { (it as Enum<*>).name == name }
+        ReflectionHelpers.setStaticField(Ads::class.java, "initializationStage", stage)
+    }
+
+    private fun advance(millis: Long) = shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(millis))
+
+    private fun resetInstallation() {
+        val type = AdLifecycleMonitor::class.java
+        val app = ReflectionHelpers.getStaticField<Application?>(type, "installedApplication")
+        val callbacks = ReflectionHelpers.getStaticField<Application.ActivityLifecycleCallbacks>(type, "callbacks")
+        app?.unregisterActivityLifecycleCallbacks(callbacks)
+        ReflectionHelpers.setStaticField(type, "installedApplication", null)
     }
 }

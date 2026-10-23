@@ -41,8 +41,14 @@ import org.robolectric.util.ReflectionHelpers
 @Config(
     sdk = [33], manifest = Config.NONE,
     shadows = [ConsentPlatformShadow::class, InitializationMobileAdsShadow::class,
-        com.cashcraft.ads.mediation.internal.ShadowMMKV::class],
-    instrumentedPackages = ["com.google.android.libraries.ads.mobile.sdk.MobileAds\$Companion"],
+        com.cashcraft.ads.mediation.internal.ShadowMMKV::class,
+        PolicyAppOpenPreloaderShadow::class, PolicyInterstitialPreloaderShadow::class,
+        PolicyRewardedPreloaderShadow::class, ShadowBannerPreloader::class],
+    instrumentedPackages = ["com.google.android.libraries.ads.mobile.sdk.MobileAds\$Companion",
+        "com.google.android.libraries.ads.mobile.sdk.appopen.AppOpenAdPreloader\$Companion",
+        "com.google.android.libraries.ads.mobile.sdk.interstitial.InterstitialAdPreloader\$Companion",
+        "com.google.android.libraries.ads.mobile.sdk.rewarded.RewardedAdPreloader\$Companion",
+        "com.google.android.libraries.ads.mobile.sdk.banner.BannerAdPreloader\$Companion"],
 )
 class AdsInitializationTest {
     private val initialStage = ReflectionHelpers.getStaticField<Any>(Ads::class.java, "initializationStage")
@@ -53,6 +59,8 @@ class AdsInitializationTest {
     fun clearPendingInitialization() {
         // Consent and GMA initialization are intercepted; no real advertising SDK starts.
         ConsentPlatformShadow.reset()
+        PolicyPreloaderCalls.clear()
+        ShadowBannerPreloader.calls.clear()
         InitializationMobileAdsShadow.calls = 0
         InitializationMobileAdsShadow.lastConfig = null
         InitializationMobileAdsShadow.error = null
@@ -529,6 +537,154 @@ class AdsInitializationTest {
     }
 
     @Test
+    fun `previous session consent starts providers right after the request and the form still runs`() {
+        val host = Robolectric.buildActivity(ConsentHost::class.java).setup()
+        host.get().registry.currentState = Lifecycle.State.RESUMED
+        try {
+            ConsentPlatformShadow.allowed = true
+            Ads.initialize(host.get(), recoveryConfig())
+            // 网络回调尚未返回，提供方已按上次授权启动。
+            assertEquals(1, ConsentPlatformShadow.requests.size)
+            assertEquals(0, ConsentPlatformShadow.forms)
+            settleProvider()
+            assertEquals(AdsState.READY, Ads.state)
+            assertEquals(1, InitializationMobileAdsShadow.calls)
+            ConsentPlatformShadow.successes.single().onConsentInfoUpdateSuccess()
+            assertEquals(1, ConsentPlatformShadow.forms)
+            assertEquals(1, InitializationMobileAdsShadow.calls)
+        } finally { host.pause().stop().destroy() }
+    }
+
+    @Test
+    fun `without previous consent providers wait for the request result`() {
+        val host = Robolectric.buildActivity(ConsentHost::class.java).setup()
+        host.get().registry.currentState = Lifecycle.State.RESUMED
+        try {
+            Ads.initialize(host.get(), recoveryConfig())
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(AdsState.INITIALIZING, Ads.state)
+            assertEquals(0, InitializationMobileAdsShadow.calls)
+        } finally { host.pause().stop().destroy() }
+    }
+
+    @Test
+    fun `request failure or denial after an early start stops preloading without failing initialization`() {
+        listOf(true, false).forEach { requestFails ->
+            clearPendingInitialization()
+            val host = Robolectric.buildActivity(ConsentHost::class.java).setup()
+            host.get().registry.currentState = Lifecycle.State.RESUMED
+            try {
+                ConsentPlatformShadow.allowed = true
+                Ads.initialize(host.get(), recoveryConfig().copy(provider = AdMobProviderConfig(AdMobIds.TEST)))
+                settleProvider()
+                assertEquals(AdsState.READY, Ads.state)
+                assertEquals(3, PolicyPreloaderCalls.active.size)
+                AdMobAds.preloadBanner(BannerRequest(AdPlatform.ADMOB, "banner-unit", "consent",
+                    BannerSize.Standard320x50), com.google.android.libraries.ads.mobile.sdk.banner.AdSize.BANNER, 2)
+                assertEquals(1, ShadowBannerPreloader.calls.count { it.startsWith("start:") })
+                ConsentPlatformShadow.allowed = false
+                if (requestFails) {
+                    ConsentPlatformShadow.failures.single()
+                        .onConsentInfoUpdateFailure(FormError(FormError.ErrorCode.INTERNET_ERROR, "offline"))
+                } else {
+                    ConsentPlatformShadow.successes.single().onConsentInfoUpdateSuccess()
+                }
+                shadowOf(Looper.getMainLooper()).idle()
+                assertEquals(AdsState.READY, Ads.state)
+                assertFalse(Ads.canRetryInitialization)
+                assertFalse(Ads.consentSnapshot.canRequestAds)
+                AdPlatform.entries.forEach { assertFalse(Ads.canLoadAds(it)) }
+                assertEquals(3, PolicyPreloaderCalls.destroys)
+                assertTrue(PolicyPreloaderCalls.active.isEmpty())
+                assertEquals(1, ShadowBannerPreloader.calls.count { it.startsWith("destroy:") })
+                AdMobAds.onPolicyChanged()
+                assertEquals(3, PolicyPreloaderCalls.starts)
+                assertEquals(1, InitializationMobileAdsShadow.calls)
+            } finally { host.pause().stop().destroy() }
+        }
+    }
+
+    @Test
+    fun `consent expiry stops pools before the form dismisses and a grant restarts them once`() {
+        val host = Robolectric.buildActivity(ConsentHost::class.java).setup()
+        host.get().registry.currentState = Lifecycle.State.RESUMED
+        try {
+            ConsentPlatformShadow.allowed = true
+            Ads.initialize(host.get(), recoveryConfig().copy(provider = AdMobProviderConfig(AdMobIds.TEST)))
+            settleProvider()
+            assertEquals(3, PolicyPreloaderCalls.starts)
+
+            ConsentPlatformShadow.allowed = false
+            ConsentPlatformShadow.deferForm = true
+            ConsentPlatformShadow.successes.single().onConsentInfoUpdateSuccess()
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(1, ConsentPlatformShadow.forms)
+            assertTrue(PolicyPreloaderCalls.active.isEmpty())
+            assertEquals(3, PolicyPreloaderCalls.destroys)
+
+            ConsentPlatformShadow.allowed = true
+            ConsentPlatformShadow.formDismissal!!.onConsentFormDismissed(null)
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(3, PolicyPreloaderCalls.active.size)
+            assertEquals(6, PolicyPreloaderCalls.starts)
+            assertEquals(AdsState.READY, Ads.state)
+            assertEquals(1, InitializationMobileAdsShadow.calls)
+        } finally { host.pause().stop().destroy() }
+    }
+
+    @Test
+    fun `in flight consent updates stop and restart pools after a provider retry`() {
+        val host = Robolectric.buildActivity(ConsentHost::class.java).setup()
+        host.get().registry.currentState = Lifecycle.State.RESUMED
+        try {
+            ConsentPlatformShadow.allowed = true
+            InitializationMobileAdsShadow.error = java.io.IOException("offline")
+            Ads.initialize(host.get(), recoveryConfig().copy(provider = AdMobProviderConfig(AdMobIds.TEST)))
+            settleProvider()
+            assertTrue(Ads.canRetryInitialization)
+            assertEquals(0, ConsentPlatformShadow.forms)
+
+            InitializationMobileAdsShadow.error = null
+            Ads.retryInitialization(host.get())
+            settleProvider()
+            assertEquals(AdsState.READY, Ads.state)
+            assertEquals(3, PolicyPreloaderCalls.active.size)
+            assertEquals(1, ConsentPlatformShadow.requests.size)
+
+            ConsentPlatformShadow.allowed = false
+            ConsentPlatformShadow.deferForm = true
+            ConsentPlatformShadow.successes.single().onConsentInfoUpdateSuccess()
+            shadowOf(Looper.getMainLooper()).idle()
+            assertFalse(Ads.consentSnapshot.canRequestAds)
+            assertEquals(1, ConsentPlatformShadow.forms)
+            assertTrue(PolicyPreloaderCalls.active.isEmpty())
+            assertEquals(3, PolicyPreloaderCalls.destroys)
+
+            ConsentPlatformShadow.allowed = true
+            ConsentPlatformShadow.formDismissal!!.onConsentFormDismissed(null)
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(3, PolicyPreloaderCalls.active.size)
+            assertEquals(6, PolicyPreloaderCalls.starts)
+            assertEquals(AdsState.READY, Ads.state)
+            assertEquals(2, InitializationMobileAdsShadow.calls)
+        } finally { host.pause().stop().destroy() }
+    }
+
+    @Test
+    fun `process without an Activity stays waiting for UMP even with previous consent`() {
+        // 后台拉活（HTService、WorkManager、FCM）只有 Application，没有 Activity：不得请求 UMP，也不得初始化平台。
+        ConsentPlatformShadow.allowed = true
+        initializePending()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertNull(AdLifecycleMonitor.currentActivity)
+        assertEquals(AdsState.INITIALIZING, Ads.state)
+        assertTrue(ConsentPlatformShadow.requests.isEmpty())
+        assertEquals(0, InitializationMobileAdsShadow.calls)
+        assertEquals(AdMobState.NOT_INITIALIZED, AdMobAds.state)
+        assertEquals(TopOnState.NOT_INITIALIZED, TopOnAds.state)
+    }
+
+    @Test
     fun `null retry waits for resumed host and cancelled persistent listener leaves observer intact`() {
         val host = Robolectric.buildActivity(ConsentHost::class.java).setup()
         host.get().registry.currentState = Lifecycle.State.RESUMED
@@ -835,11 +991,14 @@ class ConsentPlatformShadow {
         val failures = mutableListOf<ConsentInformation.OnConsentInfoUpdateFailureListener>()
         var allowed = false
         var formError: FormError? = null
+        var deferForm = false
+        var formDismissal: com.google.android.ump.ConsentForm.OnConsentFormDismissedListener? = null
         var forms = 0
         var resets = 0
         fun reset() {
             requests.clear(); successes.clear(); failures.clear()
             allowed = false; formError = null; forms = 0; resets = 0
+            deferForm = false; formDismissal = null
         }
 
         @JvmStatic
@@ -847,7 +1006,8 @@ class ConsentPlatformShadow {
         fun loadAndShowConsentFormIfRequired(activity: Activity,
             listener: com.google.android.ump.ConsentForm.OnConsentFormDismissedListener) {
             forms++
-            listener.onConsentFormDismissed(formError)
+            formDismissal = listener
+            if (!deferForm) listener.onConsentFormDismissed(formError)
         }
 
         @JvmStatic

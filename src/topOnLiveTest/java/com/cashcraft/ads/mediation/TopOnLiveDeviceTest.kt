@@ -49,8 +49,12 @@ class TopOnLiveDeviceTest : InstrumentationTestCase() {
         verifyRealFailuresRespectCooldownAndRetryBudget()
     }
 
-    fun testRealSharedNativeTakeRefillAndRender() {
-        evidenceName = "topon-live-native.jsonl"
+    fun testRealSharedNativeTakeRefillAndRender() = verifyNativeTakeRefillAndRender(expectTemplate = false)
+
+    fun testRealTemplateNativeTakeRefillAndRender() = verifyNativeTakeRefillAndRender(expectTemplate = true)
+
+    private fun verifyNativeTakeRefillAndRender(expectTemplate: Boolean) {
+        evidenceName = if (expectTemplate) "topon-live-native-template.jsonl" else "topon-live-native.jsonl"
         val ids = readIds(invalid = false).copy(
             appOpenPlacementId = "", interstitialPlacementId = "", rewardedPlacementId = "",
         )
@@ -68,7 +72,8 @@ class TopOnLiveDeviceTest : InstrumentationTestCase() {
                     if (stage == 0) {
                         width = host.resources.displayMetrics.widthPixels
                         request = ResolvedNativeRequest(AdPlatform.TOPON,
-                            checkNotNull(ids.nativePlacementId), "live-native-render-a")
+                            checkNotNull(ids.nativePlacementId), "live-native-render-a",
+                            topOnTemplateAspectRatio = if (expectTemplate) 2f else null)
                         val native = checkNotNull(request)
                         leases += NativeAdCache.acquireTopOnInventory(host, native, width)
                         val before = loads(AdFormat.NATIVE).size
@@ -87,12 +92,13 @@ class TopOnLiveDeviceTest : InstrumentationTestCase() {
                         consumed = NativeAdCache.takeTopOnInventory(native, width, callbacks)
                         val ad = checkNotNull(consumed) { "Ready Native inventory could not be consumed" }
                         assertEquals(AdPlatform.TOPON, ad.platform)
-                        assertFalse("Expected self-rendered Native", ad.isTemplate)
+                        assertEquals("Unexpected Native rendering mode", expectTemplate, ad.isTemplate)
                         assertTrue("Native SDK source metadata absent", !ad.adSource.isNullOrBlank())
-                        assertTrue("Native headline absent", !ad.assets.headline.isNullOrBlank())
+                        if (expectTemplate) assertEquals(NativeAssets(), ad.assets)
+                        else assertTrue("Native headline absent", !ad.assets.headline.isNullOrBlank())
                         assertTrue("Consumed Native invalid", ad.isValid)
                         assertEquals(fill.event.responseId, ad.responseId)
-                        val rendered = ad.render(host, createDefaultNativeLayout(host), width)
+                        val rendered = ad.render(host, if (expectTemplate) null else createDefaultNativeLayout(host), width)
                         host.setContentView(FrameLayout(host).apply {
                             addView(rendered, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -113,7 +119,7 @@ class TopOnLiveDeviceTest : InstrumentationTestCase() {
                 }
             }
             instrumentation.uiAutomation.takeScreenshot()?.let { bitmap ->
-                File(instrumentation.targetContext.filesDir, "topon-live-native.png").outputStream().use {
+                File(instrumentation.targetContext.filesDir, evidenceName.removeSuffix(".jsonl") + ".png").outputStream().use {
                     assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it))
                 }
                 bitmap.recycle()
