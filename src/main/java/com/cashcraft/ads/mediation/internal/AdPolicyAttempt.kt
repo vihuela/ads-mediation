@@ -58,7 +58,7 @@ internal class AdPolicyAttempt(val request: AdPolicyRequest) {
         if (hasImpression) return
         hasImpression = true
         Ads.policyChecker?.impression(id, request.sceneType)
-        if (completed && request.fullscreen) Ads.policyChecker?.fullscreenClosed()
+        if (completed && request.fullscreen && request.restartsFullscreenGap) Ads.policyChecker?.fullscreenClosed()
         Ads.onPolicyUsageChanged()
     }
 
@@ -74,7 +74,7 @@ internal class AdPolicyAttempt(val request: AdPolicyRequest) {
         if (completed) return
         completed = true
         Ads.policyChecker?.release(id)
-        if (hasImpression && request.fullscreen) Ads.policyChecker?.fullscreenClosed()
+        if (hasImpression && request.fullscreen && request.restartsFullscreenGap) Ads.policyChecker?.fullscreenClosed()
         blocked?.let { reason -> request.position?.let { Ads.notifyAdBlocked(AdBlockInfo(it, reason)) } }
         if (reserved || hasImpression) Ads.onPolicyUsageChanged()
     }

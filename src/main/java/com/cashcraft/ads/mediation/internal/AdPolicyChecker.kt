@@ -13,6 +13,8 @@ internal data class AdPolicyRequest(
     val fullscreen: Boolean = false,
     val userInitiated: Boolean = false,
     val sceneType: AdSceneType? = null,
+    /** False: this fullscreen's real close does not restart the shared fullscreen gap anchor. */
+    val restartsFullscreenGap: Boolean = true,
 )
 
 /** Own one checker for the Ads lifetime; reservation IDs must identify distinct impressions. */

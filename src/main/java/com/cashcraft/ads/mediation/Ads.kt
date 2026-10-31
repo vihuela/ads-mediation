@@ -763,7 +763,14 @@ object Ads {
      * keep their own policies. Configure timeout and Native layout once in [AdsConfig].
      */
     fun showOpen(position: String, onResult: (AdShowResult) -> Unit = {}): AdTask =
-        showScene(AdFormat.APP_OPEN, position, AdSceneType.OPEN, onResult)
+        showOpen(position, restartsFullscreenGap = true, onResult)
+
+    /**
+     * Same as [showOpen]; [restartsFullscreenGap] = false keeps this open ad's close from restarting the
+     * shared fullscreen gap, so later interstitials are not delayed by it. Open itself never waits on the gap.
+     */
+    fun showOpen(position: String, restartsFullscreenGap: Boolean, onResult: (AdShowResult) -> Unit = {}): AdTask =
+        showScene(AdFormat.APP_OPEN, position, AdSceneType.OPEN, onResult, restartsFullscreenGap = restartsFullscreenGap)
 
     /**
      * Wait for interstitial candidates, then use cached full-screen Native only if none is available.
@@ -793,6 +800,7 @@ object Ads {
         onResult: (AdShowResult) -> Unit,
         onLoadingChanged: ((Boolean) -> Unit)? = null,
         isSceneValid: () -> Boolean = { true },
+        restartsFullscreenGap: Boolean = true,
     ): AdTask {
         val startedAt = SystemClock.elapsedRealtime()
         var controller: DisplayOpportunityController? = null
@@ -809,7 +817,8 @@ object Ads {
             val trace: (String) -> Unit = { message ->
                 nativeLogger?.sceneTask(scene, task.id, position, SystemClock.elapsedRealtime() - startedAt, message)
             }
-            val policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true, sceneType = sceneType))
+            val policy = AdPolicyAttempt(AdPolicyRequest(position, fullscreen = true, sceneType = sceneType,
+                restartsFullscreenGap = restartsFullscreenGap))
             var finished = false
             fun finish(result: AdShowResult) {
                 if (finished) return
